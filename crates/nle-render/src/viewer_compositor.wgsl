@@ -1,0 +1,165 @@
+@group(0) @binding(0) var source_texture: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+struct ColorCorrection {
+    // temperature, tint, saturation, exposure
+    color: vec4<f32>,
+    // brightness, contrast, highlights, shadows
+    light: vec4<f32>,
+    // operation (0 = basic, 1 = vignette), amount, midpoint, feather
+    effect: vec4<f32>,
+    // Vignette center x, center y, padding, padding.
+    center: vec4<f32>,
+};
+struct ColorCorrectionStack {
+    corrections: array<ColorCorrection, 8>,
+    count: u32,
+    _padding_0: u32,
+    _padding_1: u32,
+    _padding_2: u32,
+};
+@group(0) @binding(2) var<uniform> color_stack: ColorCorrectionStack;
+struct CurveLutStack {
+    // Eight node-major, 256-entry component-then-master RGB lookup tables.
+    samples: array<vec4<f32>, 2048>,
+};
+@group(0) @binding(3) var<storage, read> curve_luts: CurveLutStack;
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) opacity: f32,
+};
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) opacity: f32,
+};
+
+struct MatteVertexInput {
+    @location(0) opacity: f32,
+    @location(1) color: vec3<f32>,
+};
+
+struct MatteVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) opacity: f32,
+    @location(1) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = vec4<f32>(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    output.opacity = input.opacity;
+    return output;
+}
+
+@vertex
+fn vs_blit(@builtin(vertex_index) index: u32) -> VertexOutput {
+    let positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, -1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, -1.0),
+    );
+    let uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+    );
+    var output: VertexOutput;
+    output.position = vec4<f32>(positions[index], 0.0, 1.0);
+    output.uv = uvs[index];
+    output.opacity = 1.0;
+    return output;
+}
+
+@vertex
+fn vs_matte(
+    @builtin(vertex_index) index: u32,
+    input: MatteVertexInput,
+) -> MatteVertexOutput {
+    let positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, -1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, -1.0),
+    );
+    var output: MatteVertexOutput;
+    output.position = vec4<f32>(positions[index], 0.0, 1.0);
+    output.opacity = input.opacity;
+    output.color = input.color;
+    return output;
+}
+
+fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
+    let clamped = clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(
+        12.92 * clamped,
+        1.055 * pow(clamped, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055),
+        clamped > vec3<f32>(0.0031308),
+    );
+}
+
+fn srgb_to_linear(encoded: vec3<f32>) -> vec3<f32> {
+    return select(
+        encoded / vec3<f32>(12.92),
+        pow((encoded + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4)),
+        encoded > vec3<f32>(0.04045),
+    );
+}
+
+fn apply_curve_lut(encoded: vec3<f32>, correction_index: u32) -> vec3<f32> {
+    // Export's preceding geq stage produces 8-bit RGB, then FFmpeg's curves filter performs a
+    // direct 256-entry LUT lookup. Rounding here preserves that boundary behavior in preview.
+    let levels = vec3<u32>(round(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0));
+    let base = correction_index * 256u;
+    return vec3<f32>(
+        curve_luts.samples[base + levels.x].x,
+        curve_luts.samples[base + levels.y].y,
+        curve_luts.samples[base + levels.z].z,
+    );
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let sample = textureSample(source_texture, source_sampler, input.uv);
+    var encoded = linear_to_srgb(sample.rgb);
+    for (var index = 0u; index < min(color_stack.count, 8u); index = index + 1u) {
+        let correction = color_stack.corrections[index];
+        if (correction.effect.x == 1.0) {
+            let dx = 2.0 * (input.uv.x - (0.5 + correction.center.x * 0.5));
+            let dy = 2.0 * (input.uv.y - (0.5 + correction.center.y * 0.5));
+            let radius = sqrt(dx * dx + dy * dy) / sqrt(2.0);
+            let outer = correction.effect.z + correction.effect.w * (1.0 - correction.effect.z);
+            let t = clamp(
+                (radius - correction.effect.z) / max(0.0001, outer - correction.effect.z),
+                0.0,
+                1.0,
+            );
+            let smooth_factor = t * t * (3.0 - 2.0 * t);
+            encoded *= 1.0 - correction.effect.y * smooth_factor;
+        } else {
+            let temperature = correction.color.x;
+            let tint = correction.color.y;
+            encoded += vec3<f32>(
+                0.10 * temperature + 0.05 * tint,
+                -0.05 * tint,
+                -0.10 * temperature + 0.05 * tint,
+            );
+            encoded *= exp2(vec3<f32>(correction.color.w));
+            var luma = dot(encoded, vec3<f32>(0.2126, 0.7152, 0.0722));
+            encoded = vec3<f32>(luma) + (encoded - vec3<f32>(luma)) * correction.color.z;
+            encoded = (encoded - vec3<f32>(0.5)) * correction.light.y
+                + vec3<f32>(0.5 + correction.light.x);
+            luma = dot(encoded, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let tonal = 0.25 * correction.light.z * luma * luma
+                + 0.25 * correction.light.w * (1.0 - luma) * (1.0 - luma);
+            encoded = clamp(encoded + vec3<f32>(tonal), vec3<f32>(0.0), vec3<f32>(1.0));
+            encoded = apply_curve_lut(encoded, index);
+        }
+    }
+    return vec4<f32>(srgb_to_linear(encoded), sample.a * input.opacity);
+}
+
+@fragment
+fn fs_matte(input: MatteVertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(input.color, input.opacity);
+}

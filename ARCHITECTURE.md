@@ -1,0 +1,261 @@
+# Maelstrom Foundation Architecture
+
+This file is the implementation contract for the Blick-class foundation. Performance is an
+architectural property: a perfect monitor is not allowed to make the timeline wait.
+
+## Sacred UI thread
+
+The UI thread performs only input sampling, `EditorState` mutation, immediate-mode layout,
+timeline primitive generation, GPU upload/submission, and presentation. Frame-loop functions are
+marked `HOT PATH — no IO` where appropriate.
+
+The UI thread must never:
+
+- call FFmpeg, decode, encode, scan media bytes, or perform project filesystem work;
+- wait on a lock held by a media worker;
+- allocate a widget or heap object per timeline clip;
+- clone media paths or large strings per frame;
+- walk every project clip to draw a small visible interval.
+
+The editor has two cooperating machines:
+
+1. The UI/timeline machine mutates authoritative timeline data and paints cheap bars.
+2. The media machine probes, decodes, analyzes, plays audio, saves, and exports on workers.
+
+They exchange bounded commands and results. A worker may lag or be cancelled; the UI may retain a
+stale frame or black monitor, but interaction continues.
+
+## Workspace ownership
+
+- `nle-timeline`: media-independent timeline source of truth, edit kernel, inverse-operation
+  history, sorted arrays, visibility cache, and banding. It does not depend on UI, GPU, or decode.
+- `nle-compositor`: immutable, fixed-capacity project-space composition requests and deterministic
+  crop, sizing, anchor, scale, rotation, position, flip, and opacity geometry. It depends only on
+  `nle-timeline`, so preview and future export lowering can share one transform contract.
+- `nle-ui-core`: immediate editor/hub state and GPU-neutral timeline primitives. The timeline is a
+  single custom canvas, not a widget tree.
+- `nle-render`: retained `wgpu` pipelines and reused instance buffers for solid and textured
+  rectangles.
+- `nle-decode`: sticky FFmpeg monitor sessions, latest-request coalescing, cancellation, preroll,
+  hardware preference with software fallback, and a bounded byte LRU.
+- `nle-waveform`: cancellable probe, waveform, thumbnail-strip, and duration analysis.
+- `nle-audio`: independent CPAL output, worker decoding, coalesced seek commands, bounded
+  per-track PCM lanes, sample-aligned mixing, shaped gain/fades, and live mixed-output meters.
+- `nle-project-io`: versioned portable documents, relative-path resolution, and atomic writes.
+- `nle-title`: deterministic CPU title layout and RGBA rasterization against the bundled Noto Sans
+  JP font. Preview and export consume the same bounded title plate and fade contract.
+- `nle-export`: snapshot-at-start background H.264/AAC export with cancellation and encoder
+  fallback.
+- `nle-app`: native window/event ownership, orchestration, worker result polling, and GPU upload.
+
+Dependency direction is inward toward data. In particular, `nle-timeline` must remain independent
+of FFmpeg, `wgpu`, and `egui`.
+
+## Timeline and editing
+
+Tracks own contiguous clips sorted by start time. Clips hold numeric media IDs rather than paths or
+frames. A derived structure-of-arrays cache stores starts, ends, IDs, and indices. Visibility uses
+binary search; zoomed-out output bands adjacent bars to a viewport-sized primitive count. Scratch
+vectors and GPU buffers retain capacity across frames.
+
+The editor media catalog is a compact slot array: media ID `n` occupies slot `n - 1`. New imports
+append IDs and foundation projects do not delete catalog entries. Restore canonicalizes harmlessly
+reordered JSON by ID and rejects sparse IDs transactionally before playback, analysis, thumbnails,
+or timeline labels can resolve the wrong path. A derived draw-slot array retains each media's
+waveform Arc, thumbnail atlas handle, offline/failure bits, and flag color. Worker results and flag
+edits invalidate that array; the visible-clip loop performs one array lookup rather than media
+`HashMap` lookups or a flag scan for every clip.
+
+The foundation edit kernel owns move, trim, razor, slip, roll, insert/overwrite, replace, delete,
+linked A/V selection, gain, fades, and mute. Successful edits bump generation once. Undo/redo stores
+capped batches of inverse clip/track operations (256 entries), not project snapshots. Persistent
+project snapshots are only for background save/export boundaries.
+
+History capture has a linear, allocation-free fast path when track and clip cardinality are
+unchanged. It compares stable clip IDs directly and records only changed records, including a
+single relocated clip; inserts, deletes, cross-track moves, and complex reorders fall back to the
+general structural diff. The release 50,000-clip gate requires history recording to remain below
+the same 2 ms interaction budget. The editor records against the live timeline after a gesture,
+avoiding a redundant full after-state clone while retaining the before snapshot required for undo.
+
+Timeline-bound Media Pool and operating-system file drops use non-ripple overwrite edits on V1/A1
+or A1: occupied sections become source-accurate outer tails and later clips do not move. The explicit
+Add action remains append-only. Placement emits background analysis only after the bar exists, and
+the complete overwrite is one undoable transaction.
+
+New and reset workspaces reserve 66 percent of the available editor height for the timeline,
+making it the dominant vertical work area while leaving a compact viewer above. The responsive
+default follows later window-size changes; the first splitter drag transfers ownership to an exact,
+durable user preference. Temporary viewport clamping never overwrites that preference. Pre-marker
+projects migrate the former exact 330, 520, 640, and 760 logical-pixel defaults while retaining
+non-default custom values. Panel splits remain draggable and durable.
+
+The first successful media placement replaces the empty project's legacy 4:12 time range with a
+bounded full-extent view, making thumbnails, waveforms, fades, and drag targets immediately usable.
+An unprobed source appears immediately with a 15-second placeholder. The project snapshot records
+which exact clip IDs still grant the probe ownership of that placeholder plus the worker-produced
+duration scalar; waveform and thumbnail data remain runtime caches. A probe may extend only those
+untouched IDs, stops at the next occupied section, and refits the first-placement view. Razor,
+trim, slip, replace, overwrite, or another source-timing edit relinquishes that ownership, so a
+late result cannot undo user work. The same capped undo transaction stores before/after ownership;
+undoing a cut, delete, overwrite, or placement restores the correct probe rights, and redo of a
+now-analyzed placement immediately reapplies the durable known duration. Legacy projects migrate
+the exact placeholder shape, while new
+snapshots distinguish a deliberately retained 15-second edit from unresolved analysis. Later
+placements and manual navigation preserve an explicitly chosen pan/zoom. The package gate records
+the post-probe production view and rejects both an unfitted view and failure to reconcile its
+deterministic 60-second source.
+
+Timeline positions remain integer microsecond ticks. The project document's rational frame rate is
+a playback/display property that drives frame stepping, timecode, dynamic trim boundaries, end-frame
+hold, monitor request quantization, and audio discontinuity tolerance; it is not duplicated in the
+editor snapshot.
+
+## Decode, playback, and caches
+
+Scrubbing publishes the newest desired media tick. `nle-decode` keeps sticky per-media FFmpeg
+contexts, coalesces superseded targets, cancels obsolete work, seeks backward to a keyframe for
+backward/far jumps, and decodes forward to the requested frame. It never requires a complete frame
+index before playback. The inspector reports the decoder backend that actually produced a frame;
+users can force software decoding.
+
+The monitor cache is byte-bounded (`--cache-mb`, clamped to 512–2048 MiB), sparse during scrubbing,
+and invalidated by project/source generations. It is a live acceleration cache, never the source of
+truth for an edit. Waveforms and thumbnail strips are derived display caches. Analysis starts only
+after media is placed on the timeline. Missing/unreadable media remains editable as a magenta
+offline bar.
+
+Live preview resolves at most four visible, unmuted video tracks into a fixed bottom-to-top
+target array. Each slot owns an independent latest-wins monitor decoder, generation, retained frame,
+and native texture. Its single worker keeps only the current source's FFmpeg session sticky, and the
+configured monitor-cache byte cap is divided between the four slots rather than quadrupled. A late,
+missing, or invalid layer is held or transparent without blocking the other
+slots or timeline input. Each ready texture is lowered through the allocation-free
+`nle-compositor` plan, which applies crop, Fit/Fill/Stretch/Original sizing, anchor-relative scale,
+clockwise rotation, normalized position, flip, fade, and opacity in project-pixel space. UI-core maps
+that quad into a GPU-neutral viewer canvas and remaps content UVs around decoder letterboxing. The
+packaged app uploads each newest decoded frame into one of four fixed, reusable sRGB texture slots.
+A retained native callback composites only when input, geometry, or canvas size changes, using two
+canvas-sized outputs that alternate front/back. Pipelines and same-size input textures are reused;
+stable UI frames blit the current output without recompositing or uploading decoded pixels through
+egui. Project resolution, including portrait rasters, determines viewer aspect and geometry while
+output allocation follows the physical viewer size. The deterministic egui mesh path remains as a
+headless/device fallback. Quick Export lowers the same composition plan into a bounded
+FFmpeg graph for up to four unmuted video tracks. Source dimensions are probed and cached on the
+export worker; crop, sizing, scale, anchor, position, rotation, flips, opacity, and the shared
+quadratic/gamma video-fade envelope are applied before bottom-to-top overlay on project black.
+Video transitions remain separate durable typed operations bound to exact adjacent cuts, so clips
+stay ordered and non-overlapping. Cross Dissolve derives two temporary source ranges: the editor
+validates saved handles, preview assigns independent bounded decoder slots, and export expands the
+same seek/trim ranges. The outgoing frame remains the base while the incoming frame uses the shared
+raw quadratic envelope. Dip to Black keeps both clips inside their normal trims and inserts a
+full-project black matte at the transition track's compositing depth: the matte rises over the
+outgoing half and remains opaque beneath the incoming half, which fades up without another decoder
+slot. Structural
+edits prune invalid or overlapping operations; v1–v5 documents migrate idempotently to the v6 typed
+transition schema, with legacy transitions defaulting to Cross Dissolve.
+Audible audio tracks are independently trimmed, timed, gain/pan/channel-adjusted, curve-faded, and
+mixed. Equal-power audio crossfades are separate durable operations on exact adjacent same-track
+cuts. The editor validates saved pre/post handles, emits outgoing and incoming targets with a shared
+centered window, and keys decoder sessions by track and clip so two sources on one track can coexist
+without collapsing their state. Lane-set reconciliation retains queued PCM and the global device
+clock at both window boundaries; newly joining lanes use their own device-frame origin. The device
+callback evaluates cosine/sine gain per consumed sample.
+Export expands the identical handles, shifts ordinary clip fades back to their authored clip time,
+lowers quarter-sine envelopes, and aligns sources with an integer 48 kHz silence delay instead of
+depending on mixer timestamp behavior. Structural edits prune invalid or overlapping audio
+transitions; v1–v6 documents migrate idempotently to the v7 schema. More than four video tracks,
+still-image clips, or active unmapped audio effects stay
+disabled in the UI and are also rejected by the worker, so unsupported state cannot silently
+disappear from the output.
+
+Every viewer update is first described by immutable, allocation-free preview metadata: sequence
+generation, playhead, selected and resolved quality, output size, and ordered source/priority
+slots. Full, half, quarter, and eighth resolution are derived from the quantized viewer bounds.
+Auto observes latest-request decoder turnaround against a frame-rate-derived budget, uses sustained
+breach and longer recovery windows to avoid oscillation, and changes only runtime resolution.
+Manual quality is durable view state; Auto's current resolution is runtime-only. Output-size changes
+cancel and generation-obsolete prior layer requests but retain the last good texture for continuity.
+
+Playback advances independently of video decode. Late video frames are held or skipped rather than
+stalling the clock. During audible playback, the CPAL device callback owns the shared A/V clock and
+the video playhead maps to its consumed-sample position. Audio has its own worker and device stream;
+an underrun emits device silence and late decoded PCM is discarded to catch up instead of blocking
+the UI or replaying stale sound.
+
+The first successful splash presentation is an explicit startup boundary. The renderer decodes each
+embedded splash image once, uploads it for the cylinder, and retains that same RGBA allocation for
+the later Project Hub backdrop. Hub texture installation, hardware detection, catalog/thumbnail
+loading, model preloading, and audio-device negotiation start only after that boundary. The model
+registry reads a versioned package manifest on the startup-resource worker, validates safe relative
+paths and optional byte counts, and retains successful files as shared immutable byte buffers for
+future inference engines. One invalid entry does not discard valid peers; errors surface in the
+Project Hub. The native window uses a purpose-sized embedded icon while the full-resolution
+branding source remains available as artwork.
+
+## Invalidation and persistence
+
+Timeline structural caches rebuild only when structural generation changes. Runtime frames,
+waveforms, decoder identities, error states, and GPU handles never enter project documents.
+Autosave observes durable generation, clones only at a persistence boundary, and performs atomic
+temporary-file replacement on its writer thread. Pending documents coalesce independently by
+project path, so returning to the Hub queues the latest state without waiting for filesystem work
+or allowing a quick project switch to discard another project's save. Project-catalog mutations
+use a separate coalescing writer; catalog and thumbnail reads run on the startup-resource worker.
+Project media stores absolute and project-relative paths; moving a portable project can resolve the
+relative form. Media-analysis completion schedules durable duration changes directly, including
+audio-only sources and failed thumbnail extraction, rather than relying on a later redraw.
+
+Export receives an immutable project snapshot at start. The worker owns source probing, graph
+lowering, FFmpeg execution, encoder retry, and progress; the interaction thread owns none of that
+work. Editing remains live while the worker renders, and cancellation removes the partial output
+and temporary filter graph without leaving an orphaned process or worker. FFmpeg writes a unique
+same-directory staged output; only a successful render crosses the atomic replacement boundary, so
+preflight or encoder failure preserves any existing destination file.
+
+## Rendering, diagnostics, and legal boundary
+
+One `wgpu` device/queue draws the app. The timeline emits batched native rectangles/textures and the
+monitor is one retained texture. Clip labels and waveform-status layouts are retained across frames
+and omitted when bars are too small to read; flags are fixed rectangle primitives, so the visible
+clip loop does not allocate text or polygon data. A fixed integer hash of media ID selects a bounded
+dark palette pair: linked bars share source identity while video remains blue-family, audio remains
+green-family, and offline media stays unambiguously magenta. Debug builds expose the CPU frame HUD
+and a VSync toggle. Tracing records the renderer adapter and each sticky decoder backend, never one
+event per rectangle.
+
+Shipping uses the pinned FFmpeg 8.1 LGPL shared bundle. Windows DLLs are packaged beside the
+executable. GPL/nonfree codec libraries are rejected. H.264 export prefers available Windows
+hardware and then Media Foundation/OpenH264. FFmpeg is linked as libraries for playback/scrubbing.
+Bundled `ffmpeg`/`ffprobe`
+helpers are used only by cancellable background analysis/export workers, never on the interaction
+path.
+
+Monitor decode prefers the platform hardware backend and always retains a software fallback. The
+inspector records the backend that really produced the frame rather than the startup adapter guess.
+
+Windows first tries the low-latency codec-specific CUVID and Quick Sync decoders. If neither can
+open, the same sticky monitor session negotiates FFmpeg's generic D3D11VA device and then DXVA2.
+Both DirectX paths select only a hardware format advertised with `HW_DEVICE_CTX`, transfer the
+opaque surface before scaling, and fall back to a retained software session if hardware fails
+after opening.
+
+## Required gates
+
+Before a foundation change lands:
+
+- run workspace tests and `clippy -D warnings` with the pinned FFmpeg development environment;
+- run the release 50,000-clip wide/detail/playhead harness;
+- run real-media decode, backward-seek, cancellation, audio, probe, and export tests when those
+  layers change;
+- verify Windows packaging rejects GPL/nonfree dependencies and starts using only bundled DLLs;
+- gate packaging on 120 CPU frame/surface-submit samples, recording CPU p95, submission-interval
+  p95, and average submission cadence outside the shipped bundle; do not describe this as
+  compositor scanout or GPU-completion timing;
+- make the Windows package prove real-media linked bars, metadata, waveform, monitor decode,
+  playback, live audio meters, confirmed FFmpeg export progress, cancellation without a partial
+  output, and exact process-tree cleanup using only its adjacent runtime;
+- stop every test app/helper process before handing control back.
+
+The measurable target is ≤2 ms for the 50k interaction path, ≤8 ms p95 for the CPU frame evidence,
+O(visible clips) detailed drawing, bounded caches, and a timeline that never waits for media.

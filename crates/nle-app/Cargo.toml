@@ -1,0 +1,32 @@
+[package]
+name = "nle-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nle-compositor = { path = "../nle-compositor" }
+nle-decode = { path = "../nle-decode" }
+nle-export = { path = "../nle-export" }
+nle-audio = { path = "../nle-audio" }
+nle-render = { path = "../nle-render" }
+nle-project-io = { path = "../nle-project-io" }
+nle-timeline = { path = "../nle-timeline" }
+nle-ui-core = { path = "../nle-ui-core" }
+nle-upscale = { path = "../nle-upscale" }
+nle-waveform = { path = "../nle-waveform" }
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+image.workspace = true
+pollster.workspace = true
+rfd.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }

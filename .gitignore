@@ -1,0 +1,28 @@
+/target/
+/test-build/
+/.deps/
+/dist/
+
+# Local AI weights and model packages are never public source. Keep only the
+# registry contract and its licensing guidance in Git.
+/assets/models/**
+!/assets/models/manifest.json
+!/assets/models/README.md
+*.onnx
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.tflite
+*.engine
+*.plan
+*.mlmodel
+*.mlpackage
+
+# Optional proprietary vendor runtimes must be obtained under their own terms
+# and supplied locally. Public source contains only the dynamic loader.
+/crates/nle-upscale/rtx-vsr/
+*.dll
+*.exe
+*.pdb

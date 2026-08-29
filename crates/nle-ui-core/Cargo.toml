@@ -1,0 +1,16 @@
+[package]
+name = "nle-ui-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+nle-compositor = { path = "../nle-compositor" }
+nle-title = { path = "../nle-title" }
+nle-timeline = { path = "../nle-timeline" }
+serde.workspace = true
+
+[dev-dependencies]
+nle-decode = { path = "../nle-decode" }
+serde_json.workspace = true

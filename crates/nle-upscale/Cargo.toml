@@ -1,0 +1,9 @@
+[package]
+name = "nle-upscale"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "NVIDIA RTX Video Super Resolution for Maelstrom (Kraken Upscale)"
+
+[dependencies]
+libloading = "0.8"

@@ -1,0 +1,10 @@
+[package]
+name = "nle-waveform"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Bounded background waveform analysis for Maelstrom."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
