@@ -63,15 +63,23 @@ executable path. During the opt-in run the editor window remains visible and alw
 Windows occluded-surface throttling; it returns to normal level when the application report is
 written.
 
-The app atomically writes `playback-soak-app-report.json` under the ignored
-`artifacts/phase0-playback-soak` directory. It contains schema version, requested and actual wall
-duration, completed loop count, observed decoder backends, selected/resolved preview quality,
-monitor-cache cap, and deltas for monitor requests/completions/presents/drops/holds/lates/errors,
-native/fallback viewer uploads, audio underruns, callback lock failures, and late audio discards.
+The app atomically writes schema-version 2 `playback-soak-app-report.json` under the ignored
+`artifacts/phase0-playback-soak` directory. It contains requested and actual wall duration,
+completed loop count, observed decoder backends, selected/resolved preview quality, configured
+monitor-cache cap, `monitor_resources`, and deltas for monitor
+requests/completions/presents/drops/holds/lates/errors, native/fallback viewer uploads, audio
+underruns, callback lock failures, and late audio discards. `monitor_resources` sums the cache
+capacity/current bytes, active sticky sessions, and session caps across the app's monitor decoders.
+Its `peak_frame_cache_bytes_upper_bound` and `peak_sticky_sessions_upper_bound` fields sum each
+decoder's historical peak, so they are explicit aggregate upper bounds rather than claims that all
+individual peaks occurred simultaneously.
+
 The runner validates actual duration, a `Full` selected/resolved preview, backend evidence, at least
 20 native uploads per second, a healthy A/V transport at completion with no observed audio fault or
-early stop, zero monitor errors/fallback uploads, no more than 2% late monitor requests, and zero
-audio underruns/callback lock failures/late discards. It then atomically writes
+early stop, positive cache/session peak exercise, cache current and peak upper bound no greater than
+aggregate capacity, active and peak session upper bound no greater than aggregate session cap, zero
+monitor errors/fallback uploads, no more than 2% late monitor requests, and zero audio
+underruns/callback lock failures/late discards. It then atomically writes
 `playback-soak-report.json` beside the app report with the exact executable path and SHA-256 plus
 coarse WorkingSet64 evidence.
 
@@ -82,9 +90,11 @@ or child-process memory, so it detects only coarse sustained GUI working-set gro
 complete leak diagnosis. The runner always restores its environment and terminates only its tracked
 PID tree in `finally`.
 
-The 2026-08-28 Windows checkpoint passed against packaged executable SHA-256
-`A58C834E41631A61FEF81E02A192EDE9D227BFF66D008338A62E93E3E1AE1C6A`: 600.003 seconds,
-10 timeline loops, `Full` selected/resolved quality, 18,017 native viewer uploads, zero monitor
-errors/fallback uploads, zero audio underruns/callback lock failures/late discards, and 243,556,352
-bytes peak GUI working-set growth. The ignored local evidence remains in
-`artifacts/phase0-playback-soak/playback-soak-report.json`.
+The latest 2026-08-28 Windows checkpoint passed against packaged executable SHA-256
+`C41F3F1552ADBA6C30A4CA5F93580A93727AA1C51196A9877060198651B16CF5`: 600.006 seconds,
+10 timeline loops, `Full` selected/resolved quality, 18,015 native viewer uploads, zero monitor
+errors/fallback uploads, and zero audio underruns/callback lock failures/late discards. The decoded
+frame-cache sample ended at 264,456,192 bytes and its summed decoder-local peak upper bound was
+268,015,616 bytes against the 1,073,741,824-byte aggregate cap. Active/peak sticky sessions were
+1/1 against the 16-session app cap. Peak GUI working-set growth was 237,711,360 bytes. The ignored
+local evidence remains in `artifacts/phase0-playback-soak/playback-soak-report.json`.

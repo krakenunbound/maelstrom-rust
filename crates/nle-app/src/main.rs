@@ -2122,6 +2122,60 @@ impl From<RuntimeDiagnostics> for PlaybackSoakRuntimeDiagnostics {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
+struct PlaybackSoakMonitorResources {
+    frame_cache_capacity_bytes: usize,
+    current_frame_cache_bytes: usize,
+    /// Sum of decoder-local historical peaks; this is an upper bound, not a simultaneous total.
+    peak_frame_cache_bytes_upper_bound: usize,
+    active_sticky_sessions: usize,
+    /// Sum of decoder-local historical peaks; this is an upper bound, not a simultaneous total.
+    peak_sticky_sessions_upper_bound: usize,
+    session_cap: usize,
+}
+
+fn aggregate_playback_soak_monitor_resources(
+    decoders: &[nle_decode::MonitorDecoder],
+) -> PlaybackSoakMonitorResources {
+    aggregate_playback_soak_monitor_resource_diagnostics(
+        decoders.iter().map(|decoder| decoder.diagnostics()),
+    )
+}
+
+fn aggregate_playback_soak_monitor_resource_diagnostics(
+    diagnostics: impl IntoIterator<Item = nle_decode::MonitorDecoderDiagnostics>,
+) -> PlaybackSoakMonitorResources {
+    let mut resources = PlaybackSoakMonitorResources {
+        frame_cache_capacity_bytes: 0,
+        current_frame_cache_bytes: 0,
+        peak_frame_cache_bytes_upper_bound: 0,
+        active_sticky_sessions: 0,
+        peak_sticky_sessions_upper_bound: 0,
+        session_cap: 0,
+    };
+    for diagnostics in diagnostics {
+        resources.frame_cache_capacity_bytes = resources
+            .frame_cache_capacity_bytes
+            .saturating_add(diagnostics.frame_cache_capacity_bytes);
+        resources.current_frame_cache_bytes = resources
+            .current_frame_cache_bytes
+            .saturating_add(diagnostics.current_frame_cache_bytes);
+        resources.peak_frame_cache_bytes_upper_bound = resources
+            .peak_frame_cache_bytes_upper_bound
+            .saturating_add(diagnostics.peak_frame_cache_bytes);
+        resources.active_sticky_sessions = resources
+            .active_sticky_sessions
+            .saturating_add(diagnostics.active_sticky_sessions);
+        resources.peak_sticky_sessions_upper_bound = resources
+            .peak_sticky_sessions_upper_bound
+            .saturating_add(diagnostics.peak_sticky_sessions);
+        resources.session_cap = resources
+            .session_cap
+            .saturating_add(diagnostics.session_cap);
+    }
+    resources
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
 struct PlaybackSoakReport {
     schema_version: u32,
     requested_duration_seconds: u64,
@@ -2131,6 +2185,7 @@ struct PlaybackSoakReport {
     selected_preview_quality: String,
     resolved_preview_quality: String,
     monitor_cache_cap_bytes: usize,
+    monitor_resources: PlaybackSoakMonitorResources,
     audio_transport_healthy_at_completion: bool,
     audio_fault_observed: bool,
     unexpected_playback_stop_observed: bool,
@@ -2232,11 +2287,12 @@ impl PlaybackSoakProbe {
         selected_preview_quality: String,
         resolved_preview_quality: String,
         monitor_cache_cap_bytes: usize,
+        monitor_resources: PlaybackSoakMonitorResources,
         audio_transport_healthy_now: bool,
     ) -> Option<PlaybackSoakReport> {
         let started_at = self.started_at?;
         Some(PlaybackSoakReport {
-            schema_version: 1,
+            schema_version: 2,
             requested_duration_seconds: self.requested_duration.as_secs(),
             actual_duration_seconds: now.duration_since(started_at).as_secs_f64(),
             loop_count: self.loop_count,
@@ -2244,6 +2300,7 @@ impl PlaybackSoakProbe {
             selected_preview_quality,
             resolved_preview_quality,
             monitor_cache_cap_bytes,
+            monitor_resources,
             audio_transport_healthy_at_completion: audio_transport_healthy_now
                 && !self.audio_fault_observed
                 && !self.unexpected_playback_stop_observed,
@@ -3321,6 +3378,7 @@ impl App {
                 format!("{:?}", self.editor.preview_quality()),
                 format!("{:?}", self.editor.resolved_preview_quality()),
                 self.monitor_cache_cap_bytes,
+                aggregate_playback_soak_monitor_resources(&self.monitor_decoders),
                 audio_transport_healthy_now,
             ) {
                 let _ = probe.publish(report);
@@ -6772,10 +6830,18 @@ mod tests {
                 "Full".to_owned(),
                 "Full".to_owned(),
                 512 * 1024 * 1024,
+                PlaybackSoakMonitorResources {
+                    frame_cache_capacity_bytes: 512 * 1024 * 1024,
+                    current_frame_cache_bytes: 128 * 1024 * 1024,
+                    peak_frame_cache_bytes_upper_bound: 256 * 1024 * 1024,
+                    active_sticky_sessions: 1,
+                    peak_sticky_sessions_upper_bound: 2,
+                    session_cap: 4,
+                },
                 true,
             )
             .expect("transport start makes a soak report ready");
-        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.schema_version, 2);
         assert_eq!(report.actual_duration_seconds, 10.0);
         assert_eq!(report.loop_count, 2);
         assert_eq!(report.runtime_diagnostics_delta.monitor_requests, 6);
@@ -6785,6 +6851,19 @@ mod tests {
         let published = report_rx.try_recv().expect("one-shot soak report");
         assert_eq!(published.observed_decoder_backends, ["Software"]);
         assert_eq!(published.monitor_cache_cap_bytes, 512 * 1024 * 1024);
+        assert_eq!(
+            published.monitor_resources.current_frame_cache_bytes,
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            published.monitor_resources.peak_sticky_sessions_upper_bound,
+            2
+        );
+        let json = serde_json::to_value(&published).expect("soak report serializes");
+        assert_eq!(
+            json.pointer("/monitor_resources/peak_frame_cache_bytes_upper_bound"),
+            Some(&serde_json::Value::from(256 * 1024 * 1024))
+        );
         assert!(published.audio_transport_healthy_at_completion);
         assert!(!published.audio_fault_observed);
         assert!(!published.unexpected_playback_stop_observed);
@@ -6814,6 +6893,14 @@ mod tests {
                 "Full".to_owned(),
                 "Full".to_owned(),
                 512 * 1024 * 1024,
+                PlaybackSoakMonitorResources {
+                    frame_cache_capacity_bytes: 512 * 1024 * 1024,
+                    current_frame_cache_bytes: 0,
+                    peak_frame_cache_bytes_upper_bound: 0,
+                    active_sticky_sessions: 0,
+                    peak_sticky_sessions_upper_bound: 0,
+                    session_cap: 4,
+                },
                 false,
             )
             .expect("started probe reports its failure evidence");
@@ -6821,6 +6908,40 @@ mod tests {
         assert!(report.audio_fault_observed);
         assert!(report.unexpected_playback_stop_observed);
         assert_eq!(report.loop_count, 0);
+    }
+
+    #[test]
+    fn playback_soak_monitor_resources_sum_capacities_and_peak_upper_bounds() {
+        let resources = aggregate_playback_soak_monitor_resource_diagnostics([
+            nle_decode::MonitorDecoderDiagnostics {
+                frame_cache_capacity_bytes: 100,
+                current_frame_cache_bytes: 40,
+                peak_frame_cache_bytes: 75,
+                active_sticky_sessions: 1,
+                peak_sticky_sessions: 2,
+                session_cap: 4,
+            },
+            nle_decode::MonitorDecoderDiagnostics {
+                frame_cache_capacity_bytes: 200,
+                current_frame_cache_bytes: 80,
+                peak_frame_cache_bytes: 150,
+                active_sticky_sessions: 3,
+                peak_sticky_sessions: 4,
+                session_cap: 5,
+            },
+        ]);
+
+        assert_eq!(
+            resources,
+            PlaybackSoakMonitorResources {
+                frame_cache_capacity_bytes: 300,
+                current_frame_cache_bytes: 120,
+                peak_frame_cache_bytes_upper_bound: 225,
+                active_sticky_sessions: 4,
+                peak_sticky_sessions_upper_bound: 6,
+                session_cap: 9,
+            }
+        );
     }
 
     #[test]

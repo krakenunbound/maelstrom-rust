@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering, fence},
+        atomic::{AtomicU64, AtomicUsize, Ordering, fence},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -36,6 +36,88 @@ const SCRUB_CACHE_TOLERANCE_TICKS: i64 = 50_000;
 const MAX_SCRUB_CACHE_INDEX_ENTRIES: usize = 1_024;
 const MAX_CACHE_STREAM_STATES: usize = 4_096;
 pub const DEFAULT_FRAME_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+
+/// A point-in-time view of bounded monitor decoder resource use.
+///
+/// Counts are runtime diagnostics only: they do not alter cache eviction or sticky-session
+/// ownership policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorDecoderDiagnostics {
+    pub frame_cache_capacity_bytes: usize,
+    pub current_frame_cache_bytes: usize,
+    pub peak_frame_cache_bytes: usize,
+    pub active_sticky_sessions: usize,
+    pub peak_sticky_sessions: usize,
+    pub session_cap: usize,
+}
+
+struct DecoderResourceDiagnostics {
+    frame_cache_capacity_bytes: usize,
+    current_frame_cache_bytes: AtomicUsize,
+    peak_frame_cache_bytes: AtomicUsize,
+    active_sticky_session_mask: AtomicUsize,
+    peak_sticky_sessions: AtomicUsize,
+}
+
+impl DecoderResourceDiagnostics {
+    fn new(frame_cache_capacity_bytes: usize) -> Self {
+        Self {
+            frame_cache_capacity_bytes,
+            current_frame_cache_bytes: AtomicUsize::new(0),
+            peak_frame_cache_bytes: AtomicUsize::new(0),
+            active_sticky_session_mask: AtomicUsize::new(0),
+            peak_sticky_sessions: AtomicUsize::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> MonitorDecoderDiagnostics {
+        let current_frame_cache_bytes = self.current_frame_cache_bytes.load(Ordering::Acquire);
+        let active_sticky_sessions = self
+            .active_sticky_session_mask
+            .load(Ordering::Acquire)
+            .count_ones() as usize;
+        MonitorDecoderDiagnostics {
+            frame_cache_capacity_bytes: self.frame_cache_capacity_bytes,
+            current_frame_cache_bytes,
+            // A reader may race publication across separate atomics. Clamp peak fields to the
+            // observed current count so every individual snapshot remains internally coherent.
+            peak_frame_cache_bytes: self
+                .peak_frame_cache_bytes
+                .load(Ordering::Acquire)
+                .max(current_frame_cache_bytes),
+            active_sticky_sessions,
+            peak_sticky_sessions: self
+                .peak_sticky_sessions
+                .load(Ordering::Acquire)
+                .max(active_sticky_sessions),
+            session_cap: MONITOR_WORKER_COUNT,
+        }
+    }
+
+    fn publish_cache_bytes(&self, used_bytes: usize) {
+        debug_assert!(used_bytes <= self.frame_cache_capacity_bytes);
+        self.peak_frame_cache_bytes
+            .fetch_max(used_bytes, Ordering::AcqRel);
+        self.current_frame_cache_bytes
+            .store(used_bytes, Ordering::Release);
+    }
+
+    fn publish_worker_session(&self, worker_index: usize, active: bool) {
+        debug_assert!(worker_index < MONITOR_WORKER_COUNT);
+        let worker_bit = 1_usize << worker_index;
+        let mask = if active {
+            self.active_sticky_session_mask
+                .fetch_or(worker_bit, Ordering::AcqRel)
+                | worker_bit
+        } else {
+            self.active_sticky_session_mask
+                .fetch_and(!worker_bit, Ordering::AcqRel)
+                & !worker_bit
+        };
+        self.peak_sticky_sessions
+            .fetch_max(mask.count_ones() as usize, Ordering::AcqRel);
+    }
+}
 
 /// A fixed aggregate of completed CPU timing samples for one decoder-worker stage.
 /// Durations use monotonic wall-clock time around the named CPU call boundary; they do not
@@ -361,6 +443,7 @@ pub struct MonitorDecoder {
     stage_timings: Vec<Arc<DecoderStageTimingAccumulators>>,
     last_scrub_target: Mutex<Option<(u32, i64)>>,
     cache_reset_generation: Arc<AtomicU64>,
+    resource_diagnostics: Arc<DecoderResourceDiagnostics>,
 }
 
 struct MonitorWorker {
@@ -386,7 +469,11 @@ impl MonitorDecoder {
     ) -> Self {
         let events = Arc::new(EventSlot::new(notify));
         let cache_reset_generation = Arc::new(AtomicU64::new(0));
-        let frame_cache = Arc::new(Mutex::new(MonitorFrameCache::new(frame_cache_bytes)));
+        let resource_diagnostics = Arc::new(DecoderResourceDiagnostics::new(frame_cache_bytes));
+        let frame_cache = Arc::new(Mutex::new(MonitorFrameCache::new_with_diagnostics(
+            frame_cache_bytes,
+            Arc::clone(&resource_diagnostics),
+        )));
         let mut workers = Vec::with_capacity(MONITOR_WORKER_COUNT);
         let mut stage_timings = Vec::with_capacity(MONITOR_WORKER_COUNT);
         for index in 0..MONITOR_WORKER_COUNT {
@@ -398,6 +485,7 @@ impl MonitorDecoder {
             let scheduler_stage_timings = Arc::clone(&lane_stage_timings);
             let scheduler_cache_reset = Arc::clone(&cache_reset_generation);
             let scheduler_frame_cache = Arc::clone(&frame_cache);
+            let scheduler_resource_diagnostics = Arc::clone(&resource_diagnostics);
             let scheduler = thread::Builder::new()
                 .name(format!("maelstrom-monitor-decoder-{index}"))
                 .spawn(move || {
@@ -408,6 +496,8 @@ impl MonitorDecoder {
                         scheduler_stage_timings,
                         scheduler_cache_reset,
                         scheduler_frame_cache,
+                        scheduler_resource_diagnostics,
+                        index,
                     )
                 })
                 .expect("failed to start monitor decoder scheduler");
@@ -424,6 +514,7 @@ impl MonitorDecoder {
             stage_timings,
             last_scrub_target: Mutex::new(None),
             cache_reset_generation,
+            resource_diagnostics,
         }
     }
 
@@ -496,6 +587,11 @@ impl MonitorDecoder {
             aggregate.merge(lane.snapshot());
         }
         aggregate
+    }
+
+    /// Returns a copyable snapshot of bounded cache and sticky-session resource use.
+    pub fn diagnostics(&self) -> MonitorDecoderDiagnostics {
+        self.resource_diagnostics.snapshot()
     }
 
     fn send_to(&self, index: usize, command: MonitorCommand) -> Result<(), DecoderClosed> {
@@ -611,6 +707,7 @@ impl From<FrameKey> for FrameStreamKey {
 /// Continuous scrubbing therefore cannot fill the LRU with every intermediate request.
 struct MonitorFrameCache {
     frames: FrameCache,
+    resource_diagnostics: Arc<DecoderResourceDiagnostics>,
     last_anchor_bucket: HashMap<FrameStreamKey, i64>,
     latest: HashMap<FrameStreamKey, (FrameKey, bool)>,
     /// Source-time lookup for scrub traversal frames. The frame cache remains the byte owner;
@@ -623,9 +720,21 @@ struct MonitorFrameCache {
 }
 
 impl MonitorFrameCache {
+    #[cfg(test)]
     fn new(capacity_bytes: usize) -> Self {
+        Self::new_with_diagnostics(
+            capacity_bytes,
+            Arc::new(DecoderResourceDiagnostics::new(capacity_bytes)),
+        )
+    }
+
+    fn new_with_diagnostics(
+        capacity_bytes: usize,
+        resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+    ) -> Self {
         Self {
             frames: FrameCache::new(capacity_bytes),
+            resource_diagnostics,
             last_anchor_bucket: HashMap::new(),
             latest: HashMap::new(),
             scrub_frames: HashMap::new(),
@@ -672,6 +781,7 @@ impl MonitorFrameCache {
 
     fn clear(&mut self) {
         self.frames.clear();
+        self.publish_frame_cache_bytes();
         self.last_anchor_bucket.clear();
         self.latest.clear();
         self.scrub_frames.clear();
@@ -760,8 +870,10 @@ impl MonitorFrameCache {
                 Arc::clone(&frame.rgba),
             ),
         ) {
+            self.publish_frame_cache_bytes();
             return;
         }
+        self.publish_frame_cache_bytes();
         self.scrub_frames
             .entry(stream)
             .or_default()
@@ -785,8 +897,10 @@ impl MonitorFrameCache {
         let bucket = key.source_tick.div_euclid(SPARSE_CACHE_INTERVAL_TICKS);
         let is_anchor = self.last_anchor_bucket.get(&stream).copied() != Some(bucket);
         if !self.frames.insert(key, value) {
+            self.publish_frame_cache_bytes();
             return false;
         }
+        self.publish_frame_cache_bytes();
         if is_anchor {
             self.last_anchor_bucket.insert(stream, bucket);
         }
@@ -800,6 +914,7 @@ impl MonitorFrameCache {
                 .is_some_and(|frames| frames.values().any(|scrub_key| *scrub_key == previous));
             if !retained_for_scrub {
                 let _ = self.frames.remove(&previous);
+                self.publish_frame_cache_bytes();
             }
         }
         true
@@ -813,6 +928,11 @@ impl MonitorFrameCache {
     ) -> bool {
         self.accepts_request(request) && self.insert(key, value)
     }
+
+    fn publish_frame_cache_bytes(&self) {
+        self.resource_diagnostics
+            .publish_cache_bytes(self.frames.used_bytes());
+    }
 }
 
 fn monitor_scheduler_loop(
@@ -822,6 +942,8 @@ fn monitor_scheduler_loop(
     stage_timings: Arc<DecoderStageTimingAccumulators>,
     cache_reset_generation: Arc<AtomicU64>,
     frame_cache: Arc<Mutex<MonitorFrameCache>>,
+    resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+    worker_index: usize,
 ) {
     if ffmpeg::init().is_err() {
         return;
@@ -833,6 +955,7 @@ fn monitor_scheduler_loop(
         let requested_cache_reset = cache_reset_generation.load(Ordering::Acquire);
         if requested_cache_reset != observed_cache_reset {
             sessions.clear();
+            resource_diagnostics.publish_worker_session(worker_index, false);
             frame_cache
                 .lock()
                 .expect("monitor frame cache lock")
@@ -842,12 +965,20 @@ fn monitor_scheduler_loop(
         if pending.is_none() {
             match wake.recv_timeout(POLL_INTERVAL) {
                 Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => {
+                    sessions.clear();
+                    resource_diagnostics.publish_worker_session(worker_index, false);
+                    return;
+                }
             }
             match commands.lock().expect("monitor command lock").take() {
                 Some(MonitorCommand::Request(request)) => pending = Some(request),
                 Some(MonitorCommand::Cancel) | None => continue,
-                Some(MonitorCommand::Shutdown) => return,
+                Some(MonitorCommand::Shutdown) => {
+                    sessions.clear();
+                    resource_diagnostics.publish_worker_session(worker_index, false);
+                    return;
+                }
             }
         }
 
@@ -869,12 +1000,16 @@ fn monitor_scheduler_loop(
                 rgba: Arc::clone(&frame.rgba),
             }));
         };
+        let mut on_session_state = |active| {
+            resource_diagnostics.publish_worker_session(worker_index, active);
+        };
         let event = decode_monitor_request(
             &mut sessions,
             &frame_cache,
             &request,
             &commands,
             &mut on_progress,
+            &mut on_session_state,
             &stage_timings,
         );
         // A target arriving during decode wins: do not publish old output.
@@ -895,7 +1030,11 @@ fn monitor_scheduler_loop(
                 }
             }
             Some(MonitorCommand::Cancel) => {}
-            Some(MonitorCommand::Shutdown) => return,
+            Some(MonitorCommand::Shutdown) => {
+                sessions.clear();
+                resource_diagnostics.publish_worker_session(worker_index, false);
+                return;
+            }
             None => {
                 if let Some(event) = event {
                     events.publish(event);
@@ -932,6 +1071,7 @@ fn decode_monitor_request(
     request: &DecodeRequest,
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
     on_progress: &mut dyn FnMut(&DecodedRgba),
+    on_session_state: &mut dyn FnMut(bool),
     stage_timings: &DecoderStageTimingAccumulators,
 ) -> Option<DecodeEvent> {
     let span = tracing::debug_span!(
@@ -950,12 +1090,14 @@ fn decode_monitor_request(
         .prepare_request(request)
     {
         sessions.clear();
+        on_session_state(false);
     }
     // An application monitor slot owns exactly one active source, and each MonitorDecoder owns
     // one worker. Keep a same-source FFmpeg context sticky for seeks, but release every inactive
     // source before a new request can reuse/open a session. This bounds per-slot session retention
     // to one even when timeline layering switches media repeatedly.
     retain_active_monitor_session(sessions, request.media_id);
+    on_session_state(!sessions.is_empty());
     let cache_key = frame_cache_key(request, request.source_tick);
     let cached = {
         let _timer = StageTimer::new(&stage_timings.cache_lookup);
@@ -1016,6 +1158,7 @@ fn decode_monitor_request(
         ),
         _ => {
             sessions.remove(&request.media_id);
+            on_session_state(!sessions.is_empty());
             match StickyMonitor::open(request) {
                 Ok(mut session) => {
                     let result = decode_with_session(
@@ -1027,6 +1170,7 @@ fn decode_monitor_request(
                         stage_timings,
                     );
                     sessions.insert(request.media_id, session);
+                    on_session_state(true);
                     result
                 }
                 Err(error) => Err(error),
@@ -1041,6 +1185,7 @@ fn decode_monitor_request(
             hardware_error,
             on_progress,
             &mut on_traversal,
+            on_session_state,
             stage_timings,
         ),
         result => result,
@@ -1123,6 +1268,7 @@ fn recover_hardware_decode_failure(
     hardware_error: String,
     on_progress: &mut dyn FnMut(&DecodedRgba),
     on_traversal: &mut dyn FnMut(&DecodedRgba),
+    on_session_state: &mut dyn FnMut(bool),
     stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<Option<DecodedRgba>, String> {
     let fallback = sessions
@@ -1132,6 +1278,7 @@ fn recover_hardware_decode_failure(
         return Err(hardware_error);
     };
     sessions.remove(&request.media_id);
+    on_session_state(!sessions.is_empty());
     match StickyMonitor::open(&open_request) {
         Ok(mut session) => {
             tracing::warn!(
@@ -1157,6 +1304,7 @@ fn recover_hardware_decode_failure(
                 },
             );
             sessions.insert(request.media_id, session);
+            on_session_state(true);
             result
         }
         Err(software_error) => Err(format!(
@@ -2084,7 +2232,7 @@ mod tests {
         fs,
         path::PathBuf,
         process::{Command, Stdio},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::atomic::{AtomicBool, AtomicU64, Ordering},
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
@@ -2628,6 +2776,7 @@ mod tests {
             "injected D3D11VA runtime failure".to_owned(),
             &mut |_| {},
             &mut |_| {},
+            &mut |_| {},
             &stage_timings,
         )
         .expect("software fallback decodes supplied media")
@@ -2666,6 +2815,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let commands = Arc::new(Mutex::new(None));
         let stage_timings = DecoderStageTimingAccumulators::default();
+        let mut session_states = Vec::new();
 
         let event = decode_monitor_request(
             &mut sessions,
@@ -2673,6 +2823,7 @@ mod tests {
             &desired,
             &commands,
             &mut |_| {},
+            &mut |active| session_states.push(active),
             &stage_timings,
         )
         .expect("cache hit returns a frame");
@@ -2682,6 +2833,7 @@ mod tests {
         assert_eq!(frame.request_id, 91);
         assert_eq!(frame.rgba, rgba);
         assert!(sessions.is_empty());
+        assert_eq!(session_states, vec![false]);
     }
 
     #[test]
@@ -2735,6 +2887,87 @@ mod tests {
         retain_active_monitor_session(&mut sessions, 33);
         assert!(sessions.is_empty());
         assert!(sessions.len() <= MONITOR_WORKER_COUNT);
+    }
+
+    #[test]
+    fn frame_cache_diagnostics_track_current_peak_and_clear() {
+        let diagnostics = Arc::new(DecoderResourceDiagnostics::new(32));
+        let mut cache = MonitorFrameCache::new_with_diagnostics(32, Arc::clone(&diagnostics));
+        let key = FrameKey {
+            project_epoch: 1,
+            media_id: 2,
+            source_tick: 0,
+            width: 2,
+            height: 2,
+        };
+
+        assert!(cache.insert(key, FrameValue::new(0, 2, 2, vec![0; 16].into())));
+        assert!(cache.insert(
+            FrameKey {
+                source_tick: SPARSE_CACHE_INTERVAL_TICKS,
+                ..key
+            },
+            FrameValue::new(SPARSE_CACHE_INTERVAL_TICKS, 2, 2, vec![1; 16].into()),
+        ));
+        assert!(cache.insert(
+            FrameKey {
+                source_tick: SPARSE_CACHE_INTERVAL_TICKS * 2,
+                ..key
+            },
+            FrameValue::new(SPARSE_CACHE_INTERVAL_TICKS * 2, 2, 2, vec![2; 16].into()),
+        ));
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.frame_cache_capacity_bytes, 32);
+        assert_eq!(snapshot.current_frame_cache_bytes, 32);
+        assert_eq!(snapshot.peak_frame_cache_bytes, 32);
+        assert!(snapshot.current_frame_cache_bytes <= snapshot.frame_cache_capacity_bytes);
+
+        cache.clear();
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.current_frame_cache_bytes, 0);
+        assert_eq!(snapshot.peak_frame_cache_bytes, 32);
+    }
+
+    #[test]
+    fn worker_session_diagnostics_aggregate_with_fixed_cap() {
+        let diagnostics = DecoderResourceDiagnostics::new(0);
+        diagnostics.publish_worker_session(0, true);
+        diagnostics.publish_worker_session(2, true);
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.active_sticky_sessions, 2);
+        assert_eq!(snapshot.peak_sticky_sessions, 2);
+        assert_eq!(snapshot.session_cap, MONITOR_WORKER_COUNT);
+
+        diagnostics.publish_worker_session(0, false);
+        diagnostics.publish_worker_session(2, false);
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.active_sticky_sessions, 0);
+        assert_eq!(snapshot.peak_sticky_sessions, 2);
+        assert!(snapshot.peak_sticky_sessions <= snapshot.session_cap);
+    }
+
+    #[test]
+    fn diagnostics_snapshots_remain_peak_coherent_while_publishing() {
+        let diagnostics = Arc::new(DecoderResourceDiagnostics::new(128));
+        let publishing = Arc::new(AtomicBool::new(true));
+        let writer_diagnostics = Arc::clone(&diagnostics);
+        let writer_publishing = Arc::clone(&publishing);
+        let writer = thread::spawn(move || {
+            for _ in 0..10_000 {
+                writer_diagnostics.publish_cache_bytes(128);
+                writer_diagnostics.publish_worker_session(0, true);
+                writer_diagnostics.publish_cache_bytes(0);
+                writer_diagnostics.publish_worker_session(0, false);
+            }
+            writer_publishing.store(false, Ordering::Release);
+        });
+
+        while publishing.load(Ordering::Acquire) {
+            let snapshot = diagnostics.snapshot();
+            assert!(snapshot.current_frame_cache_bytes <= snapshot.peak_frame_cache_bytes);
+            assert!(snapshot.active_sticky_sessions <= snapshot.peak_sticky_sessions);
+        }
+        writer.join().expect("diagnostics publisher thread");
     }
 
     #[test]
@@ -3048,6 +3281,7 @@ mod tests {
                 &current,
                 &commands,
                 &mut |_| {},
+                &mut |_| {},
                 &stage_timings,
             ) {
                 Some(DecodeEvent::Frame(frame)) => {
@@ -3088,6 +3322,7 @@ mod tests {
             &frame_cache,
             &current,
             &commands,
+            &mut |_| {},
             &mut |_| {},
             &stage_timings,
         ) {

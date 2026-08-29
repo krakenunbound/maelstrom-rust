@@ -93,9 +93,11 @@ Build the evidence harness before adding engine complexity.
       280 MiB live runtime strip-cache checkpoint with per-insertion cap and exact oldest-eviction
       assertions; broader sustained pressure remains open. The exact packaged executable passed
       the 600-second Full/Full real A/V loop soak on 2026-08-28 with 10 loops, zero monitor errors,
-      zero fallback uploads, zero audio underruns/lock failures/late discards, and 243,556,352 bytes
-      peak GUI working-set growth. This combined item remains open only for broader sustained
-      memory-pressure coverage. See `docs/phase0-scenarios.md` and `docs/performance-reports.md`.
+      zero fallback uploads, zero audio underruns/lock failures/late discards, and 237,711,360 bytes
+      peak GUI working-set growth. Its schema-2 resource evidence reported 268,015,616 peak decoded
+      frame-cache bytes below the 1 GiB cap and one peak sticky session below the 16-session app
+      cap. This combined item remains open for broader multi-source memory-pressure coverage. See
+      `docs/phase0-scenarios.md` and `docs/performance-reports.md`.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,

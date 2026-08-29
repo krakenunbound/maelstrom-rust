@@ -23,6 +23,35 @@ function Restore-EnvironmentValue {
     }
 }
 
+function Test-JsonIntegerValue {
+    param($Value)
+    return $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Assert-JsonUnsignedIntegerProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property -or -not (Test-JsonIntegerValue $property.Value) -or $property.Value -lt 0) {
+        throw "$Context omitted or invalidated unsigned integer $Name."
+    }
+}
+
+function Test-JsonFiniteNumber {
+    param($Value)
+    $numeric = (Test-JsonIntegerValue $Value) -or $Value -is [single] -or
+        $Value -is [double] -or $Value -is [decimal]
+    if (-not $numeric) { return $false }
+    $doubleValue = [double]$Value
+    return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
+}
+
 if (-not [System.IO.Path]::IsPathRooted($ExecutablePath)) {
     throw 'ExecutablePath must be an absolute path to the packaged Maelstrom.exe.'
 }
@@ -113,20 +142,54 @@ try {
     }
 
     $appReport = Get-Content -LiteralPath $appReportPath -Raw | ConvertFrom-Json
+    Assert-JsonUnsignedIntegerProperty $appReport 'schema_version' 'Playback soak report'
+    Assert-JsonUnsignedIntegerProperty $appReport 'requested_duration_seconds' 'Playback soak report'
+    Assert-JsonUnsignedIntegerProperty $appReport 'loop_count' 'Playback soak report'
+    Assert-JsonUnsignedIntegerProperty $appReport 'monitor_cache_cap_bytes' 'Playback soak report'
+    if (-not (Test-JsonFiniteNumber $appReport.actual_duration_seconds)) {
+        throw 'Playback soak report omitted or invalidated finite actual_duration_seconds.'
+    }
     $actualDurationSeconds = [double]$appReport.actual_duration_seconds
-    if ([double]::IsNaN($actualDurationSeconds) -or [double]::IsInfinity($actualDurationSeconds) -or
-        $appReport.schema_version -ne 1 -or
+    $decoderBackends = $appReport.PSObject.Properties['observed_decoder_backends'].Value
+    if ($appReport.schema_version -ne 2 -or
         $appReport.requested_duration_seconds -ne $DurationSeconds -or
         $actualDurationSeconds -lt $DurationSeconds -or
         $actualDurationSeconds -gt ($DurationSeconds + 2) -or
         $appReport.monitor_cache_cap_bytes -lt 1 -or
+        $appReport.audio_transport_healthy_at_completion -isnot [bool] -or
+        $appReport.audio_fault_observed -isnot [bool] -or
+        $appReport.unexpected_playback_stop_observed -isnot [bool] -or
         $appReport.audio_transport_healthy_at_completion -ne $true -or
         $appReport.audio_fault_observed -ne $false -or
         $appReport.unexpected_playback_stop_observed -ne $false -or
+        $appReport.selected_preview_quality -isnot [string] -or
+        $appReport.resolved_preview_quality -isnot [string] -or
         $appReport.selected_preview_quality -ne 'Full' -or
         $appReport.resolved_preview_quality -ne 'Full' -or
-        $appReport.observed_decoder_backends.Count -lt 1) {
+        $decoderBackends -isnot [System.Array] -or
+        $decoderBackends.Count -lt 1 -or
+        @($decoderBackends | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
         throw 'Playback soak report omitted required full-quality runtime/environment evidence.'
+    }
+    $resources = $appReport.monitor_resources
+    foreach ($property in @(
+        'frame_cache_capacity_bytes', 'current_frame_cache_bytes', 'peak_frame_cache_bytes_upper_bound',
+        'active_sticky_sessions', 'peak_sticky_sessions_upper_bound', 'session_cap'
+    )) {
+        Assert-JsonUnsignedIntegerProperty $resources $property 'Playback soak monitor resources'
+    }
+    if ($resources.frame_cache_capacity_bytes -lt 1 -or
+        $resources.current_frame_cache_bytes -gt $resources.frame_cache_capacity_bytes -or
+        $resources.current_frame_cache_bytes -gt $resources.peak_frame_cache_bytes_upper_bound -or
+        $resources.peak_frame_cache_bytes_upper_bound -gt $resources.frame_cache_capacity_bytes -or
+        $resources.active_sticky_sessions -gt $resources.session_cap -or
+        $resources.active_sticky_sessions -gt $resources.peak_sticky_sessions_upper_bound -or
+        $resources.peak_sticky_sessions_upper_bound -gt $resources.session_cap) {
+        throw "Playback soak reported monitor resources outside their aggregate bounds: $($resources | ConvertTo-Json -Compress)"
+    }
+    if ($resources.peak_frame_cache_bytes_upper_bound -lt 1 -or
+        $resources.peak_sticky_sessions_upper_bound -lt 1) {
+        throw "Playback soak did not exercise bounded monitor cache/session resources: $($resources | ConvertTo-Json -Compress)"
     }
     $delta = $appReport.runtime_diagnostics_delta
     foreach ($property in @(
@@ -135,10 +198,7 @@ try {
         'native_viewer_uploads', 'fallback_viewer_uploads', 'audio_underrun_frames',
         'audio_callback_lock_failures', 'audio_late_discarded_frames'
     )) {
-        if ($delta.PSObject.Properties.Name -notcontains $property -or $null -eq $delta.$property -or
-            [double]$delta.$property -lt 0) {
-            throw "Playback soak report omitted or invalidated runtime delta $property."
-        }
+        Assert-JsonUnsignedIntegerProperty $delta $property 'Playback soak runtime diagnostics'
     }
     foreach ($property in @('monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames', 'native_viewer_uploads')) {
         if ($delta.$property -lt 1) {
