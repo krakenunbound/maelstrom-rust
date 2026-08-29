@@ -73,6 +73,9 @@ pub struct ExportRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExportEvent {
+    /// The encoder process was successfully started. A later event still determines success,
+    /// cancellation, or fallback to another encoder.
+    EncoderStarted(H264Encoder),
     Progress(f32),
     Completed(PathBuf),
     Cancelled,
@@ -1208,10 +1211,11 @@ fn run_export_attempts_with_assets(
             let _ = fs::remove_file(&filter_path);
             return Err(format!("could not write export filter: {error}"));
         }
-        let result = run_child(
+        let result = run_child_with_encoder(
             &request.ffmpeg,
             &args,
             &filter_path,
+            Some(encoder),
             plan.duration,
             cancel,
             events,
@@ -2064,10 +2068,33 @@ fn probe_media(ffprobe: &Path, path: &Path) -> Result<MediaProbe, String> {
     })
 }
 
+#[cfg(test)]
 fn run_child(
     ffmpeg: &Path,
     args: &[String],
     filter_path: &Path,
+    duration: Tick,
+    cancel: &AtomicBool,
+    events: &mpsc::Sender<ExportEvent>,
+    notify: &Arc<dyn Fn() + Send + Sync>,
+) -> Result<(), String> {
+    run_child_with_encoder(
+        ffmpeg,
+        args,
+        filter_path,
+        None,
+        duration,
+        cancel,
+        events,
+        notify,
+    )
+}
+
+fn run_child_with_encoder(
+    ffmpeg: &Path,
+    args: &[String],
+    filter_path: &Path,
+    encoder: Option<H264Encoder>,
     duration: Tick,
     cancel: &AtomicBool,
     events: &mpsc::Sender<ExportEvent>,
@@ -2094,6 +2121,10 @@ fn run_child(
         .stderr
         .take()
         .ok_or_else(|| "missing FFmpeg error pipe".to_owned())?;
+    if let Some(encoder) = encoder {
+        let _ = events.send(ExportEvent::EncoderStarted(encoder));
+        notify();
+    }
     let (line_tx, line_rx) = mpsc::channel();
     let stdout_join = thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {

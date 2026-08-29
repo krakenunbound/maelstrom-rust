@@ -2,6 +2,64 @@
 
 use std::collections::HashSet;
 
+/// Stable machine facts included with performance reports.
+///
+/// Unavailable platform facts remain `None` and serialize as JSON `null`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineProfile {
+    pub cpu_identity: Option<String>,
+    pub logical_cpu_count: usize,
+    pub total_physical_memory_bytes: Option<u64>,
+}
+
+/// Detects lightweight, non-identifying machine facts for diagnostics reports.
+pub fn detect_machine() -> MachineProfile {
+    MachineProfile {
+        cpu_identity: cpu_identity(),
+        logical_cpu_count: std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1),
+        total_physical_memory_bytes: total_physical_memory_bytes(),
+    }
+}
+
+fn cpu_identity() -> Option<String> {
+    #[cfg(windows)]
+    {
+        std::env::var("PROCESSOR_IDENTIFIER")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    }
+
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn total_physical_memory_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `status` is initialized with its documented byte size and remains
+    // valid and exclusively mutable for the duration of this system call.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 {
+        Some(status.ullTotalPhys)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+fn total_physical_memory_bytes() -> Option<u64> {
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdapterClass {
     Discrete,
@@ -157,5 +215,24 @@ mod tests {
         assert!(!profile.intel_quick_sync_candidate);
         assert!(!profile.has_nvidia_gpu);
         assert!(profile.render_adapter.is_none());
+    }
+
+    #[test]
+    fn machine_detection_returns_safe_report_values() {
+        let profile = detect_machine();
+        #[cfg(windows)]
+        assert!(
+            profile
+                .cpu_identity
+                .as_deref()
+                .is_some_and(|cpu| !cpu.trim().is_empty())
+        );
+        assert!(profile.logical_cpu_count >= 1);
+        #[cfg(windows)]
+        assert!(
+            profile
+                .total_physical_memory_bytes
+                .is_some_and(|bytes| bytes > 0)
+        );
     }
 }

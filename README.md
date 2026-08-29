@@ -267,10 +267,13 @@ The package is written to `dist\Maelstrom-Windows-x64` and is smoke-tested with
 only its adjacent DLLs available. Packaging creates a deterministic A/V clip and requires the
 packaged app to produce linked bars, metadata, a nonempty waveform, a decoded monitor frame,
 advancing playback, live audio meters, confirmed FFmpeg export progress, and a cleanly cancelled
-snapshot export with no orphaned process or partial output. Its 120-frame
-startup-presentation, CPU/surface-submission, and real-media acceptance reports are retained at
+snapshot export with no orphaned process or partial output. Its startup-presentation,
+120-frame CPU/surface-submission, and real-media acceptance reports are retained as
 `dist\last-startup-smoke.json`, `dist\last-surface-submission-smoke.json`, and
-`dist\last-media-acceptance-smoke.json`, outside the shipped bundle. Packaging rejects a
+`dist\last-media-acceptance-smoke.json`, outside the shipped bundle. The surface report includes
+the machine, renderer/driver, observed decoder and active encoder, preview/cache, and display
+context described in [`docs/performance-reports.md`](./docs/performance-reports.md). Packaging
+rejects a
 first successful surface presentation of one second or slower. The shipped folder
 also includes FFmpeg's LGPL text, the exact build manifest, and the checksum inventory.
 

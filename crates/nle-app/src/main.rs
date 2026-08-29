@@ -42,7 +42,7 @@ use winit::{
 };
 
 mod hardware;
-use hardware::HardwareProfile;
+use hardware::{HardwareProfile, MachineProfile};
 
 const ENGLISH_SPLASH: &[u8] = include_bytes!("../../../assets/splash/english.png");
 const JAPANESE_SPLASH: &[u8] = include_bytes!("../../../assets/splash/japanese.png");
@@ -263,6 +263,10 @@ fn preferred_h264_encoders(profile: Option<&HardwareProfile>) -> Vec<nle_export:
         encoders.push(nle_export::H264Encoder::OpenH264);
     }
     encoders
+}
+
+fn observe_encoder_backend(observed: &mut Option<String>, encoder: nle_export::H264Encoder) {
+    *observed = Some(encoder.ffmpeg_name().to_owned());
 }
 
 #[cfg(windows)]
@@ -1785,12 +1789,69 @@ impl MonitorRuntimeMetrics {
     }
 }
 
-#[derive(Clone, Copy)]
-struct SurfaceSubmissionReport {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SurfaceSubmissionMetrics {
     samples: usize,
     cpu_p95_ms: f32,
     surface_submission_interval_p95_ms: f32,
     average_submission_fps: f32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+struct SurfaceSubmissionReport {
+    schema_version: u32,
+    samples: usize,
+    cpu_p95_ms: f32,
+    surface_submission_interval_p95_ms: f32,
+    average_submission_fps: f32,
+    renderer_gpu_name: String,
+    renderer_vendor_id: u32,
+    renderer_device_id: u32,
+    renderer_backend: String,
+    renderer_driver: String,
+    renderer_driver_info: String,
+    decoder_backends: Vec<String>,
+    encoder_backend: String,
+    cpu_identity: Option<String>,
+    logical_cpu_count: usize,
+    total_physical_memory_bytes: Option<u64>,
+    selected_preview_quality: String,
+    resolved_preview_quality: String,
+    preview_width: u32,
+    preview_height: u32,
+    monitor_cache_cap_bytes: usize,
+    display_refresh_millihertz: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct RendererReport {
+    name: String,
+    vendor_id: u32,
+    device_id: u32,
+    backend: String,
+    driver: String,
+    driver_info: String,
+}
+
+#[derive(Clone, Debug)]
+struct SurfaceReportEnvironment {
+    renderer: RendererReport,
+    decoder_backends: Vec<String>,
+    encoder_backend: String,
+    machine: MachineProfile,
+    selected_preview_quality: String,
+    resolved_preview_quality: String,
+    preview_size: [u32; 2],
+    monitor_cache_cap_bytes: usize,
+    display_refresh_millihertz: Option<u32>,
+}
+
+fn surface_report_backends_ready(
+    full_media_smoke: bool,
+    decoder_backends: &[String],
+    encoder_backend: Option<&str>,
+) -> bool {
+    !full_media_smoke || (!decoder_backends.is_empty() && encoder_backend.is_some())
 }
 
 #[derive(Clone, Copy)]
@@ -1808,6 +1869,7 @@ struct SurfaceSubmissionProbe {
     intervals_ms: [f32; FRAME_TIME_SAMPLE_COUNT],
     sample_count: usize,
     last_submitted_at: Option<Instant>,
+    completed: Option<SurfaceSubmissionMetrics>,
     report_tx: Option<mpsc::SyncSender<SurfaceSubmissionReport>>,
 }
 
@@ -1864,20 +1926,10 @@ impl SurfaceSubmissionProbe {
                 let Ok(report) = report_rx.recv() else {
                     return;
                 };
-                let json = format!(
-                    concat!(
-                        "{{\n",
-                        "  \"samples\": {},\n",
-                        "  \"cpu_p95_ms\": {:.4},\n",
-                        "  \"surface_submission_interval_p95_ms\": {:.4},\n",
-                        "  \"average_submission_fps\": {:.2}\n",
-                        "}}\n"
-                    ),
-                    report.samples,
-                    report.cpu_p95_ms,
-                    report.surface_submission_interval_p95_ms,
-                    report.average_submission_fps
-                );
+                let Ok(mut json) = serde_json::to_string_pretty(&report) else {
+                    return;
+                };
+                json.push('\n');
                 let _ = write_atomic_report(&path, &json);
             })
             .ok()?;
@@ -1886,6 +1938,7 @@ impl SurfaceSubmissionProbe {
             intervals_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
             sample_count: 0,
             last_submitted_at: None,
+            completed: None,
             report_tx: Some(report_tx),
         })
     }
@@ -1893,6 +1946,9 @@ impl SurfaceSubmissionProbe {
     /// Records only already-completed CPU work and present submissions. Report IO belongs to a
     /// dedicated one-shot worker, never the UI frame.
     fn record(&mut self, cpu_duration: Duration, submitted_at: Instant) -> bool {
+        if self.completed.is_some() {
+            return false;
+        }
         let Some(previous) = self.last_submitted_at.replace(submitted_at) else {
             return true;
         };
@@ -1910,16 +1966,47 @@ impl SurfaceSubmissionProbe {
         let cpu_p95_ms = nearest_rank_p95(&self.cpu_ms);
         let surface_submission_interval_p95_ms = nearest_rank_p95(&self.intervals_ms);
         let mean_interval_ms = self.intervals_ms.iter().sum::<f32>() / self.sample_count as f32;
-        let report = SurfaceSubmissionReport {
+        self.completed = Some(SurfaceSubmissionMetrics {
             samples: self.sample_count,
             cpu_p95_ms,
             surface_submission_interval_p95_ms,
             average_submission_fps: 1_000.0 / mean_interval_ms.max(f32::EPSILON),
-        };
-        if let Some(tx) = self.report_tx.take() {
-            let _ = tx.try_send(report);
-        }
+        });
         false
+    }
+
+    fn publish(&mut self, environment: SurfaceReportEnvironment) -> bool {
+        let Some(metrics) = self.completed.take() else {
+            return false;
+        };
+        let Some(tx) = self.report_tx.take() else {
+            return false;
+        };
+        let report = SurfaceSubmissionReport {
+            schema_version: 1,
+            samples: metrics.samples,
+            cpu_p95_ms: metrics.cpu_p95_ms,
+            surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
+            average_submission_fps: metrics.average_submission_fps,
+            renderer_gpu_name: environment.renderer.name,
+            renderer_vendor_id: environment.renderer.vendor_id,
+            renderer_device_id: environment.renderer.device_id,
+            renderer_backend: environment.renderer.backend,
+            renderer_driver: environment.renderer.driver,
+            renderer_driver_info: environment.renderer.driver_info,
+            decoder_backends: environment.decoder_backends,
+            encoder_backend: environment.encoder_backend,
+            cpu_identity: environment.machine.cpu_identity,
+            logical_cpu_count: environment.machine.logical_cpu_count,
+            total_physical_memory_bytes: environment.machine.total_physical_memory_bytes,
+            selected_preview_quality: environment.selected_preview_quality,
+            resolved_preview_quality: environment.resolved_preview_quality,
+            preview_width: environment.preview_size[0],
+            preview_height: environment.preview_size[1],
+            monitor_cache_cap_bytes: environment.monitor_cache_cap_bytes,
+            display_refresh_millihertz: environment.display_refresh_millihertz,
+        };
+        tx.try_send(report).is_ok()
     }
 }
 
@@ -2288,6 +2375,11 @@ struct App {
     monitor_runtime_metrics: MonitorRuntimeMetrics,
     startup_presentation_probe: Option<StartupPresentationProbe>,
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
+    machine_profile: MachineProfile,
+    renderer_report: Option<RendererReport>,
+    monitor_cache_cap_bytes: usize,
+    observed_decoder_backends: Vec<String>,
+    observed_encoder_backend: Option<String>,
     media_acceptance_probe: Option<MediaAcceptanceProbe>,
     media_acceptance_pending_drag: Option<u32>,
     media_acceptance_export_path: Option<PathBuf>,
@@ -2538,6 +2630,13 @@ impl App {
             monitor_runtime_metrics: MonitorRuntimeMetrics::default(),
             startup_presentation_probe: StartupPresentationProbe::from_environment(started_at),
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
+            machine_profile: hardware::detect_machine(),
+            renderer_report: None,
+            monitor_cache_cap_bytes: monitor_cache_bytes,
+            // DecodeBackend currently has six variants; preallocate all of them so observing a
+            // fallback never reallocates in the decoder event hot path.
+            observed_decoder_backends: Vec::with_capacity(6),
+            observed_encoder_backend: None,
             media_acceptance_probe: None,
             media_acceptance_pending_drag: None,
             media_acceptance_export_path: None,
@@ -2633,6 +2732,14 @@ impl App {
             backend = ?adapter_info.backend,
             "selected renderer adapter"
         );
+        self.renderer_report = Some(RendererReport {
+            name: adapter_info.name.clone(),
+            vendor_id: adapter_info.vendor,
+            device_id: adapter_info.device,
+            backend: format!("{:?}", adapter_info.backend),
+            driver: adapter_info.driver.clone(),
+            driver_info: adapter_info.driver_info.clone(),
+        });
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Maelstrom splash device"),
             required_features: wgpu::Features::empty(),
@@ -2695,6 +2802,53 @@ impl App {
         self.queue = Some(queue);
         self.renderer = Some(renderer);
         self.pending_hub_backdrops = Some(hub_backdrops);
+    }
+
+    fn try_publish_surface_submission_report(&mut self) {
+        if !self
+            .surface_submission_probe
+            .as_ref()
+            .is_some_and(|probe| probe.completed.is_some())
+        {
+            return;
+        }
+        let full_media_smoke = std::env::var_os("MAELSTROM_MEDIA_ACCEPTANCE_REPORT").is_some();
+        if !surface_report_backends_ready(
+            full_media_smoke,
+            &self.observed_decoder_backends,
+            self.observed_encoder_backend.as_deref(),
+        ) {
+            return;
+        }
+        let Some(renderer) = self.renderer_report.clone() else {
+            return;
+        };
+        let preview = preview_request(&self.editor);
+        let environment = SurfaceReportEnvironment {
+            renderer,
+            decoder_backends: self.observed_decoder_backends.clone(),
+            encoder_backend: self
+                .observed_encoder_backend
+                .clone()
+                .unwrap_or_else(|| "not_observed".to_owned()),
+            machine: self.machine_profile.clone(),
+            selected_preview_quality: format!("{:?}", self.editor.preview_quality()),
+            resolved_preview_quality: format!("{:?}", self.editor.resolved_preview_quality()),
+            preview_size: preview.output_size,
+            monitor_cache_cap_bytes: self.monitor_cache_cap_bytes,
+            display_refresh_millihertz: self
+                .window
+                .as_ref()
+                .and_then(|window| window.current_monitor())
+                .and_then(|monitor| monitor.refresh_rate_millihertz()),
+        };
+        let published = self
+            .surface_submission_probe
+            .as_mut()
+            .is_some_and(|probe| probe.publish(environment));
+        if published {
+            self.surface_submission_probe = None;
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -2885,6 +3039,7 @@ impl App {
                 }
             }
         }
+        self.try_publish_surface_submission_report();
         if let Some(action) = hub_action {
             self.handle_hub_action(action);
         }
@@ -3480,6 +3635,9 @@ impl App {
         if let Some(job) = &self.export_job {
             while let Ok(event) = job.try_recv() {
                 match event {
+                    nle_export::ExportEvent::EncoderStarted(encoder) => {
+                        observe_encoder_backend(&mut self.observed_encoder_backend, encoder);
+                    }
                     nle_export::ExportEvent::Progress(progress) => {
                         if let Some(probe) = &mut self.media_acceptance_probe {
                             probe.record_export_progress();
@@ -4699,8 +4857,16 @@ impl App {
                             continue;
                         }
                         if let Some(backend) = frame.backend {
+                            let backend_name = backend.display_name();
+                            if !self
+                                .observed_decoder_backends
+                                .iter()
+                                .any(|observed| observed == backend_name)
+                            {
+                                self.observed_decoder_backends.push(backend_name.to_owned());
+                            }
                             self.editor
-                                .set_media_decoder_backend(frame.media_id, backend.display_name());
+                                .set_media_decoder_backend(frame.media_id, backend_name);
                         }
                         let target_source_tick = self.monitor_last_requests[layer]
                             .filter(|request| request.media_id == frame.media_id)
@@ -6057,6 +6223,7 @@ mod tests {
             intervals_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
             sample_count: 0,
             last_submitted_at: None,
+            completed: None,
             report_tx: Some(report_tx),
         };
         let origin = Instant::now();
@@ -6068,11 +6235,61 @@ mod tests {
             );
             assert_eq!(keep_running, frame < FRAME_TIME_SAMPLE_COUNT);
         }
+        assert!(report_rx.try_recv().is_err());
+        assert!(probe.publish(SurfaceReportEnvironment {
+            renderer: RendererReport {
+                name: "Test GPU".to_owned(),
+                vendor_id: 1,
+                device_id: 2,
+                backend: "Test".to_owned(),
+                driver: "driver".to_owned(),
+                driver_info: "1.0".to_owned(),
+            },
+            decoder_backends: vec!["Software".to_owned()],
+            encoder_backend: "libopenh264".to_owned(),
+            machine: MachineProfile {
+                cpu_identity: Some("Test CPU".to_owned()),
+                logical_cpu_count: 8,
+                total_physical_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            },
+            selected_preview_quality: "Auto".to_owned(),
+            resolved_preview_quality: "Half".to_owned(),
+            preview_size: [960, 540],
+            monitor_cache_cap_bytes: 512 * 1024 * 1024,
+            display_refresh_millihertz: Some(60_000),
+        }));
         let report = report_rx.try_recv().expect("surface submission report");
+        assert_eq!(report.schema_version, 1);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
         assert!((report.average_submission_fps - 62.5).abs() < 0.01);
+        assert_eq!(report.decoder_backends, ["Software"]);
+        assert_eq!(report.encoder_backend, "libopenh264");
+        assert_eq!(report.resolved_preview_quality, "Half");
+        assert_eq!(report.monitor_cache_cap_bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn full_surface_report_waits_for_observed_media_backends() {
+        let decoder = vec!["Windows D3D11VA".to_owned()];
+        assert!(surface_report_backends_ready(false, &[], None));
+        assert!(!surface_report_backends_ready(true, &[], None));
+        assert!(!surface_report_backends_ready(true, &decoder, None));
+        assert!(surface_report_backends_ready(
+            true,
+            &decoder,
+            Some("h264_qsv")
+        ));
+    }
+
+    #[test]
+    fn encoder_fallback_report_tracks_the_latest_started_backend() {
+        let mut observed = None;
+        observe_encoder_backend(&mut observed, nle_export::H264Encoder::Nvidia);
+        assert_eq!(observed.as_deref(), Some("h264_nvenc"));
+        observe_encoder_backend(&mut observed, nle_export::H264Encoder::OpenH264);
+        assert_eq!(observed.as_deref(), Some("libopenh264"));
     }
 
     #[test]

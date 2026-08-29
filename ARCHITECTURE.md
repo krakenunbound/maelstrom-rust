@@ -243,6 +243,14 @@ it does not log or allocate per frame. The native audio callback only increments
 lock misses and underrun device frames, while late decoded-frame discards are counted on the worker.
 These counters are runtime-only and never enter project persistence.
 
+The existing 120-frame surface-submission report is schema-versioned and carries the measurement
+environment with its timing window: actual renderer adapter/driver data, every decoder backend that
+produced a monitor frame, the most recently started encoder in the export fallback chain, CPU/RAM,
+selected and resolved preview quality plus requested decode size, cache cap, and display refresh
+when the platform reports it. Full package smoke publication waits for observed decoder and encoder
+evidence; a cadence-only run explicitly reports unobserved media backends. Unavailable platform
+facts serialize as JSON `null`, never a plausible-looking zero or `"Unknown"` value.
+
 Shipping uses the pinned FFmpeg 8.1 LGPL shared bundle. Windows DLLs are packaged beside the
 executable. GPL/nonfree codec libraries are rejected. H.264 export prefers available Windows
 hardware and then Media Foundation/OpenH264. FFmpeg is linked as libraries for playback/scrubbing.

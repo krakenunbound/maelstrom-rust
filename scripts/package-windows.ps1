@@ -218,19 +218,43 @@ try {
         throw "Packaged editor first surface presentation regressed to $($startup.first_surface_present_ms) ms."
     }
     $surfaceSubmission = Get-Content -LiteralPath $surfaceSubmissionReportPath -Raw | ConvertFrom-Json
-    foreach ($property in @('samples', 'cpu_p95_ms', 'surface_submission_interval_p95_ms', 'average_submission_fps')) {
-        if ($null -eq $surfaceSubmission.$property) {
+    foreach ($property in @(
+        'schema_version', 'samples', 'cpu_p95_ms', 'surface_submission_interval_p95_ms',
+        'average_submission_fps', 'renderer_gpu_name', 'renderer_vendor_id', 'renderer_device_id',
+        'renderer_backend', 'renderer_driver', 'renderer_driver_info', 'decoder_backends',
+        'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
+        'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
+        'monitor_cache_cap_bytes', 'display_refresh_millihertz'
+    )) {
+        if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
             throw "Surface submission probe omitted $property."
         }
     }
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
+    if ($surfaceSubmission.schema_version -ne 1) {
+        throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
+    }
     if ($surfaceSubmission.cpu_p95_ms -lt 0 -or $surfaceSubmission.cpu_p95_ms -gt 8.0) {
         throw "Packaged editor CPU p95 regressed to $($surfaceSubmission.cpu_p95_ms) ms."
     }
     if ($surfaceSubmission.average_submission_fps -lt 55.0 -or $surfaceSubmission.surface_submission_interval_p95_ms -lt 0 -or $surfaceSubmission.surface_submission_interval_p95_ms -gt 25.0) {
         throw "Packaged editor surface submission cadence regressed: $($surfaceSubmission.average_submission_fps) submissions/s, p95 $($surfaceSubmission.surface_submission_interval_p95_ms) ms."
+    }
+    if ([string]::IsNullOrWhiteSpace($surfaceSubmission.renderer_gpu_name) -or
+        [string]::IsNullOrWhiteSpace($surfaceSubmission.renderer_backend) -or
+        [string]::IsNullOrWhiteSpace($surfaceSubmission.cpu_identity) -or
+        $surfaceSubmission.logical_cpu_count -lt 1 -or
+        $surfaceSubmission.total_physical_memory_bytes -lt 1 -or
+        $surfaceSubmission.decoder_backends.Count -lt 1 -or
+        [string]::IsNullOrWhiteSpace($surfaceSubmission.encoder_backend) -or
+        $surfaceSubmission.encoder_backend -eq 'not_observed' -or
+        $surfaceSubmission.preview_width -lt 1 -or $surfaceSubmission.preview_height -lt 1 -or
+        $surfaceSubmission.monitor_cache_cap_bytes -lt 1 -or
+        ($null -ne $surfaceSubmission.display_refresh_millihertz -and
+            $surfaceSubmission.display_refresh_millihertz -lt 1)) {
+        throw 'Surface submission probe returned incomplete performance environment metadata.'
     }
     $mediaAcceptance = Get-Content -LiteralPath $mediaAcceptanceReportPath -Raw | ConvertFrom-Json
     foreach ($property in @('media_pool_drag_completed', 'analysis_metadata_ready', 'waveform_ready', 'monitor_frame_arrived', 'native_viewer_uploaded', 'live_audio_meter_nonzero', 'live_fade_reduced', 'live_fade_recovered', 'live_gain_reduced', 'export_started', 'export_progress_received', 'playhead_advanced_while_exporting', 'export_cancelled')) {

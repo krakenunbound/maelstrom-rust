@@ -84,7 +84,7 @@ Build the evidence harness before adding engine complexity.
       layout, duration, GOP pattern, and expected failure behavior. See `docs/media-fixtures.md`.
 - [x] Add generated fixtures for tests that cannot depend on redistributable media.
 - [x] Add an opt-in real-media corpus runner for large local files.
-- [ ] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
+- [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.

@@ -244,6 +244,23 @@ assert 0 <= surface["cpu_p95_ms"] <= 8.0, surface
 assert surface["average_submission_fps"] >= 55.0, surface
 assert 0 <= surface["surface_submission_interval_p95_ms"] <= 25.0, surface
 for key in (
+    "schema_version", "renderer_gpu_name", "renderer_vendor_id", "renderer_device_id",
+    "renderer_backend", "renderer_driver", "renderer_driver_info", "decoder_backends",
+    "encoder_backend", "cpu_identity", "logical_cpu_count", "total_physical_memory_bytes",
+    "selected_preview_quality", "resolved_preview_quality", "preview_width", "preview_height",
+    "monitor_cache_cap_bytes", "display_refresh_millihertz",
+):
+    assert key in surface, (key, surface)
+assert surface["schema_version"] == 1, surface
+assert surface["renderer_gpu_name"] and surface["renderer_backend"], surface
+assert surface["decoder_backends"] and surface["encoder_backend"] != "not_observed", surface
+assert surface["logical_cpu_count"] >= 1, surface
+assert surface["cpu_identity"] is None or surface["cpu_identity"], surface
+assert surface["total_physical_memory_bytes"] is None or surface["total_physical_memory_bytes"] >= 1, surface
+assert surface["preview_width"] >= 1 and surface["preview_height"] >= 1, surface
+assert surface["monitor_cache_cap_bytes"] >= 1, surface
+assert surface["display_refresh_millihertz"] is None or surface["display_refresh_millihertz"] >= 1, surface
+for key in (
     "media_pool_drag_completed", "analysis_metadata_ready", "waveform_ready", "monitor_frame_arrived",
     "live_audio_meter_nonzero", "live_fade_reduced", "live_fade_recovered", "live_gain_reduced",
     "export_started", "export_progress_received",
