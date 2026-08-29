@@ -89,7 +89,9 @@ Build the evidence harness before adding engine complexity.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
       A finite prerequisite matrix now covers all listed behaviors except the ten-minute playback
-      duration and broad memory-pressure load; see `docs/phase0-scenarios.md`.
+      duration and broad memory-pressure load. It now includes a bounded 350 MiB cumulative /
+      280 MiB live runtime strip-cache checkpoint with per-insertion cap and exact oldest-eviction
+      assertions; broader sustained pressure remains open. See `docs/phase0-scenarios.md`.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,

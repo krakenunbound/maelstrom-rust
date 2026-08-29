@@ -61,6 +61,14 @@ const SCRUB_PREVIEW_MIN_FRAMES: usize = 12;
 const SCRUB_PREVIEW_FRAME_HEIGHT: u32 = 90;
 const MAX_RUNTIME_VIDEO_STRIPS: usize = 4;
 const MAX_RUNTIME_VIDEO_STRIP_BYTES: usize = 256 * 1024 * 1024;
+/// The finite Phase 0 pressure checkpoint uses five 70 MiB strips. Four candidates would occupy
+/// 280 MiB before the byte cap evicts the oldest retained strip.
+#[cfg(test)]
+const PHASE0_VIDEO_STRIP_BYTES: usize = 70 * 1024 * 1024;
+#[cfg(test)]
+const PHASE0_VIDEO_STRIP_WIDTH: u32 = 7_168;
+#[cfg(test)]
+const PHASE0_VIDEO_STRIP_HEIGHT: u32 = 2_560;
 const STILL_PREVIEW_MAX_WIDTH: u32 = 320;
 const STILL_IMAGE_MAX_PIXELS: u64 = 100_000_000;
 const PROJECT_CATALOG_VERSION: u32 = 1;
@@ -8943,15 +8951,21 @@ mod tests {
         result
     }
 
-    fn phase0_video_strip() -> Arc<nle_waveform::VideoStrip> {
+    fn phase0_video_strip(media_id: u32) -> Arc<nle_waveform::VideoStrip> {
+        debug_assert_eq!(
+            PHASE0_VIDEO_STRIP_WIDTH as usize * PHASE0_VIDEO_STRIP_HEIGHT as usize * 4,
+            PHASE0_VIDEO_STRIP_BYTES
+        );
         Arc::new(nle_waveform::VideoStrip {
-            width: 1,
-            height: 1,
-            rgba: vec![0; 4],
+            width: PHASE0_VIDEO_STRIP_WIDTH,
+            height: PHASE0_VIDEO_STRIP_HEIGHT,
+            // A non-zero fill forces deterministic physical page commitment; a zero-filled
+            // allocation could otherwise remain backed by the operating system's shared zero page.
+            rgba: vec![media_id as u8; PHASE0_VIDEO_STRIP_BYTES],
             duration_seconds: 1.0,
             frame_count: 1,
-            frame_width: 1,
-            frame_height: 1,
+            frame_width: PHASE0_VIDEO_STRIP_WIDTH,
+            frame_height: PHASE0_VIDEO_STRIP_HEIGHT,
             columns: 1,
             rows: 1,
         })
@@ -9229,25 +9243,59 @@ mod tests {
             5,
             || {
                 let mut app = App::new_with_catalog(false, None);
-                for media_id in 1..=MAX_RUNTIME_VIDEO_STRIPS as u32 + 1 {
-                    app.retain_video_strip(media_id, phase0_video_strip());
+                let mut cumulative_bytes = 0usize;
+                let mut peak_live_bytes = 0usize;
+                for media_id in 1..=5 {
+                    let strip = phase0_video_strip(media_id);
+                    let strip_bytes = strip.rgba.len();
+                    cumulative_bytes = cumulative_bytes.saturating_add(strip_bytes);
+                    // This includes the new strip before `retain_video_strip` can release an
+                    // evicted strip, so it captures the pressure peak rather than only retention.
+                    peak_live_bytes = peak_live_bytes.max(app.video_strip_bytes + strip_bytes);
+                    app.retain_video_strip(media_id, strip);
+                    if app.video_strip_bytes > MAX_RUNTIME_VIDEO_STRIP_BYTES {
+                        return Err(format!(
+                            "runtime video-strip cache exceeded its hard cap after insertion {media_id}: {} > {}",
+                            app.video_strip_bytes, MAX_RUNTIME_VIDEO_STRIP_BYTES
+                        ));
+                    }
+                    let expected_ids: &[u32] = match media_id {
+                        1 => &[1],
+                        2 => &[1, 2],
+                        3 => &[1, 2, 3],
+                        4 => &[2, 3, 4],
+                        5 => &[3, 4, 5],
+                        _ => unreachable!("Phase 0 strip checkpoint has five insertions"),
+                    };
+                    let retained_ids: Vec<u32> = app.video_strip_order.iter().copied().collect();
+                    let expected_bytes = expected_ids.len() * PHASE0_VIDEO_STRIP_BYTES;
+                    if retained_ids != expected_ids || app.video_strip_bytes != expected_bytes {
+                        return Err(format!(
+                            "runtime video-strip cache retained unexpected entries after insertion {media_id}: retained_ids={retained_ids:?} retained_bytes={} expected_ids={expected_ids:?} expected_bytes={expected_bytes}",
+                            app.video_strip_bytes
+                        ));
+                    }
                 }
-                if app.video_strips.len() != MAX_RUNTIME_VIDEO_STRIPS
+                let retained_ids: Vec<u32> = app.video_strip_order.iter().copied().collect();
+                let expected_retained_bytes = PHASE0_VIDEO_STRIP_BYTES * 3;
+                if retained_ids != [3, 4, 5]
+                    || app.video_strips.len() != 3
                     || app.video_strips.contains_key(&1)
-                    || app.video_strip_bytes > MAX_RUNTIME_VIDEO_STRIP_BYTES
+                    || app.video_strips.contains_key(&2)
+                    || app.video_strip_bytes != expected_retained_bytes
                 {
-                    return Err(
-                        "runtime video-strip cache did not evict the oldest bounded entry"
-                            .to_owned(),
-                    );
+                    return Err(format!(
+                        "runtime video-strip cache did not evict exact oldest entries: retained_ids={retained_ids:?} retained_bytes={} expected_bytes={expected_retained_bytes}",
+                        app.video_strip_bytes
+                    ));
                 }
                 Ok((
                     None,
                     format!(
-                        "{} insertions retained {} strips within the {} byte cap",
-                        MAX_RUNTIME_VIDEO_STRIPS + 1,
-                        app.video_strips.len(),
-                        MAX_RUNTIME_VIDEO_STRIP_BYTES
+                        "cumulative_bytes={cumulative_bytes} retained_bytes={} cap_bytes={} peak_live_bytes={peak_live_bytes}; five deterministic {}-byte strips retained IDs {retained_ids:?} after exact oldest eviction",
+                        app.video_strip_bytes,
+                        MAX_RUNTIME_VIDEO_STRIP_BYTES,
+                        PHASE0_VIDEO_STRIP_BYTES,
                     ),
                 ))
             },

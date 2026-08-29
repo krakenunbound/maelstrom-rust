@@ -76,6 +76,21 @@ try {
             throw "Invalid scenario evidence in report: $($scenario.name)"
         }
     }
+    $memoryPressure = @($report.scenarios | Where-Object { $_.name -eq 'runtime_video_strip_cache_eviction' })
+    if ($memoryPressure.Count -ne 1 -or [int]$memoryPressure[0].iterations -ne 5) {
+        throw 'Phase 0 memory-pressure scenario is missing or has an unexpected iteration count.'
+    }
+    $evidence = [string]$memoryPressure[0].evidence
+    if ($evidence -notmatch 'cumulative_bytes=(\d+) retained_bytes=(\d+) cap_bytes=(\d+) peak_live_bytes=(\d+)') {
+        throw 'Phase 0 memory-pressure scenario does not report cumulative, retained, cap, and peak bytes.'
+    }
+    $cumulativeBytes = [int64]$Matches[1]
+    $retainedBytes = [int64]$Matches[2]
+    $capBytes = [int64]$Matches[3]
+    $peakLiveBytes = [int64]$Matches[4]
+    if ($cumulativeBytes -ne 367001600 -or $retainedBytes -ne 220200960 -or $capBytes -ne 268435456 -or $peakLiveBytes -ne 293601280 -or $retainedBytes -gt $capBytes -or $peakLiveBytes -le $capBytes) {
+        throw "Phase 0 memory-pressure evidence is not the required bounded 70 MiB strip checkpoint: $evidence"
+    }
     Write-Host "Phase 0 scenarios: PASS ($resolvedReportPath)"
 }
 finally {

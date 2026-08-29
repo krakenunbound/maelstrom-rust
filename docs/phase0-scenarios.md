@@ -17,7 +17,13 @@ iteration count, elapsed milliseconds, observable decoder backend when one was
 produced, and explicit pass/failure evidence. The matrix covers public monitor
 decoder reverse scrubs, editor-state switching, offline-media recovery,
 runtime video-strip eviction, and cancellation of an actual FFmpeg export with
-no output left behind.
+no output left behind. The cache checkpoint allocates five deterministic 70 MiB
+RGBA strips (350 MiB cumulative, 280 MiB live before eviction), checks the 256
+MiB cap after every insertion, and requires exact oldest-first retention of
+strips 3–5 (210 MiB retained). Its evidence records `cumulative_bytes`,
+`retained_bytes`, `cap_bytes`, and `peak_live_bytes`. The peak is modeled live
+RGBA payload, not an operating-system RSS/commit measurement. Allow roughly
+280 MiB plus test-process overhead; this opt-in matrix is intentionally serial.
 
 The runner restores altered environment variables. The test removes only its
 own fixture copy and export final/staging/filter files; the successful JSON

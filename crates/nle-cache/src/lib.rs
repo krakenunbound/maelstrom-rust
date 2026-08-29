@@ -234,6 +234,62 @@ mod tests {
     }
 
     #[test]
+    fn full_hd_rgba_pressure_evicts_oldest_frames_at_hard_cap() {
+        const FULL_HD_RGBA_BYTES: usize = 1_920 * 1_080 * 4;
+        const RETAINED_FRAMES: usize = 3;
+        let mut cache = FrameCache::new(FULL_HD_RGBA_BYTES * RETAINED_FRAMES);
+
+        for tick in 0..10 {
+            let frame_key = FrameKey {
+                project_epoch: 7,
+                media_id: 11,
+                source_tick: tick,
+                width: 1_920,
+                height: 1_080,
+            };
+            let frame = FrameValue::new(
+                tick,
+                1_920,
+                1_080,
+                vec![tick as u8; FULL_HD_RGBA_BYTES].into(),
+            );
+            assert!(cache.insert(frame_key, frame));
+            assert!(cache.used_bytes() <= cache.capacity_bytes());
+            let expected_len = (tick as usize + 1).min(RETAINED_FRAMES);
+            assert_eq!(cache.len(), expected_len);
+            assert_eq!(cache.used_bytes(), FULL_HD_RGBA_BYTES * expected_len);
+        }
+
+        assert_eq!(cache.used_bytes(), cache.capacity_bytes());
+        for tick in 0..7 {
+            let frame_key = FrameKey {
+                project_epoch: 7,
+                media_id: 11,
+                source_tick: tick,
+                width: 1_920,
+                height: 1_080,
+            };
+            assert!(
+                cache.get(&frame_key).is_none(),
+                "old frame {tick} was retained"
+            );
+        }
+        for tick in 7..10 {
+            let frame_key = FrameKey {
+                project_epoch: 7,
+                media_id: 11,
+                source_tick: tick,
+                width: 1_920,
+                height: 1_080,
+            };
+            assert!(
+                cache.get(&frame_key).is_some(),
+                "recent frame {tick} was evicted"
+            );
+        }
+    }
+
+    #[test]
     fn oversize_value_is_rejected_without_displacing_existing_frame() {
         let mut cache = FrameCache::new(10);
         assert!(cache.insert(key(1), value(1, 10)));
