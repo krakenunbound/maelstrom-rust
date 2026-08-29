@@ -2291,6 +2291,12 @@ impl EditorState {
         self.timeline_media_draw_slots_dirty = true;
     }
 
+    /// Reports whether analysis has marked this imported item offline or unreadable.
+    /// This is read-only runtime state, deliberately excluded from project snapshots.
+    pub fn media_is_offline(&self, media_id: MediaId) -> bool {
+        self.media_errors.contains_key(&media_id)
+    }
+
     /// Records the actual decoder used by the live monitor, not a hardware capability guess.
     pub fn set_media_decoder_backend(&mut self, media_id: MediaId, backend: impl Into<String>) {
         self.media_decoder_backends.insert(media_id, backend.into());
@@ -14795,6 +14801,7 @@ mod tests {
         editor.add_media_paths([PathBuf::from("missing.mp4")]);
         editor.set_media_error(1, "file not found");
         assert!(editor.media_errors.contains_key(&1));
+        assert!(editor.media_is_offline(1));
         assert_eq!(
             timeline_clip_palette(TrackKind::Video, 1, true),
             (
@@ -14805,6 +14812,7 @@ mod tests {
 
         editor.set_media_metadata(1, MediaMetadata::default());
         assert!(!editor.media_errors.contains_key(&1));
+        assert!(!editor.media_is_offline(1));
     }
 
     #[test]

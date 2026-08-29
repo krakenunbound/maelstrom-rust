@@ -3603,6 +3603,12 @@ impl App {
     }
 
     fn start_video_export(&mut self, output: PathBuf) {
+        self.start_video_export_with_ffmpeg(output, bundled_media_tool("ffmpeg"));
+    }
+
+    /// Keeps the normal export path and test harness on one request construction path. The
+    /// caller is responsible for supplying an executable that has already been validated.
+    fn start_video_export_with_ffmpeg(&mut self, output: PathBuf, ffmpeg: PathBuf) {
         // Recheck after the native destination dialog: the user may have changed the timeline
         // while it was open. Never send unsupported graph features to the snapshot exporter.
         if let Some(message) = self.editor.quick_export_block_message() {
@@ -3614,7 +3620,7 @@ impl App {
             snapshot: self.editor.snapshot(),
             settings: self.current_project_settings,
             output,
-            ffmpeg: bundled_media_tool("ffmpeg"),
+            ffmpeg,
             encoders: preferred_h264_encoders(self.hardware_profile.as_ref()),
         };
         let notify = Arc::clone(&self.project_dialog_notify);
@@ -5919,6 +5925,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn native_viewer_maps_basic_correction_whites_and_blacks() {
@@ -8534,5 +8541,532 @@ mod tests {
         assert_eq!(paths.get(&1), Some(&project_path));
         drop(app);
         fs::remove_dir_all(catalog.parent().expect("test root")).expect("remove test data");
+    }
+
+    #[derive(Serialize)]
+    struct Phase0ScenarioReport {
+        name: &'static str,
+        iterations: u32,
+        elapsed_ms: u128,
+        backend: Option<String>,
+        passed: bool,
+        evidence: String,
+    }
+
+    #[derive(Serialize)]
+    struct Phase0Report {
+        schema_version: u32,
+        status: &'static str,
+        scenarios: Vec<Phase0ScenarioReport>,
+    }
+
+    fn phase0_required_absolute_path(name: &str) -> Result<PathBuf, String> {
+        let path = std::env::var_os(name)
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("{name} is required"))?;
+        if !path.is_absolute() {
+            return Err(format!("{name} must be an absolute path"));
+        }
+        Ok(path)
+    }
+
+    fn phase0_required_absolute_file(name: &str) -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path(name)?;
+        if !path.is_file() {
+            return Err(format!("{name} does not name a file: {}", path.display()));
+        }
+        Ok(path)
+    }
+
+    fn phase0_report_path() -> Result<PathBuf, String> {
+        let report = phase0_required_absolute_path("MAELSTROM_PHASE0_REPORT")?;
+        if report.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE0_REPORT must end in .json".to_owned());
+        }
+        let artifact_root = phase0_required_absolute_path("MAELSTROM_PHASE0_ARTIFACT_ROOT")?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let report_parent = report
+            .parent()
+            .ok_or_else(|| "MAELSTROM_PHASE0_REPORT has no parent directory".to_owned())?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if report_parent != artifact_root
+            || !artifact_root.ends_with(Path::new("artifacts").join("phase0-scenarios"))
+        {
+            return Err(format!(
+                "MAELSTROM_PHASE0_REPORT must be directly inside the supplied artifacts/phase0-scenarios directory, got {}",
+                report_parent.display()
+            ));
+        }
+        Ok(report)
+    }
+
+    fn phase0_run_scenario(
+        name: &'static str,
+        iterations: u32,
+        run: impl FnOnce() -> Result<(Option<String>, String), String>,
+    ) -> Phase0ScenarioReport {
+        let started = Instant::now();
+        match run() {
+            Ok((backend, evidence)) => Phase0ScenarioReport {
+                name,
+                iterations,
+                elapsed_ms: started.elapsed().as_millis(),
+                backend,
+                passed: true,
+                evidence,
+            },
+            Err(evidence) => Phase0ScenarioReport {
+                name,
+                iterations,
+                elapsed_ms: started.elapsed().as_millis(),
+                backend: None,
+                passed: false,
+                evidence,
+            },
+        }
+    }
+
+    fn phase0_write_report(path: &Path, report: &Phase0Report) -> Result<(), String> {
+        let encoded = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
+        let temporary = path.with_extension(format!(
+            "{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&encoded)
+                .map_err(|error| error.to_string())?;
+            file.flush().map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            nle_project_io::replace_file(&temporary, path).map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn phase0_video_strip() -> Arc<nle_waveform::VideoStrip> {
+        Arc::new(nle_waveform::VideoStrip {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            duration_seconds: 1.0,
+            frame_count: 1,
+            frame_width: 1,
+            frame_height: 1,
+            columns: 1,
+            rows: 1,
+        })
+    }
+
+    fn phase0_wait_for_monitor_event(
+        decoder: &nle_decode::MonitorDecoder,
+        request_id: u64,
+    ) -> Result<nle_decode::DecodeEvent, String> {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if let Some(event) = decoder.try_recv().map_err(|error| error.to_string())? {
+                let current = match &event {
+                    nle_decode::DecodeEvent::Frame(frame) => frame.request_id == request_id,
+                    nle_decode::DecodeEvent::Error(error) => error.request_id == request_id,
+                };
+                if current {
+                    return Ok(event);
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Err(format!(
+            "monitor decode request {request_id} did not complete before deadline"
+        ))
+    }
+
+    fn phase0_export_artifacts(output: &Path) -> Vec<PathBuf> {
+        let Some(parent) = output.parent() else {
+            return Vec::new();
+        };
+        let stem = output
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let output_name = output.file_name();
+        fs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    return false;
+                };
+                path.file_name() == output_name
+                    || (name.starts_with(&format!(".{stem}.maelstrom-"))
+                        && (name.ends_with(".staged.mp4") || name.ends_with(".filter")))
+                    || (name.starts_with(".maelstrom-export-") && name.ends_with(".filter"))
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires explicit MAELSTROM_PHASE0_MEDIA and MAELSTROM_PHASE0_REPORT"]
+    fn phase0_scenario_matrix() {
+        let media = phase0_required_absolute_file("MAELSTROM_PHASE0_MEDIA")
+            .expect("validate Phase 0 media fixture");
+        let report_path = phase0_report_path().expect("validate Phase 0 report path");
+        let ffmpeg_root = std::env::var_os("FFMPEG_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path.join("bin/ffmpeg.exe").is_file())
+            .expect("FFMPEG_DIR must name an absolute pinned FFmpeg bundle");
+        assert!(ffmpeg_root.join("bin/ffprobe.exe").is_file());
+        let output = report_path
+            .parent()
+            .expect("report parent")
+            .join("phase0-cancelled.mp4");
+        let _ = fs::remove_file(&output);
+
+        let mut scenarios = Vec::with_capacity(5);
+        scenarios.push(phase0_run_scenario(
+            "reverse_scrub_public_monitor_decoder",
+            6,
+            || {
+                let decoder = nle_decode::MonitorDecoder::new_with_notifier_and_cache_bytes(
+                    || {},
+                    16 * 1024 * 1024,
+                );
+                const REQUESTED_TICK: i64 = 300_000;
+                const SOURCE_FRAME_DURATION_TICK: i64 = 33_367;
+                let source_ticks = [
+                    1_800_000,
+                    1_500_000,
+                    1_200_000,
+                    900_000,
+                    600_000,
+                    REQUESTED_TICK,
+                ];
+                for (index, source_tick) in source_ticks.into_iter().enumerate() {
+                    decoder
+                        .request(nle_decode::DecodeRequest {
+                            project_epoch: 1,
+                            cache_epoch: 1,
+                            request_id: index as u64 + 1,
+                            media_id: 1,
+                            path: media.clone(),
+                            source_tick,
+                            width: 160,
+                            height: 90,
+                            is_scrubbing: true,
+                            prewarm_scrub_workers: false,
+                            high_quality_scaling: false,
+                            progressive_scrub_frames: true,
+                            source_frame_duration_tick: Some(SOURCE_FRAME_DURATION_TICK),
+                            acceleration: nle_decode::AccelerationPreference::Software,
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+                let deadline = Instant::now() + Duration::from_secs(8);
+                let mut backend = None;
+                let mut completed = false;
+                while Instant::now() < deadline {
+                    if let Some(event) = decoder.try_recv().map_err(|error| error.to_string())? {
+                        match event {
+                            nle_decode::DecodeEvent::Frame(frame) if frame.request_id == 6 => {
+                                if (frame.width, frame.height) != (160, 90) {
+                                    return Err(format!(
+                                        "final reverse scrub dimensions were {}x{}, expected 160x90",
+                                        frame.width, frame.height
+                                    ));
+                                }
+                                if !(REQUESTED_TICK..=REQUESTED_TICK + SOURCE_FRAME_DURATION_TICK)
+                                    .contains(&frame.source_tick)
+                                {
+                                    return Err(format!(
+                                        "final reverse scrub source tick {} did not reach requested {} within one declared source frame",
+                                        frame.source_tick, REQUESTED_TICK
+                                    ));
+                                }
+                                backend = frame
+                                    .backend
+                                    .map(|value| value.display_name().to_owned());
+                                if backend.is_none() {
+                                    return Err("final reverse scrub frame did not expose a decoder backend".to_owned());
+                                }
+                                completed = true;
+                                break;
+                            }
+                            nle_decode::DecodeEvent::Error(error) if error.request_id == 6 => {
+                                return Err(format!("final reverse scrub decode failed: {}", error.message));
+                            }
+                            _ => {}
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if !completed {
+                    return Err("final reverse scrub request did not complete before deadline".to_owned());
+                }
+                drop(decoder);
+                Ok((backend, "six decreasing source ticks accepted by the public latest-wins decoder; the final 160x90 frame reached 300000 microseconds or the next declared source frame".to_owned()))
+            },
+        ));
+        scenarios.push(phase0_run_scenario("rapid_editor_state_switching", 8, || {
+            let mut first = EditorState::new(Language::English, "Phase 0 A");
+            first.add_media_paths([media.clone()]);
+            if !first.add_selected_to_timeline() {
+                return Err("could not place first project fixture".to_owned());
+            }
+            let first_snapshot = first.snapshot();
+            let mut second = EditorState::new(Language::English, "Phase 0 B");
+            second.add_media_paths([media.clone()]);
+            if !second.add_selected_to_timeline() {
+                return Err("could not place second project fixture".to_owned());
+            }
+            second.set_playhead(nle_timeline::Tick(500_000));
+            let second_snapshot = second.snapshot();
+            let mut app = App::new_with_catalog(false, None);
+            for index in 0..8 {
+                let (name, snapshot, expected_tick) = if index % 2 == 0 {
+                    ("Phase 0 A", first_snapshot.clone(), 0)
+                } else {
+                    ("Phase 0 B", second_snapshot.clone(), 500_000)
+                };
+                app.show_editor_screen(name.to_owned(), Language::English, Some(snapshot), ProjectSettings::default(), false);
+                if app.editor.playhead.0 != expected_tick || app.editor.media.first().map(|item| &item.path) != Some(&media) {
+                    return Err(format!("editor state switch {index} did not restore the expected snapshot"));
+                }
+            }
+            Ok((None, "eight alternating App editor restores retained the fixture path and each snapshot playhead".to_owned()))
+        }));
+        scenarios.push(phase0_run_scenario("offline_media_detection_and_recovery", 1, || {
+            let restored = report_path
+                .parent()
+                .expect("report parent")
+                .join("phase0-offline-recovery.mp4");
+            let unavailable = restored.with_extension("mp4.unavailable");
+            let _ = fs::remove_file(&restored);
+            let _ = fs::remove_file(&unavailable);
+            let result = (|| {
+                fs::copy(&media, &restored).map_err(|error| error.to_string())?;
+                let mut editor = EditorState::new(Language::English, "Phase 0 offline");
+                editor.add_media_paths([restored.clone()]);
+                fs::rename(&restored, &unavailable).map_err(|error| error.to_string())?;
+                let missing_decoder = nle_decode::MonitorDecoder::new();
+                missing_decoder
+                    .request(nle_decode::DecodeRequest {
+                        project_epoch: 1,
+                        cache_epoch: 1,
+                        request_id: 1,
+                        media_id: 1,
+                        path: restored.clone(),
+                        source_tick: 300_000,
+                        width: 160,
+                        height: 90,
+                        is_scrubbing: false,
+                        prewarm_scrub_workers: false,
+                        high_quality_scaling: false,
+                        progressive_scrub_frames: false,
+                        source_frame_duration_tick: Some(33_367),
+                        acceleration: nle_decode::AccelerationPreference::Software,
+                    })
+                    .map_err(|error| error.to_string())?;
+                match phase0_wait_for_monitor_event(&missing_decoder, 1)? {
+                    nle_decode::DecodeEvent::Error(_) => {}
+                    nle_decode::DecodeEvent::Frame(_) => {
+                        return Err("removed fixture unexpectedly decoded before offline state was recorded".to_owned());
+                    }
+                }
+                drop(missing_decoder);
+                editor.set_media_error(1, "fixture absent during decoder probe");
+                if !editor.media_is_offline(1) {
+                    return Err("editor did not expose the offline media state".to_owned());
+                }
+                fs::rename(&unavailable, &restored).map_err(|error| error.to_string())?;
+                editor.set_media_metadata(1, nle_ui_core::MediaMetadata {
+                    file_size: fs::metadata(&restored).ok().map(|metadata| metadata.len()),
+                    ..Default::default()
+                });
+                if editor.media_is_offline(1) {
+                    return Err("editor did not clear offline state after media metadata recovery".to_owned());
+                }
+                let recovery_decoder = nle_decode::MonitorDecoder::new();
+                recovery_decoder
+                    .request(nle_decode::DecodeRequest {
+                        project_epoch: 1,
+                        cache_epoch: 2,
+                        request_id: 2,
+                        media_id: 1,
+                        path: restored.clone(),
+                        source_tick: 300_000,
+                        width: 160,
+                        height: 90,
+                        is_scrubbing: false,
+                        prewarm_scrub_workers: false,
+                        high_quality_scaling: false,
+                        progressive_scrub_frames: false,
+                        source_frame_duration_tick: Some(33_367),
+                        acceleration: nle_decode::AccelerationPreference::Software,
+                    })
+                    .map_err(|error| error.to_string())?;
+                let recovered = phase0_wait_for_monitor_event(&recovery_decoder, 2)?;
+                drop(recovery_decoder);
+                match recovered {
+                    nle_decode::DecodeEvent::Frame(frame) if (frame.width, frame.height) == (160, 90) => {
+                        let backend = frame
+                            .backend
+                            .map(|value| value.display_name().to_owned())
+                            .ok_or_else(|| "restored fixture frame did not expose a decoder backend".to_owned())?;
+                        Ok((Some(backend), "the fixture was removed and produced a real decoder error, EditorState exposed offline=true, then the file was restored, offline=false, and a fresh decoder returned 160x90".to_owned()))
+                    }
+                    nle_decode::DecodeEvent::Frame(frame) => Err(format!("restored fixture decoded at unexpected {}x{} dimensions", frame.width, frame.height)),
+                    nle_decode::DecodeEvent::Error(error) => Err(format!("restored fixture decoder recovery failed: {}", error.message)),
+                }
+            })();
+            if unavailable.exists() {
+                let _ = fs::rename(&unavailable, &restored);
+            }
+            let _ = fs::remove_file(&restored);
+            result
+        }));
+        scenarios.push(phase0_run_scenario(
+            "runtime_video_strip_cache_eviction",
+            5,
+            || {
+                let mut app = App::new_with_catalog(false, None);
+                for media_id in 1..=MAX_RUNTIME_VIDEO_STRIPS as u32 + 1 {
+                    app.retain_video_strip(media_id, phase0_video_strip());
+                }
+                if app.video_strips.len() != MAX_RUNTIME_VIDEO_STRIPS
+                    || app.video_strips.contains_key(&1)
+                    || app.video_strip_bytes > MAX_RUNTIME_VIDEO_STRIP_BYTES
+                {
+                    return Err(
+                        "runtime video-strip cache did not evict the oldest bounded entry"
+                            .to_owned(),
+                    );
+                }
+                Ok((
+                    None,
+                    format!(
+                        "{} insertions retained {} strips within the {} byte cap",
+                        MAX_RUNTIME_VIDEO_STRIPS + 1,
+                        app.video_strips.len(),
+                        MAX_RUNTIME_VIDEO_STRIP_BYTES
+                    ),
+                ))
+            },
+        ));
+        scenarios.push(phase0_run_scenario("ffmpeg_export_cancellation", 1, || {
+            for artifact in phase0_export_artifacts(&output) {
+                let _ = fs::remove_file(artifact);
+            }
+            let result = (|| {
+                let ffmpeg = ffmpeg_root
+                    .join("bin/ffmpeg.exe")
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                if !ffmpeg.is_absolute() || !ffmpeg.is_file() {
+                    return Err("validated FFmpeg executable is not an absolute file".to_owned());
+                }
+                let mut app = App::new_with_catalog(false, None);
+                app.screen = Screen::Editor;
+                app.editor.add_media_paths([media.clone()]);
+                let track = app
+                    .editor
+                    .timeline
+                    .tracks
+                    .iter()
+                    .find(|track| track.kind == nle_timeline::TrackKind::Video)
+                    .ok_or_else(|| "missing default video track".to_owned())?
+                    .id;
+                app.editor
+                    .timeline
+                    .insert_clip(
+                        track,
+                        nle_timeline::MediaId(1),
+                        nle_timeline::Tick(0),
+                        nle_timeline::Tick(2_000_000),
+                        nle_timeline::Tick(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                app.start_video_export_with_ffmpeg(output.clone(), ffmpeg);
+                let deadline = Instant::now() + Duration::from_secs(8);
+                let encoder = loop {
+                    if Instant::now() >= deadline {
+                        return Err("FFmpeg export never emitted EncoderStarted before deadline".to_owned());
+                    }
+                    let job = app
+                        .export_job
+                        .as_ref()
+                        .ok_or_else(|| "FFmpeg export did not start".to_owned())?;
+                    match job.try_recv() {
+                        Ok(nle_export::ExportEvent::EncoderStarted(encoder)) => break encoder,
+                        Ok(nle_export::ExportEvent::Failed(error)) => {
+                            return Err(format!("FFmpeg export failed before cancellation: {error}"));
+                        }
+                        Ok(nle_export::ExportEvent::Cancelled) => {
+                            return Err("FFmpeg export cancelled before EncoderStarted was observed".to_owned());
+                        }
+                        Ok(nle_export::ExportEvent::Completed(_)) => {
+                            return Err("two-second export completed before cancellation could be issued".to_owned());
+                        }
+                        Ok(nle_export::ExportEvent::Progress(_))
+                        | Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err("FFmpeg export event channel disconnected before cancellation".to_owned());
+                        }
+                    }
+                };
+                app.export_job
+                    .as_ref()
+                    .expect("job remains live after EncoderStarted")
+                    .cancel();
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while app.export_job.is_some() && Instant::now() < deadline {
+                    app.poll_video_export();
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if app.export_job.is_some() {
+                    return Err("cancelled FFmpeg export worker did not terminate before deadline".to_owned());
+                }
+                if !matches!(app.editor.export_status, nle_ui_core::EditorExportStatus::Idle) {
+                    return Err("cancelled FFmpeg export did not publish the terminal Cancelled state".to_owned());
+                }
+                let residue = phase0_export_artifacts(&output);
+                if !residue.is_empty() {
+                    return Err(format!("cancelled FFmpeg export left final, staged, or filter artifacts: {residue:?}"));
+                }
+                let mut encoder_backend = None;
+                observe_encoder_backend(&mut encoder_backend, encoder);
+                Ok((encoder_backend, "an explicit absolute bundled FFmpeg executable emitted EncoderStarted, then cancellation reached the worker terminal state with no final, staged, or filter artifact".to_owned()))
+            })();
+            for artifact in phase0_export_artifacts(&output) {
+                let _ = fs::remove_file(artifact);
+            }
+            result
+        }));
+
+        let passed = scenarios.iter().all(|scenario| scenario.passed);
+        let report = Phase0Report {
+            schema_version: 1,
+            status: if passed { "passed" } else { "failed" },
+            scenarios,
+        };
+        phase0_write_report(&report_path, &report)
+            .expect("atomically write Phase 0 scenario report");
+        assert!(
+            passed,
+            "Phase 0 scenario matrix failed; inspect {}",
+            report_path.display()
+        );
     }
 }

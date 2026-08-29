@@ -88,6 +88,8 @@ Build the evidence harness before adding engine complexity.
       cap, and display refresh in every performance report.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
+      A finite prerequisite matrix now covers all listed behaviors except the ten-minute playback
+      duration and broad memory-pressure load; see `docs/phase0-scenarios.md`.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.

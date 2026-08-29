@@ -47,6 +47,12 @@ The renderer gate executes native shaders on a real adapter, while Windows packa
 120 CPU frame/surface-submit intervals and rejects CPU or submission-cadence regressions. This
 measurement does not claim compositor scanout or GPU-completion timing.
 
+The opt-in finite Phase 0 scenario matrix exercises reverse scrubbing, rapid editor-state
+switching, real offline-media detection/recovery, bounded preview-cache eviction, and cancellation
+after an absolute-path FFmpeg encoder has started. It writes local-only JSON evidence without
+launching the GUI; see [`docs/phase0-scenarios.md`](./docs/phase0-scenarios.md). This matrix does not
+replace the roadmap's longer playback soak or memory-pressure gate.
+
 The editor has capped inverse-operation undo/redo (`Ctrl+Z`, `Ctrl+Y`, and
 `Ctrl+Shift+Z`), a fuzzy command palette (`Ctrl+P`), pointer/razor/slip/range tools,
 hold-`C` temporary razor, pointer-centered wheel zoom, Shift-wheel horizontal pan,

@@ -251,6 +251,13 @@ when the platform reports it. Full package smoke publication waits for observed 
 evidence; a cadence-only run explicitly reports unobserved media backends. Unavailable platform
 facts serialize as JSON `null`, never a plausible-looking zero or `"Unknown"` value.
 
+The opt-in Phase 0 scenario matrix is a finite integration check, not a steady-state benchmark. It
+uses generated media and the existing public decoder/App/export paths to verify latest-wins reverse
+scrubbing, alternating editor restoration, missing-file detection followed by decode recovery,
+bounded video-strip eviction, and cancellation only after an absolute-path FFmpeg process reports
+its encoder. Reports are atomically replaced inside an ignored workspace artifact directory. The
+ten-minute playback soak and broader memory-pressure proof remain separate roadmap gates.
+
 Shipping uses the pinned FFmpeg 8.1 LGPL shared bundle. Windows DLLs are packaged beside the
 executable. GPL/nonfree codec libraries are rejected. H.264 export prefers available Windows
 hardware and then Media Foundation/OpenH264. FFmpeg is linked as libraries for playback/scrubbing.
