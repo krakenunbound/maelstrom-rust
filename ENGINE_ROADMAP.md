@@ -88,10 +88,14 @@ Build the evidence harness before adding engine complexity.
       cap, and display refresh in every performance report.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
-      A finite prerequisite matrix now covers all listed behaviors except the ten-minute playback
-      duration and broad memory-pressure load. It now includes a bounded 350 MiB cumulative /
+      A finite prerequisite matrix covers the listed behavioral scenarios and includes a bounded
+      350 MiB cumulative /
       280 MiB live runtime strip-cache checkpoint with per-insertion cap and exact oldest-eviction
-      assertions; broader sustained pressure remains open. See `docs/phase0-scenarios.md`.
+      assertions; broader sustained pressure remains open. The exact packaged executable passed
+      the 600-second Full/Full real A/V loop soak on 2026-08-28 with 10 loops, zero monitor errors,
+      zero fallback uploads, zero audio underruns/lock failures/late discards, and 243,556,352 bytes
+      peak GUI working-set growth. This combined item remains open only for broader sustained
+      memory-pressure coverage. See `docs/phase0-scenarios.md` and `docs/performance-reports.md`.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,

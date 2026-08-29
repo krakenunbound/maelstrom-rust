@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, MutexGuard, TryLockError,
         atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -21,6 +21,9 @@ const FORWARD_REUSE_TICKS: i64 = 1_500_000;
 const MIX_BUFFER_SECONDS: usize = 1;
 /// Hard per-decoder-frame guard; normal AAC/PCM frames are orders of magnitude smaller.
 const MAX_DECODED_AUDIO_FRAME_SAMPLES: usize = 262_144;
+/// Fixed callback-side acquisition attempts; this stays bounded and never parks the audio thread.
+/// The spin hints give short decoder queue writes time to finish without risking an unbounded wait.
+const CALLBACK_LOCK_TRY_ATTEMPTS: usize = 64;
 
 /// Cumulative, non-blocking diagnostics from the native audio transport.
 ///
@@ -503,6 +506,21 @@ fn advance_device_clock(device_frames: &AtomicU64, playing: bool, frames: usize)
     if playing {
         device_frames.fetch_add(frames as u64, Ordering::AcqRel);
     }
+}
+
+fn try_lock_callback<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    for attempt in 0..CALLBACK_LOCK_TRY_ATTEMPTS {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::WouldBlock) => {
+                if attempt + 1 < CALLBACK_LOCK_TRY_ATTEMPTS {
+                    std::hint::spin_loop();
+                }
+            }
+            Err(TryLockError::Poisoned(_)) => return None,
+        }
+    }
+    None
 }
 
 fn stale_frames_to_skip(consumed_frames: u64, decoded_frame: i64) -> usize {
@@ -988,7 +1006,7 @@ where
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 let is_playing = callback_playing.load(Ordering::Acquire);
-                let Ok(mut state) = callback_shared.try_lock() else {
+                let Some(mut state) = try_lock_callback(&callback_shared) else {
                     callback_diagnostics.record_callback_lock_failure();
                     let frames = data.len() / channels.max(1);
                     callback_diagnostics.record_underrun_frames(is_playing, frames);
@@ -2221,7 +2239,7 @@ mod tests {
     fn device_clock_advances_even_when_the_pcm_queue_lock_is_contended() {
         let shared = Mutex::new(Shared::default());
         let _held_by_decoder = shared.lock().unwrap();
-        assert!(shared.try_lock().is_err());
+        assert!(try_lock_callback(&shared).is_none());
         let clock = AtomicU64::new(0);
         advance_device_clock(&clock, true, 480);
         assert_eq!(clock.load(Ordering::Acquire), 480);
@@ -2229,6 +2247,23 @@ mod tests {
             playback_source_tick(1_000_000, 480, 48_000),
             Some(1_010_000)
         );
+    }
+
+    #[test]
+    fn callback_lock_retry_acquires_an_uncontended_mutex_immediately() {
+        let mutex = Mutex::new(7_u8);
+
+        let guard = try_lock_callback(&mutex).expect("uncontended callback lock");
+
+        assert_eq!(*guard, 7);
+    }
+
+    #[test]
+    fn callback_lock_retry_exhausts_while_mutex_is_held() {
+        let mutex = Mutex::new(());
+        let _held = mutex.lock().expect("hold mutex for retry exhaustion");
+
+        assert!(try_lock_callback(&mutex).is_none());
     }
 
     #[test]

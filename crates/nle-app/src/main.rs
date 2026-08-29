@@ -76,6 +76,8 @@ const PROJECT_CATALOG_VERSION: u32 = 1;
 const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 const AUTO_PREVIEW_SLOW_SAMPLES: u8 = 4;
 const AUTO_PREVIEW_FAST_SAMPLES: u16 = 90;
+const DEFAULT_PLAYBACK_SOAK_SECONDS: u64 = 600;
+const MAX_PLAYBACK_SOAK_SECONDS: u64 = 3_600;
 
 fn monitor_cache_bytes_from_args(args: impl IntoIterator<Item = String>) -> usize {
     let mut args = args.into_iter();
@@ -2043,6 +2045,222 @@ struct SurfaceSubmissionProbe {
     report_tx: Option<mpsc::SyncSender<SurfaceSubmissionReport>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct PlaybackSoakRuntimeDiagnostics {
+    monitor_requests: u64,
+    monitor_completed_frames: u64,
+    monitor_presented_frames: u64,
+    monitor_dropped_frames: u64,
+    monitor_hold_events: u64,
+    monitor_late_frames: u64,
+    monitor_errors: u64,
+    native_viewer_uploads: u64,
+    fallback_viewer_uploads: u64,
+    audio_underrun_frames: u64,
+    audio_callback_lock_failures: u64,
+    audio_late_discarded_frames: u64,
+}
+
+impl PlaybackSoakRuntimeDiagnostics {
+    fn delta_since(self, baseline: Self) -> Self {
+        Self {
+            monitor_requests: self
+                .monitor_requests
+                .saturating_sub(baseline.monitor_requests),
+            monitor_completed_frames: self
+                .monitor_completed_frames
+                .saturating_sub(baseline.monitor_completed_frames),
+            monitor_presented_frames: self
+                .monitor_presented_frames
+                .saturating_sub(baseline.monitor_presented_frames),
+            monitor_dropped_frames: self
+                .monitor_dropped_frames
+                .saturating_sub(baseline.monitor_dropped_frames),
+            monitor_hold_events: self
+                .monitor_hold_events
+                .saturating_sub(baseline.monitor_hold_events),
+            monitor_late_frames: self
+                .monitor_late_frames
+                .saturating_sub(baseline.monitor_late_frames),
+            monitor_errors: self.monitor_errors.saturating_sub(baseline.monitor_errors),
+            native_viewer_uploads: self
+                .native_viewer_uploads
+                .saturating_sub(baseline.native_viewer_uploads),
+            fallback_viewer_uploads: self
+                .fallback_viewer_uploads
+                .saturating_sub(baseline.fallback_viewer_uploads),
+            audio_underrun_frames: self
+                .audio_underrun_frames
+                .saturating_sub(baseline.audio_underrun_frames),
+            audio_callback_lock_failures: self
+                .audio_callback_lock_failures
+                .saturating_sub(baseline.audio_callback_lock_failures),
+            audio_late_discarded_frames: self
+                .audio_late_discarded_frames
+                .saturating_sub(baseline.audio_late_discarded_frames),
+        }
+    }
+}
+
+impl From<RuntimeDiagnostics> for PlaybackSoakRuntimeDiagnostics {
+    fn from(diagnostics: RuntimeDiagnostics) -> Self {
+        Self {
+            monitor_requests: diagnostics.monitor_requests,
+            monitor_completed_frames: diagnostics.monitor_completed_frames,
+            monitor_presented_frames: diagnostics.monitor_presented_frames,
+            monitor_dropped_frames: diagnostics.monitor_dropped_frames,
+            monitor_hold_events: diagnostics.monitor_hold_events,
+            monitor_late_frames: diagnostics.monitor_late_frames,
+            monitor_errors: diagnostics.monitor_errors,
+            native_viewer_uploads: diagnostics.native_viewer_uploads,
+            fallback_viewer_uploads: diagnostics.fallback_viewer_uploads,
+            audio_underrun_frames: diagnostics.audio_underrun_frames,
+            audio_callback_lock_failures: diagnostics.audio_callback_lock_failures,
+            audio_late_discarded_frames: diagnostics.audio_late_discarded_frames,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+struct PlaybackSoakReport {
+    schema_version: u32,
+    requested_duration_seconds: u64,
+    actual_duration_seconds: f64,
+    loop_count: u64,
+    observed_decoder_backends: Vec<String>,
+    selected_preview_quality: String,
+    resolved_preview_quality: String,
+    monitor_cache_cap_bytes: usize,
+    audio_transport_healthy_at_completion: bool,
+    audio_fault_observed: bool,
+    unexpected_playback_stop_observed: bool,
+    runtime_diagnostics_delta: PlaybackSoakRuntimeDiagnostics,
+}
+
+struct PlaybackSoakProbe {
+    requested_duration: Duration,
+    started_at: Option<Instant>,
+    baseline_diagnostics: Option<PlaybackSoakRuntimeDiagnostics>,
+    loop_count: u64,
+    audio_fault_observed: bool,
+    unexpected_playback_stop_observed: bool,
+    report_tx: Option<mpsc::SyncSender<PlaybackSoakReport>>,
+}
+
+fn playback_soak_duration_seconds(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PLAYBACK_SOAK_SECONDS)
+        .clamp(1, MAX_PLAYBACK_SOAK_SECONDS)
+}
+
+impl PlaybackSoakProbe {
+    /// The soak is deliberately opt-in and only works with the existing real-media drag path.
+    /// No normal launch allocates, logs, or otherwise changes playback behavior for this probe.
+    fn from_environment() -> Option<Self> {
+        std::env::var_os("MAELSTROM_MEDIA_ACCEPTANCE_PATH")?;
+        let path = PathBuf::from(std::env::var_os("MAELSTROM_PLAYBACK_SOAK_REPORT")?);
+        let requested_duration = Duration::from_secs(playback_soak_duration_seconds(
+            std::env::var("MAELSTROM_PLAYBACK_SOAK_SECONDS")
+                .ok()
+                .as_deref(),
+        ));
+        let (report_tx, report_rx) = mpsc::sync_channel::<PlaybackSoakReport>(1);
+        thread::Builder::new()
+            .name("maelstrom-playback-soak-report".into())
+            .spawn(move || {
+                let Ok(report) = report_rx.recv() else {
+                    return;
+                };
+                let Ok(mut json) = serde_json::to_string_pretty(&report) else {
+                    return;
+                };
+                json.push('\n');
+                let _ = write_atomic_report(&path, &json);
+            })
+            .ok()?;
+        Some(Self {
+            requested_duration,
+            started_at: None,
+            baseline_diagnostics: None,
+            loop_count: 0,
+            audio_fault_observed: false,
+            unexpected_playback_stop_observed: false,
+            report_tx: Some(report_tx),
+        })
+    }
+
+    fn start_after_real_playback(&mut self, now: Instant, diagnostics: RuntimeDiagnostics) {
+        if self.started_at.is_none() {
+            self.started_at = Some(now);
+            self.baseline_diagnostics = Some(diagnostics.into());
+        }
+    }
+
+    fn is_started(&self) -> bool {
+        self.started_at.is_some()
+    }
+
+    fn record_loop(&mut self) {
+        self.loop_count = self.loop_count.saturating_add(1);
+    }
+
+    fn observe_transport_state(
+        &mut self,
+        audio_error_present: bool,
+        playing: bool,
+        audio_transport_active: bool,
+        reached_timeline_end: bool,
+    ) {
+        if !self.is_started() {
+            return;
+        }
+        self.audio_fault_observed |= audio_error_present || (playing && !audio_transport_active);
+        self.unexpected_playback_stop_observed |= !playing && !reached_timeline_end;
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        self.started_at
+            .is_some_and(|started_at| now.duration_since(started_at) >= self.requested_duration)
+    }
+
+    fn report(
+        &self,
+        now: Instant,
+        diagnostics: RuntimeDiagnostics,
+        observed_decoder_backends: Vec<String>,
+        selected_preview_quality: String,
+        resolved_preview_quality: String,
+        monitor_cache_cap_bytes: usize,
+        audio_transport_healthy_now: bool,
+    ) -> Option<PlaybackSoakReport> {
+        let started_at = self.started_at?;
+        Some(PlaybackSoakReport {
+            schema_version: 1,
+            requested_duration_seconds: self.requested_duration.as_secs(),
+            actual_duration_seconds: now.duration_since(started_at).as_secs_f64(),
+            loop_count: self.loop_count,
+            observed_decoder_backends,
+            selected_preview_quality,
+            resolved_preview_quality,
+            monitor_cache_cap_bytes,
+            audio_transport_healthy_at_completion: audio_transport_healthy_now
+                && !self.audio_fault_observed
+                && !self.unexpected_playback_stop_observed,
+            audio_fault_observed: self.audio_fault_observed,
+            unexpected_playback_stop_observed: self.unexpected_playback_stop_observed,
+            runtime_diagnostics_delta: PlaybackSoakRuntimeDiagnostics::from(diagnostics)
+                .delta_since(self.baseline_diagnostics.unwrap_or_default()),
+        })
+    }
+
+    fn publish(&mut self, report: PlaybackSoakReport) -> bool {
+        self.report_tx
+            .take()
+            .is_some_and(|tx| tx.try_send(report).is_ok())
+    }
+}
+
 fn write_atomic_report(path: &Path, contents: &str) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(".tmp");
@@ -2558,6 +2776,7 @@ struct App {
     monitor_runtime_metrics: MonitorRuntimeMetrics,
     startup_presentation_probe: Option<StartupPresentationProbe>,
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
+    playback_soak_probe: Option<PlaybackSoakProbe>,
     machine_profile: MachineProfile,
     renderer_report: Option<RendererReport>,
     monitor_cache_cap_bytes: usize,
@@ -2814,6 +3033,7 @@ impl App {
             monitor_runtime_metrics: MonitorRuntimeMetrics::default(),
             startup_presentation_probe: StartupPresentationProbe::from_environment(started_at),
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
+            playback_soak_probe: PlaybackSoakProbe::from_environment(),
             machine_profile: hardware::detect_machine(),
             renderer_report: None,
             monitor_cache_cap_bytes: monitor_cache_bytes,
@@ -3053,6 +3273,72 @@ impl App {
         }
     }
 
+    fn runtime_diagnostics(&self) -> RuntimeDiagnostics {
+        let audio = self
+            .audio_engine
+            .as_ref()
+            .map(nle_audio::AudioEngine::runtime_diagnostics)
+            .unwrap_or_default();
+        self.monitor_runtime_metrics.diagnostics(
+            audio.underrun_device_frames,
+            audio.callback_lock_failures,
+            audio.late_decoded_frames_discarded,
+        )
+    }
+
+    /// Advances the opt-in, wall-clock soak only from the UI-owned transport path. The native
+    /// audio callback remains untouched. Rewinding occurs only after the logical A/V timeline
+    /// reaches its end, so every loop takes the normal seek/decode/audio reconciliation path.
+    fn advance_playback_soak(&mut self, now: Instant) {
+        if self.playback_soak_probe.is_none() {
+            return;
+        }
+        let Some(mut probe) = self.playback_soak_probe.take() else {
+            return;
+        };
+        let diagnostics = self.runtime_diagnostics();
+        let timeline_end = self.editor.timeline_end().0;
+        let reached_timeline_end = timeline_end > 0 && self.editor.playhead.0 >= timeline_end;
+        let audio_transport_active = self.audio_transport.is_some();
+        let audio_error_present = self.audio_engine_error.is_some();
+        if audio_transport_active && self.editor.playing && !audio_error_present {
+            probe.start_after_real_playback(now, diagnostics);
+        }
+        probe.observe_transport_state(
+            audio_error_present,
+            self.editor.playing,
+            audio_transport_active,
+            reached_timeline_end,
+        );
+        let audio_transport_healthy_now = !audio_error_present
+            && ((self.editor.playing && audio_transport_active)
+                || (!self.editor.playing && reached_timeline_end));
+        if probe.due(now) {
+            if let Some(report) = probe.report(
+                now,
+                diagnostics,
+                self.observed_decoder_backends.clone(),
+                format!("{:?}", self.editor.preview_quality()),
+                format!("{:?}", self.editor.resolved_preview_quality()),
+                self.monitor_cache_cap_bytes,
+                audio_transport_healthy_now,
+            ) {
+                let _ = probe.publish(report);
+            }
+            if let Some(window) = &self.window {
+                window.set_window_level(WindowLevel::Normal);
+            }
+            return;
+        }
+        if probe.is_started() && !self.editor.playing && reached_timeline_end {
+            self.editor.set_playhead(nle_timeline::Tick(0));
+            self.editor.start_playback();
+            self.audio_transport = None;
+            probe.record_loop();
+        }
+        self.playback_soak_probe = Some(probe);
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -3238,7 +3524,7 @@ impl App {
             if let Some(window) = &self.window {
                 if collecting {
                     window.request_redraw();
-                } else {
+                } else if self.playback_soak_probe.is_none() {
                     window.set_window_level(WindowLevel::Normal);
                 }
             }
@@ -3253,17 +3539,8 @@ impl App {
         self.advance_media_acceptance_drag_smoke();
         if self.screen == Screen::Editor {
             let performance_hud_rebuilt = if let Some(performance) = frame_performance {
-                let audio = self
-                    .audio_engine
-                    .as_ref()
-                    .map(nle_audio::AudioEngine::runtime_diagnostics)
-                    .unwrap_or_default();
                 self.editor
-                    .set_runtime_diagnostics(self.monitor_runtime_metrics.diagnostics(
-                        audio.underrun_device_frames,
-                        audio.callback_lock_failures,
-                        audio.late_decoded_frames_discarded,
-                    ));
+                    .set_runtime_diagnostics(self.runtime_diagnostics());
                 self.editor.set_performance_hud(
                     performance.latest_ms,
                     performance.p95_ms,
@@ -4693,6 +4970,7 @@ impl App {
             self.audio_engine_error = Some(error.clone());
             self.editor.set_audio_output_error(error);
         }
+        self.advance_playback_soak(Instant::now());
         let Some(audio) = &self.audio_engine else {
             self.editor.set_audio_meter_levels(0.0, 0.0);
             return;
@@ -5551,9 +5829,11 @@ impl ApplicationHandler<AppEvent> for App {
             .with_window_icon(Some(window_icon()))
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
-        if std::env::var_os("MAELSTROM_SURFACE_SUBMISSION_REPORT").is_some() {
-            // Keep the bounded visible cadence probe unobscured so Windows does not apply its
-            // occluded-surface throttle. `render` restores normal window level after 120 frames.
+        if std::env::var_os("MAELSTROM_SURFACE_SUBMISSION_REPORT").is_some()
+            || std::env::var_os("MAELSTROM_PLAYBACK_SOAK_REPORT").is_some()
+        {
+            // Keep opt-in visible cadence/soak probes unobscured so Windows does not apply its
+            // occluded-surface throttle. Each probe restores normal window level when complete.
             window_attributes = window_attributes.with_window_level(WindowLevel::AlwaysOnTop);
         }
         let window = Arc::new(
@@ -6428,6 +6708,119 @@ mod tests {
         }]));
         assert_eq!(controller.observe(0, Duration::from_millis(20), 16.0), None);
         assert_eq!(controller.resolved, PreviewQuality::Full);
+    }
+
+    #[test]
+    fn playback_soak_duration_parser_defaults_and_bounds_explicit_values() {
+        assert_eq!(
+            playback_soak_duration_seconds(None),
+            DEFAULT_PLAYBACK_SOAK_SECONDS
+        );
+        assert_eq!(playback_soak_duration_seconds(Some("15")), 15);
+        assert_eq!(playback_soak_duration_seconds(Some("0")), 1);
+        assert_eq!(
+            playback_soak_duration_seconds(Some("999999")),
+            MAX_PLAYBACK_SOAK_SECONDS
+        );
+        assert_eq!(
+            playback_soak_duration_seconds(Some("invalid")),
+            DEFAULT_PLAYBACK_SOAK_SECONDS
+        );
+    }
+
+    #[test]
+    fn playback_soak_starts_after_transport_and_reports_counter_deltas_and_loops() {
+        let (report_tx, report_rx) = mpsc::sync_channel(1);
+        let mut probe = PlaybackSoakProbe {
+            requested_duration: Duration::from_secs(10),
+            started_at: None,
+            baseline_diagnostics: None,
+            loop_count: 0,
+            audio_fault_observed: false,
+            unexpected_playback_stop_observed: false,
+            report_tx: Some(report_tx),
+        };
+        let started_at = Instant::now();
+        let baseline = RuntimeDiagnostics {
+            monitor_requests: 10,
+            monitor_completed_frames: 8,
+            monitor_presented_frames: 7,
+            native_viewer_uploads: 7,
+            ..Default::default()
+        };
+        assert!(!probe.is_started());
+        probe.start_after_real_playback(started_at, baseline);
+        assert!(probe.is_started());
+        assert!(!probe.due(started_at + Duration::from_secs(9)));
+        probe.record_loop();
+        probe.record_loop();
+        let report = probe
+            .report(
+                started_at + Duration::from_secs(10),
+                RuntimeDiagnostics {
+                    monitor_requests: 16,
+                    monitor_completed_frames: 13,
+                    monitor_presented_frames: 12,
+                    monitor_dropped_frames: 2,
+                    monitor_hold_events: 1,
+                    monitor_late_frames: 1,
+                    native_viewer_uploads: 12,
+                    audio_underrun_frames: 48,
+                    ..Default::default()
+                },
+                vec!["Software".to_owned()],
+                "Full".to_owned(),
+                "Full".to_owned(),
+                512 * 1024 * 1024,
+                true,
+            )
+            .expect("transport start makes a soak report ready");
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.actual_duration_seconds, 10.0);
+        assert_eq!(report.loop_count, 2);
+        assert_eq!(report.runtime_diagnostics_delta.monitor_requests, 6);
+        assert_eq!(report.runtime_diagnostics_delta.native_viewer_uploads, 5);
+        assert_eq!(report.runtime_diagnostics_delta.audio_underrun_frames, 48);
+        assert!(probe.publish(report));
+        let published = report_rx.try_recv().expect("one-shot soak report");
+        assert_eq!(published.observed_decoder_backends, ["Software"]);
+        assert_eq!(published.monitor_cache_cap_bytes, 512 * 1024 * 1024);
+        assert!(published.audio_transport_healthy_at_completion);
+        assert!(!published.audio_fault_observed);
+        assert!(!published.unexpected_playback_stop_observed);
+        assert!(!probe.publish(published));
+    }
+
+    #[test]
+    fn playback_soak_rejects_audio_faults_and_stops_before_timeline_end() {
+        let (report_tx, _report_rx) = mpsc::sync_channel(1);
+        let mut probe = PlaybackSoakProbe {
+            requested_duration: Duration::from_secs(1),
+            started_at: None,
+            baseline_diagnostics: None,
+            loop_count: 0,
+            audio_fault_observed: false,
+            unexpected_playback_stop_observed: false,
+            report_tx: Some(report_tx),
+        };
+        let started_at = Instant::now();
+        probe.start_after_real_playback(started_at, RuntimeDiagnostics::default());
+        probe.observe_transport_state(true, false, false, false);
+        let report = probe
+            .report(
+                started_at + Duration::from_secs(1),
+                RuntimeDiagnostics::default(),
+                vec!["Software".to_owned()],
+                "Full".to_owned(),
+                "Full".to_owned(),
+                512 * 1024 * 1024,
+                false,
+            )
+            .expect("started probe reports its failure evidence");
+        assert!(!report.audio_transport_healthy_at_completion);
+        assert!(report.audio_fault_observed);
+        assert!(report.unexpected_playback_stop_observed);
+        assert_eq!(report.loop_count, 0);
     }
 
     #[test]

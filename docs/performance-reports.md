@@ -39,3 +39,52 @@ Facts unavailable through a supported platform API are serialized as JSON `null`
 Windows packaging validates that the full report includes real CPU/RAM, renderer, media backend,
 preview, cache, and display data when available before accepting the build. The retained report is
 `dist/last-surface-submission-smoke.json`.
+
+## Opt-in packaged playback soak
+
+`scripts/Run-PlaybackSoak.ps1` exercises the real editor layout-backed Media Pool drop, then waits
+until the normal audio-owned A/V transport has actually started before measuring wall time. At the
+end of each real timeline pass it rewinds to zero and starts the ordinary seek/decode/audio path
+again. It does not lower preview quality, alter the audio callback, add per-frame logging, or run
+during a normal startup.
+
+Run the full Phase 0 gate only against the explicit package path:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Run-PlaybackSoak.ps1' `
+  -ExecutablePath 'H:\Maelstrom Rust\dist\Maelstrom-Windows-x64\Maelstrom.exe' `
+  -DurationSeconds 600
+```
+
+For a quick plumbing check, pass an explicit short duration such as `-DurationSeconds 15`; that is
+not evidence for the ten-minute gate. The runner requires sibling packaged `ffmpeg.exe` and
+`ffprobe.exe`, builds a deterministic 60-second A/V clip, and launches only the supplied absolute
+executable path. During the opt-in run the editor window remains visible and always-on-top to avoid
+Windows occluded-surface throttling; it returns to normal level when the application report is
+written.
+
+The app atomically writes `playback-soak-app-report.json` under the ignored
+`artifacts/phase0-playback-soak` directory. It contains schema version, requested and actual wall
+duration, completed loop count, observed decoder backends, selected/resolved preview quality,
+monitor-cache cap, and deltas for monitor requests/completions/presents/drops/holds/lates/errors,
+native/fallback viewer uploads, audio underruns, callback lock failures, and late audio discards.
+The runner validates actual duration, a `Full` selected/resolved preview, backend evidence, at least
+20 native uploads per second, a healthy A/V transport at completion with no observed audio fault or
+early stop, zero monitor errors/fallback uploads, no more than 2% late monitor requests, and zero
+audio underruns/callback lock failures/late discards. It then atomically writes
+`playback-soak-report.json` beside the app report with the exact executable path and SHA-256 plus
+coarse WorkingSet64 evidence.
+
+WorkingSet64 is sampled about once per second from only the exact GUI process launched by the
+runner. Its warm baseline is the third sample, and the final report records peak/final/growth plus
+a deliberately generous 1.5 GiB peak-growth bound. This is not total system memory, GPU memory,
+or child-process memory, so it detects only coarse sustained GUI working-set growth rather than a
+complete leak diagnosis. The runner always restores its environment and terminates only its tracked
+PID tree in `finally`.
+
+The 2026-08-28 Windows checkpoint passed against packaged executable SHA-256
+`A58C834E41631A61FEF81E02A192EDE9D227BFF66D008338A62E93E3E1AE1C6A`: 600.003 seconds,
+10 timeline loops, `Full` selected/resolved quality, 18,017 native viewer uploads, zero monitor
+errors/fallback uploads, zero audio underruns/callback lock failures/late discards, and 243,556,352
+bytes peak GUI working-set growth. The ignored local evidence remains in
+`artifacts/phase0-playback-soak/playback-soak-report.json`.
