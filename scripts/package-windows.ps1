@@ -224,7 +224,7 @@ try {
         'renderer_backend', 'renderer_driver', 'renderer_driver_info', 'decoder_backends',
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
-        'monitor_cache_cap_bytes', 'display_refresh_millihertz'
+        'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings'
     )) {
         if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
             throw "Surface submission probe omitted $property."
@@ -255,6 +255,40 @@ try {
         ($null -ne $surfaceSubmission.display_refresh_millihertz -and
             $surfaceSubmission.display_refresh_millihertz -lt 1)) {
         throw 'Surface submission probe returned incomplete performance environment metadata.'
+    }
+    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'hardware_transfer', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {
+        $stage = $surfaceSubmission.decoder_stage_timings.$stageName
+        if ($null -eq $stage) { throw "Surface submission probe omitted decoder stage $stageName." }
+        foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {
+            if ($stage.PSObject.Properties.Name -notcontains $property) {
+                throw "Decoder timing stage $stageName omitted $property."
+            }
+            $value = [double]$stage.$property
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
+                throw "Decoder timing stage $stageName returned invalid ${property}: $value."
+            }
+        }
+        if ($stage.max_ms -lt $stage.mean_ms) {
+            throw "Decoder timing stage $stageName has max below mean."
+        }
+        if ($stage.samples -eq 0 -and ($stage.total_ms -ne 0 -or $stage.mean_ms -ne 0 -or $stage.max_ms -ne 0)) {
+            throw "Decoder timing stage $stageName reported durations without samples."
+        }
+        if ($stage.samples -gt 0) {
+            if ($stage.total_ms -lt $stage.max_ms) {
+                throw "Decoder timing stage $stageName has total below max."
+            }
+            $expectedMean = [double]$stage.total_ms / [double]$stage.samples
+            $meanTolerance = [Math]::Max(0.000001, [Math]::Abs($expectedMean) * 0.000000001)
+            if ([Math]::Abs([double]$stage.mean_ms - $expectedMean) -gt $meanTolerance) {
+                throw "Decoder timing stage $stageName has an inconsistent mean."
+            }
+        }
+    }
+    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {
+        if ($surfaceSubmission.decoder_stage_timings.$stageName.samples -lt 1) {
+            throw "Full media smoke did not exercise decoder timing stage $stageName."
+        }
     }
     $mediaAcceptance = Get-Content -LiteralPath $mediaAcceptanceReportPath -Raw | ConvertFrom-Json
     foreach ($property in @('media_pool_drag_completed', 'analysis_metadata_ready', 'waveform_ready', 'monitor_frame_arrived', 'native_viewer_uploaded', 'live_audio_meter_nonzero', 'live_fade_reduced', 'live_fade_recovered', 'live_gain_reduced', 'export_started', 'export_progress_received', 'playhead_advanced_while_exporting', 'export_cancelled')) {

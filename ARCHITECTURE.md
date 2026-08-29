@@ -251,6 +251,13 @@ when the platform reports it. Full package smoke publication waits for observed 
 evidence; a cadence-only run explicitly reports unobserved media backends. Unavailable platform
 facts serialize as JSON `null`, never a plausible-looking zero or `"Unknown"` value.
 
+The same report also carries fixed atomic aggregates from the bounded monitor decoder lanes:
+cache lookup, demux packet retrieval, decoder send/receive/flush, hardware-to-CPU transfer, scaler,
+RGBA copy plus letterbox, and whole worker request. Each has sample count, total/mean/max CPU
+milliseconds. Software decode has zero hardware-transfer samples by design. These spans do not
+claim GPU upload/compositing completion, scanout, or audio callback timing; those remain separate
+measurement work.
+
 The opt-in Phase 0 scenario matrix is a finite integration check, not a steady-state benchmark. It
 uses generated media and the existing public decoder/App/export paths to verify latest-wins reverse
 scrubbing, alternating editor restoration, missing-file detection followed by decode recovery,

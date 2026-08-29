@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering, fence},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -36,6 +36,169 @@ const SCRUB_CACHE_TOLERANCE_TICKS: i64 = 50_000;
 const MAX_SCRUB_CACHE_INDEX_ENTRIES: usize = 1_024;
 const MAX_CACHE_STREAM_STATES: usize = 4_096;
 pub const DEFAULT_FRAME_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+
+/// A fixed aggregate of completed CPU timing samples for one decoder-worker stage.
+/// Durations use monotonic wall-clock time around the named CPU call boundary; they do not
+/// represent GPU completion or display presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorStageTiming {
+    pub samples: u64,
+    pub total_nanos: u64,
+    pub max_nanos: u64,
+}
+
+impl MonitorStageTiming {
+    pub fn total_ms(self) -> f64 {
+        self.total_nanos as f64 / 1_000_000.0
+    }
+
+    pub fn mean_ms(self) -> f64 {
+        if self.samples == 0 {
+            0.0
+        } else {
+            self.total_ms() / self.samples as f64
+        }
+    }
+
+    pub fn max_ms(self) -> f64 {
+        self.max_nanos as f64 / 1_000_000.0
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.samples = self.samples.saturating_add(other.samples);
+        self.total_nanos = self.total_nanos.saturating_add(other.total_nanos);
+        self.max_nanos = self.max_nanos.max(other.max_nanos);
+    }
+}
+
+/// Runtime-only aggregate CPU timings shared by every bounded monitor-worker lane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorDecoderStageTimings {
+    pub cache_lookup: MonitorStageTiming,
+    pub demux_packet: MonitorStageTiming,
+    pub decoder_calls: MonitorStageTiming,
+    pub hardware_transfer: MonitorStageTiming,
+    pub scaler: MonitorStageTiming,
+    pub rgba_copy_letterbox: MonitorStageTiming,
+    pub worker_request: MonitorStageTiming,
+}
+
+impl MonitorDecoderStageTimings {
+    pub fn merge(&mut self, other: Self) {
+        self.cache_lookup.merge(other.cache_lookup);
+        self.demux_packet.merge(other.demux_packet);
+        self.decoder_calls.merge(other.decoder_calls);
+        self.hardware_transfer.merge(other.hardware_transfer);
+        self.scaler.merge(other.scaler);
+        self.rgba_copy_letterbox.merge(other.rgba_copy_letterbox);
+        self.worker_request.merge(other.worker_request);
+    }
+}
+
+#[derive(Default)]
+struct AtomicStageTiming {
+    sequence: AtomicU64,
+    samples: AtomicU64,
+    total_nanos: AtomicU64,
+    max_nanos: AtomicU64,
+}
+
+impl AtomicStageTiming {
+    fn record(&self, duration: Duration) {
+        let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+        // Each accumulator belongs to one scheduler lane, so this is a single-writer sequence
+        // lock. Two wrapping increments preserve odd/even publication until an impractical 2^63
+        // recorded spans; readers retry whenever they race the writer.
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        let _ = self
+            .samples
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |samples| {
+                Some(samples.saturating_add(1))
+            });
+        self.max_nanos.fetch_max(nanos, Ordering::Relaxed);
+        let mut observed = self.total_nanos.load(Ordering::Relaxed);
+        loop {
+            let next = observed.saturating_add(nanos);
+            match self.total_nanos.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next_observed) => observed = next_observed,
+            }
+        }
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> MonitorStageTiming {
+        loop {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let snapshot = MonitorStageTiming {
+                samples: self.samples.load(Ordering::Relaxed),
+                total_nanos: self.total_nanos.load(Ordering::Relaxed),
+                max_nanos: self.max_nanos.load(Ordering::Relaxed),
+            };
+            // Keep the data loads before the validating sequence load.
+            fence(Ordering::Acquire);
+            let after = self.sequence.load(Ordering::Relaxed);
+            if before == after {
+                return snapshot;
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+#[derive(Default)]
+struct DecoderStageTimingAccumulators {
+    cache_lookup: AtomicStageTiming,
+    demux_packet: AtomicStageTiming,
+    decoder_calls: AtomicStageTiming,
+    hardware_transfer: AtomicStageTiming,
+    scaler: AtomicStageTiming,
+    rgba_copy_letterbox: AtomicStageTiming,
+    worker_request: AtomicStageTiming,
+}
+
+impl DecoderStageTimingAccumulators {
+    fn snapshot(&self) -> MonitorDecoderStageTimings {
+        MonitorDecoderStageTimings {
+            cache_lookup: self.cache_lookup.snapshot(),
+            demux_packet: self.demux_packet.snapshot(),
+            decoder_calls: self.decoder_calls.snapshot(),
+            hardware_transfer: self.hardware_transfer.snapshot(),
+            scaler: self.scaler.snapshot(),
+            rgba_copy_letterbox: self.rgba_copy_letterbox.snapshot(),
+            worker_request: self.worker_request.snapshot(),
+        }
+    }
+}
+
+struct StageTimer<'a> {
+    stage: &'a AtomicStageTiming,
+    started: Instant,
+}
+
+impl<'a> StageTimer<'a> {
+    fn new(stage: &'a AtomicStageTiming) -> Self {
+        Self {
+            stage,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for StageTimer<'_> {
+    fn drop(&mut self) {
+        self.stage.record(self.started.elapsed());
+    }
+}
 
 /// Limits progressive scrub publication by elapsed wall time, not media time.
 ///
@@ -195,6 +358,7 @@ pub fn bounded_dimensions(width: u32, height: u32) -> (u32, u32, usize) {
 pub struct MonitorDecoder {
     workers: Vec<MonitorWorker>,
     events: Arc<EventSlot>,
+    stage_timings: Vec<Arc<DecoderStageTimingAccumulators>>,
     last_scrub_target: Mutex<Option<(u32, i64)>>,
     cache_reset_generation: Arc<AtomicU64>,
 }
@@ -224,11 +388,14 @@ impl MonitorDecoder {
         let cache_reset_generation = Arc::new(AtomicU64::new(0));
         let frame_cache = Arc::new(Mutex::new(MonitorFrameCache::new(frame_cache_bytes)));
         let mut workers = Vec::with_capacity(MONITOR_WORKER_COUNT);
+        let mut stage_timings = Vec::with_capacity(MONITOR_WORKER_COUNT);
         for index in 0..MONITOR_WORKER_COUNT {
             let (wake, wake_rx) = mpsc::sync_channel(1);
             let commands = Arc::new(Mutex::new(None));
             let scheduler_commands = Arc::clone(&commands);
             let scheduler_events = Arc::clone(&events);
+            let lane_stage_timings = Arc::new(DecoderStageTimingAccumulators::default());
+            let scheduler_stage_timings = Arc::clone(&lane_stage_timings);
             let scheduler_cache_reset = Arc::clone(&cache_reset_generation);
             let scheduler_frame_cache = Arc::clone(&frame_cache);
             let scheduler = thread::Builder::new()
@@ -238,6 +405,7 @@ impl MonitorDecoder {
                         wake_rx,
                         scheduler_commands,
                         scheduler_events,
+                        scheduler_stage_timings,
                         scheduler_cache_reset,
                         scheduler_frame_cache,
                     )
@@ -248,10 +416,12 @@ impl MonitorDecoder {
                 wake,
                 scheduler: Some(scheduler),
             });
+            stage_timings.push(lane_stage_timings);
         }
         Self {
             workers,
             events,
+            stage_timings,
             last_scrub_target: Mutex::new(None),
             cache_reset_generation,
         }
@@ -317,6 +487,15 @@ impl MonitorDecoder {
     /// Returns the newest completed result without blocking.
     pub fn try_recv(&self) -> Result<Option<DecodeEvent>, DecoderClosed> {
         Ok(self.events.take())
+    }
+
+    /// Returns fixed, runtime-only CPU timing aggregates across all worker lanes.
+    pub fn stage_timings(&self) -> MonitorDecoderStageTimings {
+        let mut aggregate = MonitorDecoderStageTimings::default();
+        for lane in &self.stage_timings {
+            aggregate.merge(lane.snapshot());
+        }
+        aggregate
     }
 
     fn send_to(&self, index: usize, command: MonitorCommand) -> Result<(), DecoderClosed> {
@@ -640,6 +819,7 @@ fn monitor_scheduler_loop(
     wake: Receiver<()>,
     commands: Arc<Mutex<Option<MonitorCommand>>>,
     events: Arc<EventSlot>,
+    stage_timings: Arc<DecoderStageTimingAccumulators>,
     cache_reset_generation: Arc<AtomicU64>,
     frame_cache: Arc<Mutex<MonitorFrameCache>>,
 ) {
@@ -672,6 +852,7 @@ fn monitor_scheduler_loop(
         }
 
         let request = pending.take().expect("pending monitor request");
+        let _request_timer = StageTimer::new(&stage_timings.worker_request);
         let progress_events = Arc::clone(&events);
         let progress_backend = sessions
             .get(&request.media_id)
@@ -694,6 +875,7 @@ fn monitor_scheduler_loop(
             &request,
             &commands,
             &mut on_progress,
+            &stage_timings,
         );
         // A target arriving during decode wins: do not publish old output.
         match commands.lock().expect("monitor command lock").take() {
@@ -750,6 +932,7 @@ fn decode_monitor_request(
     request: &DecodeRequest,
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
     on_progress: &mut dyn FnMut(&DecodedRgba),
+    stage_timings: &DecoderStageTimingAccumulators,
 ) -> Option<DecodeEvent> {
     let span = tracing::debug_span!(
         "monitor_decode",
@@ -774,10 +957,13 @@ fn decode_monitor_request(
     // to one even when timeline layering switches media repeatedly.
     retain_active_monitor_session(sessions, request.media_id);
     let cache_key = frame_cache_key(request, request.source_tick);
-    let cached = frame_cache
-        .lock()
-        .expect("monitor frame cache lock")
-        .get(&cache_key);
+    let cached = {
+        let _timer = StageTimer::new(&stage_timings.cache_lookup);
+        frame_cache
+            .lock()
+            .expect("monitor frame cache lock")
+            .get(&cache_key)
+    };
     if let Some(cached) = cached {
         return Some(DecodeEvent::Frame(DecodedFrame {
             project_epoch: request.project_epoch,
@@ -792,10 +978,13 @@ fn decode_monitor_request(
             rgba: cached.rgba,
         }));
     }
-    let cached = frame_cache
-        .lock()
-        .expect("monitor frame cache lock")
-        .get_scrub_at_or_after(request);
+    let cached = {
+        let _timer = StageTimer::new(&stage_timings.cache_lookup);
+        frame_cache
+            .lock()
+            .expect("monitor frame cache lock")
+            .get_scrub_at_or_after(request)
+    };
     if let Some(cached) = cached {
         return Some(DecodeEvent::Frame(DecodedFrame {
             project_epoch: request.project_epoch,
@@ -817,9 +1006,14 @@ fn decode_monitor_request(
             .insert_scrub_traversal(request, frame)
     };
     let decoded = match sessions.get_mut(&request.media_id) {
-        Some(session) if session.path == request.path => {
-            decode_with_session(session, request, commands, on_progress, &mut on_traversal)
-        }
+        Some(session) if session.path == request.path => decode_with_session(
+            session,
+            request,
+            commands,
+            on_progress,
+            &mut on_traversal,
+            stage_timings,
+        ),
         _ => {
             sessions.remove(&request.media_id);
             match StickyMonitor::open(request) {
@@ -830,6 +1024,7 @@ fn decode_monitor_request(
                         commands,
                         on_progress,
                         &mut on_traversal,
+                        stage_timings,
                     );
                     sessions.insert(request.media_id, session);
                     result
@@ -846,6 +1041,7 @@ fn decode_monitor_request(
             hardware_error,
             on_progress,
             &mut on_traversal,
+            stage_timings,
         ),
         result => result,
     };
@@ -900,6 +1096,7 @@ fn decode_with_session(
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
     on_progress: &mut dyn FnMut(&DecodedRgba),
     on_traversal: &mut dyn FnMut(&DecodedRgba),
+    stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<Option<DecodedRgba>, String> {
     session.decode(
         request,
@@ -915,6 +1112,7 @@ fn decode_with_session(
         || latest_same_generation(commands, request),
         on_progress,
         on_traversal,
+        stage_timings,
     )
 }
 
@@ -925,6 +1123,7 @@ fn recover_hardware_decode_failure(
     hardware_error: String,
     on_progress: &mut dyn FnMut(&DecodedRgba),
     on_traversal: &mut dyn FnMut(&DecodedRgba),
+    stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<Option<DecodedRgba>, String> {
     let fallback = sessions
         .get(&request.media_id)
@@ -949,6 +1148,7 @@ fn recover_hardware_decode_failure(
                 commands,
                 on_progress,
                 on_traversal,
+                stage_timings,
             ).map_err(
                 |software_error| {
                     format!(
@@ -1112,6 +1312,7 @@ impl StickyMonitor {
         mut newest_target: impl FnMut() -> Option<DecodeRequest>,
         on_progress: &mut dyn FnMut(&DecodedRgba),
         on_traversal: &mut dyn FnMut(&DecodedRgba),
+        stage_timings: &DecoderStageTimingAccumulators,
     ) -> Result<Option<DecodedRgba>, String> {
         let (width, height, _) = bounded_dimensions(request.width, request.height);
         if self.output_size != (width, height)
@@ -1157,7 +1358,10 @@ impl StickyMonitor {
             self.input
                 .seek(target_ts, ..target_ts)
                 .map_err(|error| format!("could not seek monitor media: {error}"))?;
-            self.decoder.flush();
+            {
+                let _timer = StageTimer::new(&stage_timings.decoder_calls);
+                self.decoder.flush();
+            }
             self.last_source_tick = None;
         }
 
@@ -1172,7 +1376,11 @@ impl StickyMonitor {
         let scaled_size = &mut self.scaled_size;
         let mut last_tick = self.last_source_tick;
         let mut last_progress_published = None;
-        for (stream, packet) in self.input.packets() {
+        let mut packets = self.input.packets();
+        while let Some((stream, packet)) = {
+            let _timer = StageTimer::new(&stage_timings.demux_packet);
+            packets.next()
+        } {
             if invalidated() {
                 self.last_source_tick = None;
                 return Ok(None);
@@ -1193,11 +1401,17 @@ impl StickyMonitor {
             if stream.index() != stream_index {
                 continue;
             }
-            decoder
-                .send_packet(&packet)
-                .map_err(|error| format!("could not send video packet: {error}"))?;
+            {
+                let _timer = StageTimer::new(&stage_timings.decoder_calls);
+                decoder
+                    .send_packet(&packet)
+                    .map_err(|error| format!("could not send video packet: {error}"))?;
+            }
             let mut decoded = Video::empty();
-            while decoder.receive_frame(&mut decoded).is_ok() {
+            while {
+                let _timer = StageTimer::new(&stage_timings.decoder_calls);
+                decoder.receive_frame(&mut decoded).is_ok()
+            } {
                 if invalidated() {
                     self.last_source_tick = None;
                     return Ok(None);
@@ -1245,6 +1459,7 @@ impl StickyMonitor {
                             completed_request_id,
                             target,
                             source_tick,
+                            stage_timings,
                         )?;
                         on_traversal(&frame);
                         if publish_progress {
@@ -1268,6 +1483,7 @@ impl StickyMonitor {
                     completed_request_id,
                     target,
                     source_tick,
+                    stage_timings,
                 )?;
                 last_tick = Some(source_tick);
                 self.last_visible_tick = last_tick;
@@ -1275,11 +1491,17 @@ impl StickyMonitor {
                 return Ok(Some(frame));
             }
         }
-        decoder
-            .send_eof()
-            .map_err(|error| format!("could not flush video decoder: {error}"))?;
+        {
+            let _timer = StageTimer::new(&stage_timings.decoder_calls);
+            decoder
+                .send_eof()
+                .map_err(|error| format!("could not flush video decoder: {error}"))?;
+        }
         let mut decoded = Video::empty();
-        while decoder.receive_frame(&mut decoded).is_ok() {
+        while {
+            let _timer = StageTimer::new(&stage_timings.decoder_calls);
+            decoder.receive_frame(&mut decoded).is_ok()
+        } {
             if invalidated() {
                 self.last_source_tick = None;
                 return Ok(None);
@@ -1319,6 +1541,7 @@ impl StickyMonitor {
                         completed_request_id,
                         target,
                         source_tick,
+                        stage_timings,
                     )?;
                     on_traversal(&frame);
                     if publish_progress {
@@ -1342,6 +1565,7 @@ impl StickyMonitor {
                 completed_request_id,
                 target,
                 source_tick,
+                stage_timings,
             )?;
             last_tick = Some(source_tick);
             self.last_visible_tick = last_tick;
@@ -1365,6 +1589,7 @@ fn pack_decoded_monitor_frame(
     request_id: u64,
     target_tick: i64,
     source_tick: i64,
+    stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<DecodedRgba, String> {
     let rgba_frame = scale_monitor_frame(
         scaler,
@@ -1375,9 +1600,13 @@ fn pack_decoded_monitor_frame(
         transfer_hardware_frames,
         output_size,
         high_quality_scaling,
+        stage_timings,
     )?;
-    let scaled = copy_rgba_frame(&rgba_frame, scaled_size.0, scaled_size.1)?;
-    let rgba = letterbox_rgba(scaled, *scaled_size, output_size);
+    let rgba = {
+        let _timer = StageTimer::new(&stage_timings.rgba_copy_letterbox);
+        let scaled = copy_rgba_frame(&rgba_frame, scaled_size.0, scaled_size.1)?;
+        letterbox_rgba(scaled, *scaled_size, output_size)
+    };
     Ok(DecodedRgba {
         request_id,
         target_tick,
@@ -1703,12 +1932,20 @@ fn scale_monitor_frame(
     transfer_hardware_frame: bool,
     output_size: (u32, u32),
     high_quality_scaling: bool,
+    stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<Video, String> {
     let mut rgba_frame = Video::empty();
     if transfer_hardware_frame {
         let mut software_frame = Video::empty();
-        let status = unsafe {
-            ffmpeg::ffi::av_hwframe_transfer_data(software_frame.as_mut_ptr(), decoded.as_ptr(), 0)
+        let status = {
+            let _timer = StageTimer::new(&stage_timings.hardware_transfer);
+            unsafe {
+                ffmpeg::ffi::av_hwframe_transfer_data(
+                    software_frame.as_mut_ptr(),
+                    decoded.as_ptr(),
+                    0,
+                )
+            }
         };
         if status < 0 {
             return Err(format!(
@@ -1742,17 +1979,23 @@ fn scale_monitor_frame(
             *scaled_size = required_scaled_size;
             *scaler_high_quality = Some(high_quality_scaling);
         }
-        scaler
-            .as_mut()
-            .expect("hardware scaler initialized from transferred frame")
-            .run(&software_frame, &mut rgba_frame)
-            .map_err(|error| format!("could not scale monitor frame: {error}"))?;
+        {
+            let _timer = StageTimer::new(&stage_timings.scaler);
+            scaler
+                .as_mut()
+                .expect("hardware scaler initialized from transferred frame")
+                .run(&software_frame, &mut rgba_frame)
+                .map_err(|error| format!("could not scale monitor frame: {error}"))?;
+        }
     } else {
-        scaler
-            .as_mut()
-            .expect("software scaler initialized when monitor opens")
-            .run(decoded, &mut rgba_frame)
-            .map_err(|error| format!("could not scale monitor frame: {error}"))?;
+        {
+            let _timer = StageTimer::new(&stage_timings.scaler);
+            scaler
+                .as_mut()
+                .expect("software scaler initialized when monitor opens")
+                .run(decoded, &mut rgba_frame)
+                .map_err(|error| format!("could not scale monitor frame: {error}"))?;
+        }
     }
     Ok(rgba_frame)
 }
@@ -2081,6 +2324,95 @@ mod tests {
     }
 
     #[test]
+    fn decoder_stage_timing_snapshot_merges_with_saturation_and_zero_means() {
+        let first = AtomicStageTiming::default();
+        first.record(Duration::from_nanos(2_000_000));
+        first.record(Duration::from_nanos(3_000_000));
+        let first_snapshot = first.snapshot();
+        assert_eq!(first_snapshot.samples, 2);
+        assert_eq!(first_snapshot.total_nanos, 5_000_000);
+        assert_eq!(first_snapshot.max_nanos, 3_000_000);
+        assert!(first_snapshot.total_nanos >= first_snapshot.max_nanos);
+        let mut merged = MonitorStageTiming::default();
+        merged.merge(first_snapshot);
+        merged.merge(MonitorStageTiming {
+            samples: 1,
+            total_nanos: 5_000_000,
+            max_nanos: 5_000_000,
+        });
+        assert_eq!(merged.samples, 3);
+        assert_eq!(merged.total_nanos, 10_000_000);
+        assert_eq!(merged.max_nanos, 5_000_000);
+        assert!((merged.total_ms() - 10.0).abs() < f64::EPSILON);
+        assert!((merged.mean_ms() - (10.0 / 3.0)).abs() < f64::EPSILON);
+        assert_eq!(MonitorStageTiming::default().mean_ms(), 0.0);
+
+        let mut saturated = MonitorStageTiming {
+            samples: u64::MAX,
+            total_nanos: u64::MAX,
+            max_nanos: 1,
+        };
+        saturated.merge(MonitorStageTiming {
+            samples: 1,
+            total_nanos: 1,
+            max_nanos: 2,
+        });
+        assert_eq!(saturated.samples, u64::MAX);
+        assert_eq!(saturated.total_nanos, u64::MAX);
+        assert_eq!(saturated.max_nanos, 2);
+    }
+
+    #[test]
+    fn decoder_stage_timing_snapshot_remains_coherent_while_single_lane_writes() {
+        let timing = Arc::new(AtomicStageTiming::default());
+        let writer_timing = Arc::clone(&timing);
+        let writer = thread::spawn(move || {
+            for _ in 0..20_000 {
+                writer_timing.record(Duration::from_nanos(7));
+            }
+        });
+        while !writer.is_finished() {
+            let snapshot = timing.snapshot();
+            assert_eq!(snapshot.samples == 0, snapshot.total_nanos == 0);
+            assert_eq!(snapshot.samples == 0, snapshot.max_nanos == 0);
+            assert!(snapshot.total_nanos >= snapshot.max_nanos);
+        }
+        writer.join().expect("timing writer");
+        let snapshot = timing.snapshot();
+        assert_eq!(snapshot.samples, 20_000);
+        assert_eq!(snapshot.total_nanos, 140_000);
+        assert_eq!(snapshot.max_nanos, 7);
+    }
+
+    #[test]
+    fn supplied_media_software_decode_reports_applicable_stage_timings() {
+        let Some(path) = std::env::var_os("MAELSTROM_TEST_MEDIA") else {
+            return;
+        };
+        let _hardware = hardware_test_guard();
+        let decoder = MonitorDecoder::new();
+        let desired = request(PathBuf::from(path), 740);
+        decoder.request(desired.clone()).unwrap();
+        match receive_for(&decoder, &desired) {
+            DecodeEvent::Frame(frame) => assert_frame_reaches_target(&frame, &desired),
+            DecodeEvent::Error(error) => panic!("software timing decode failed: {}", error.message),
+        }
+        let timings = decoder.stage_timings();
+        for stage in [
+            timings.cache_lookup,
+            timings.demux_packet,
+            timings.decoder_calls,
+            timings.scaler,
+            timings.rgba_copy_letterbox,
+            timings.worker_request,
+        ] {
+            assert!(stage.samples >= 1);
+            assert!(stage.total_nanos >= stage.max_nanos);
+        }
+        assert_eq!(timings.hardware_transfer.samples, 0);
+    }
+
+    #[test]
     fn backend_identity_and_cpu_transfer_requirements_are_stable() {
         assert_eq!(
             DecodeBackend::VideoToolbox.display_name(),
@@ -2244,8 +2576,16 @@ mod tests {
             assert!(monitor.transfer_hardware_frames);
 
             let desired = request(PathBuf::from(&path), 920);
+            let stage_timings = DecoderStageTimingAccumulators::default();
             let frame = monitor
-                .decode(&desired, || false, || None, &mut |_| {}, &mut |_| {})
+                .decode(
+                    &desired,
+                    || false,
+                    || None,
+                    &mut |_| {},
+                    &mut |_| {},
+                    &stage_timings,
+                )
                 .unwrap_or_else(|error| {
                     panic!(
                         "{} did not transfer and scale a frame: {error}",
@@ -2279,6 +2619,7 @@ mod tests {
         assert_eq!(hardware.backend, DecodeBackend::D3D11VA);
         let mut sessions = HashMap::from([(original.media_id, hardware)]);
         let commands = Arc::new(Mutex::new(Some(MonitorCommand::Request(newest.clone()))));
+        let stage_timings = DecoderStageTimingAccumulators::default();
 
         let frame = recover_hardware_decode_failure(
             &mut sessions,
@@ -2287,6 +2628,7 @@ mod tests {
             "injected D3D11VA runtime failure".to_owned(),
             &mut |_| {},
             &mut |_| {},
+            &stage_timings,
         )
         .expect("software fallback decodes supplied media")
         .expect("same-generation replacement was not cancelled");
@@ -2323,9 +2665,17 @@ mod tests {
         ));
         let mut sessions = HashMap::new();
         let commands = Arc::new(Mutex::new(None));
+        let stage_timings = DecoderStageTimingAccumulators::default();
 
-        let event = decode_monitor_request(&mut sessions, &cache, &desired, &commands, &mut |_| {})
-            .expect("cache hit returns a frame");
+        let event = decode_monitor_request(
+            &mut sessions,
+            &cache,
+            &desired,
+            &commands,
+            &mut |_| {},
+            &stage_timings,
+        )
+        .expect("cache hit returns a frame");
         let DecodeEvent::Frame(frame) = event else {
             panic!("cache hit returned an error")
         };
@@ -2610,15 +2960,30 @@ mod tests {
         let path = tiny_media();
         let first = request(path.clone(), 1);
         let mut monitor = StickyMonitor::open(&first).expect("open sticky monitor");
+        let stage_timings = DecoderStageTimingAccumulators::default();
         let first_frame = monitor
-            .decode(&first, || false, || None, &mut |_| {}, &mut |_| {})
+            .decode(
+                &first,
+                || false,
+                || None,
+                &mut |_| {},
+                &mut |_| {},
+                &stage_timings,
+            )
             .expect("decode first frame")
             .expect("first frame was not superseded");
         let mut second = first.clone();
         second.request_id = 2;
         second.source_tick = 250_000;
         let second_frame = monitor
-            .decode(&second, || false, || None, &mut |_| {}, &mut |_| {})
+            .decode(
+                &second,
+                || false,
+                || None,
+                &mut |_| {},
+                &mut |_| {},
+                &stage_timings,
+            )
             .expect("decode forward frame")
             .expect("forward frame was not superseded");
         assert_eq!(first_frame.rgba.len(), 40 * 30 * 4);
@@ -2668,6 +3033,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let frame_cache = Arc::new(Mutex::new(MonitorFrameCache::new(0)));
         let commands = Arc::new(Mutex::new(None));
+        let stage_timings = DecoderStageTimingAccumulators::default();
         let mut current = request(path.clone(), 30);
         current.source_tick = 700_000;
         let mut progress = Vec::new();
@@ -2682,6 +3048,7 @@ mod tests {
                 &current,
                 &commands,
                 &mut |_| {},
+                &stage_timings,
             ) {
                 Some(DecodeEvent::Frame(frame)) => {
                     assert_frame_reaches_target(&frame, &newer);
@@ -2709,6 +3076,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let frame_cache = Arc::new(Mutex::new(MonitorFrameCache::new(0)));
         let commands = Arc::new(Mutex::new(None));
+        let stage_timings = DecoderStageTimingAccumulators::default();
         let mut current = request(path.clone(), 41);
         current.source_tick = 700_000;
         let mut backward = current.clone();
@@ -2721,6 +3089,7 @@ mod tests {
             &current,
             &commands,
             &mut |_| {},
+            &stage_timings,
         ) {
             Some(DecodeEvent::Frame(frame)) => assert_frame_reaches_target(&frame, &backward),
             Some(DecodeEvent::Error(error)) => panic!("reverse progress failed: {}", error.message),
@@ -2763,6 +3132,7 @@ mod tests {
         first.acceleration = AccelerationPreference::PreferHardware;
         first.source_tick = 12_000_000;
         let mut monitor = StickyMonitor::open(&first).expect("open hardware monitor");
+        let stage_timings = DecoderStageTimingAccumulators::default();
         #[cfg(target_os = "macos")]
         assert_eq!(monitor.backend, DecodeBackend::VideoToolbox);
         assert_ne!(
@@ -2771,7 +3141,14 @@ mod tests {
             "this GPU-equipped test machine unexpectedly fell back to software"
         );
         monitor
-            .decode(&first, || false, || None, &mut |_| {}, &mut |_| {})
+            .decode(
+                &first,
+                || false,
+                || None,
+                &mut |_| {},
+                &mut |_| {},
+                &stage_timings,
+            )
             .expect("decode forward hardware target")
             .expect("forward hardware target was cancelled");
 
@@ -2782,7 +3159,14 @@ mod tests {
         backward.height = 36;
         let started = Instant::now();
         let frame = monitor
-            .decode(&backward, || false, || None, &mut |_| {}, &mut |_| {})
+            .decode(
+                &backward,
+                || false,
+                || None,
+                &mut |_| {},
+                &mut |_| {},
+                &stage_timings,
+            )
             .expect("decode backward hardware target")
             .expect("backward hardware target was cancelled");
         assert!(frame.source_tick >= backward.source_tick);

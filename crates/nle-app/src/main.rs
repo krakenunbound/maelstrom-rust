@@ -1821,6 +1821,66 @@ struct SurfaceSubmissionReport {
     preview_height: u32,
     monitor_cache_cap_bytes: usize,
     display_refresh_millihertz: Option<u32>,
+    decoder_stage_timings: DecoderStageTimingsReport,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct DecoderStageTimingReport {
+    samples: u64,
+    total_ms: f64,
+    mean_ms: f64,
+    max_ms: f64,
+}
+
+impl From<nle_decode::MonitorStageTiming> for DecoderStageTimingReport {
+    fn from(timing: nle_decode::MonitorStageTiming) -> Self {
+        Self {
+            samples: timing.samples,
+            total_ms: timing.total_ms(),
+            mean_ms: timing.mean_ms(),
+            max_ms: timing.max_ms(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+struct DecoderStageTimingsReport {
+    cache_lookup: DecoderStageTimingReport,
+    demux_packet: DecoderStageTimingReport,
+    decoder_calls: DecoderStageTimingReport,
+    hardware_transfer: DecoderStageTimingReport,
+    scaler: DecoderStageTimingReport,
+    rgba_copy_letterbox: DecoderStageTimingReport,
+    worker_request: DecoderStageTimingReport,
+}
+
+impl From<nle_decode::MonitorDecoderStageTimings> for DecoderStageTimingsReport {
+    fn from(timings: nle_decode::MonitorDecoderStageTimings) -> Self {
+        Self {
+            cache_lookup: timings.cache_lookup.into(),
+            demux_packet: timings.demux_packet.into(),
+            decoder_calls: timings.decoder_calls.into(),
+            hardware_transfer: timings.hardware_transfer.into(),
+            scaler: timings.scaler.into(),
+            rgba_copy_letterbox: timings.rgba_copy_letterbox.into(),
+            worker_request: timings.worker_request.into(),
+        }
+    }
+}
+
+impl DecoderStageTimingsReport {
+    fn applicable_decode_stages_observed(&self) -> bool {
+        [
+            self.cache_lookup,
+            self.demux_packet,
+            self.decoder_calls,
+            self.scaler,
+            self.rgba_copy_letterbox,
+            self.worker_request,
+        ]
+        .into_iter()
+        .all(|stage| stage.samples > 0)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1844,6 +1904,7 @@ struct SurfaceReportEnvironment {
     preview_size: [u32; 2],
     monitor_cache_cap_bytes: usize,
     display_refresh_millihertz: Option<u32>,
+    decoder_stage_timings: DecoderStageTimingsReport,
 }
 
 fn surface_report_backends_ready(
@@ -1852,6 +1913,23 @@ fn surface_report_backends_ready(
     encoder_backend: Option<&str>,
 ) -> bool {
     !full_media_smoke || (!decoder_backends.is_empty() && encoder_backend.is_some())
+}
+
+fn surface_report_stage_timings_ready(
+    full_media_smoke: bool,
+    timings: &DecoderStageTimingsReport,
+) -> bool {
+    !full_media_smoke || timings.applicable_decode_stages_observed()
+}
+
+fn aggregate_monitor_decoder_stage_timings(
+    decoders: &[nle_decode::MonitorDecoder],
+) -> DecoderStageTimingsReport {
+    let mut aggregate = nle_decode::MonitorDecoderStageTimings::default();
+    for decoder in decoders {
+        aggregate.merge(decoder.stage_timings());
+    }
+    aggregate.into()
 }
 
 #[derive(Clone, Copy)]
@@ -2005,6 +2083,7 @@ impl SurfaceSubmissionProbe {
             preview_height: environment.preview_size[1],
             monitor_cache_cap_bytes: environment.monitor_cache_cap_bytes,
             display_refresh_millihertz: environment.display_refresh_millihertz,
+            decoder_stage_timings: environment.decoder_stage_timings,
         };
         tx.try_send(report).is_ok()
     }
@@ -2820,6 +2899,10 @@ impl App {
         ) {
             return;
         }
+        let decoder_stage_timings = aggregate_monitor_decoder_stage_timings(&self.monitor_decoders);
+        if !surface_report_stage_timings_ready(full_media_smoke, &decoder_stage_timings) {
+            return;
+        }
         let Some(renderer) = self.renderer_report.clone() else {
             return;
         };
@@ -2841,6 +2924,7 @@ impl App {
                 .as_ref()
                 .and_then(|window| window.current_monitor())
                 .and_then(|monitor| monitor.refresh_rate_millihertz()),
+            decoder_stage_timings,
         };
         let published = self
             .surface_submission_probe
@@ -6243,28 +6327,39 @@ mod tests {
             assert_eq!(keep_running, frame < FRAME_TIME_SAMPLE_COUNT);
         }
         assert!(report_rx.try_recv().is_err());
-        assert!(probe.publish(SurfaceReportEnvironment {
-            renderer: RendererReport {
-                name: "Test GPU".to_owned(),
-                vendor_id: 1,
-                device_id: 2,
-                backend: "Test".to_owned(),
-                driver: "driver".to_owned(),
-                driver_info: "1.0".to_owned(),
-            },
-            decoder_backends: vec!["Software".to_owned()],
-            encoder_backend: "libopenh264".to_owned(),
-            machine: MachineProfile {
-                cpu_identity: Some("Test CPU".to_owned()),
-                logical_cpu_count: 8,
-                total_physical_memory_bytes: Some(16 * 1024 * 1024 * 1024),
-            },
-            selected_preview_quality: "Auto".to_owned(),
-            resolved_preview_quality: "Half".to_owned(),
-            preview_size: [960, 540],
-            monitor_cache_cap_bytes: 512 * 1024 * 1024,
-            display_refresh_millihertz: Some(60_000),
-        }));
+        assert!(
+            probe.publish(SurfaceReportEnvironment {
+                renderer: RendererReport {
+                    name: "Test GPU".to_owned(),
+                    vendor_id: 1,
+                    device_id: 2,
+                    backend: "Test".to_owned(),
+                    driver: "driver".to_owned(),
+                    driver_info: "1.0".to_owned(),
+                },
+                decoder_backends: vec!["Software".to_owned()],
+                encoder_backend: "libopenh264".to_owned(),
+                machine: MachineProfile {
+                    cpu_identity: Some("Test CPU".to_owned()),
+                    logical_cpu_count: 8,
+                    total_physical_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+                },
+                selected_preview_quality: "Auto".to_owned(),
+                resolved_preview_quality: "Half".to_owned(),
+                preview_size: [960, 540],
+                monitor_cache_cap_bytes: 512 * 1024 * 1024,
+                display_refresh_millihertz: Some(60_000),
+                decoder_stage_timings: nle_decode::MonitorDecoderStageTimings {
+                    worker_request: nle_decode::MonitorStageTiming {
+                        samples: 2,
+                        total_nanos: 5_000_000,
+                        max_nanos: 4_000_000,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            })
+        );
         let report = report_rx.try_recv().expect("surface submission report");
         assert_eq!(report.schema_version, 1);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
@@ -6275,6 +6370,9 @@ mod tests {
         assert_eq!(report.encoder_backend, "libopenh264");
         assert_eq!(report.resolved_preview_quality, "Half");
         assert_eq!(report.monitor_cache_cap_bytes, 512 * 1024 * 1024);
+        assert_eq!(report.decoder_stage_timings.worker_request.samples, 2);
+        assert!((report.decoder_stage_timings.worker_request.total_ms - 5.0).abs() < f64::EPSILON);
+        assert!((report.decoder_stage_timings.worker_request.mean_ms - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -6288,6 +6386,21 @@ mod tests {
             &decoder,
             Some("h264_qsv")
         ));
+
+        let mut timings = DecoderStageTimingsReport::default();
+        assert!(surface_report_stage_timings_ready(false, &timings));
+        assert!(!surface_report_stage_timings_ready(true, &timings));
+        let observed = DecoderStageTimingReport {
+            samples: 1,
+            ..Default::default()
+        };
+        timings.cache_lookup = observed;
+        timings.demux_packet = observed;
+        timings.decoder_calls = observed;
+        timings.scaler = observed;
+        timings.rgba_copy_letterbox = observed;
+        timings.worker_request = observed;
+        assert!(surface_report_stage_timings_ready(true, &timings));
     }
 
     #[test]
