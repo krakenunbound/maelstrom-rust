@@ -220,11 +220,13 @@ try {
     $surfaceSubmission = Get-Content -LiteralPath $surfaceSubmissionReportPath -Raw | ConvertFrom-Json
     foreach ($property in @(
         'schema_version', 'samples', 'cpu_p95_ms', 'surface_submission_interval_p95_ms',
+        'surface_present_call_cpu_p95_ms',
         'average_submission_fps', 'renderer_gpu_name', 'renderer_vendor_id', 'renderer_device_id',
         'renderer_backend', 'renderer_driver', 'renderer_driver_info', 'decoder_backends',
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
-        'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings'
+        'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings',
+        'viewer_stage_timings'
     )) {
         if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
             throw "Surface submission probe omitted $property."
@@ -233,11 +235,16 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 1) {
+    if ($surfaceSubmission.schema_version -ne 2) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     if ($surfaceSubmission.cpu_p95_ms -lt 0 -or $surfaceSubmission.cpu_p95_ms -gt 8.0) {
         throw "Packaged editor CPU p95 regressed to $($surfaceSubmission.cpu_p95_ms) ms."
+    }
+    if ([double]::IsNaN([double]$surfaceSubmission.surface_present_call_cpu_p95_ms) -or
+        [double]::IsInfinity([double]$surfaceSubmission.surface_present_call_cpu_p95_ms) -or
+        $surfaceSubmission.surface_present_call_cpu_p95_ms -lt 0) {
+        throw "Packaged editor reported invalid surface present-call CPU p95 $($surfaceSubmission.surface_present_call_cpu_p95_ms) ms."
     }
     if ($surfaceSubmission.average_submission_fps -lt 55.0 -or $surfaceSubmission.surface_submission_interval_p95_ms -lt 0 -or $surfaceSubmission.surface_submission_interval_p95_ms -gt 25.0) {
         throw "Packaged editor surface submission cadence regressed: $($surfaceSubmission.average_submission_fps) submissions/s, p95 $($surfaceSubmission.surface_submission_interval_p95_ms) ms."
@@ -283,6 +290,25 @@ try {
             if ([Math]::Abs([double]$stage.mean_ms - $expectedMean) -gt $meanTolerance) {
                 throw "Decoder timing stage $stageName has an inconsistent mean."
             }
+        }
+    }
+    foreach ($stageName in @('upload_cpu', 'compositor_encode_cpu')) {
+        $stage = $surfaceSubmission.viewer_stage_timings.$stageName
+        if ($null -eq $stage) { throw "Surface submission probe omitted viewer timing stage $stageName." }
+        foreach ($property in @('samples', 'p95_ms', 'max_ms')) {
+            if ($stage.PSObject.Properties.Name -notcontains $property) {
+                throw "Viewer timing stage $stageName omitted $property."
+            }
+            $value = [double]$stage.$property
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
+                throw "Viewer timing stage $stageName returned invalid ${property}: $value."
+            }
+        }
+        if ($stage.max_ms -lt $stage.p95_ms) {
+            throw "Viewer timing stage $stageName has max below p95."
+        }
+        if ($stage.samples -lt 1) {
+            throw "Full media smoke did not exercise viewer timing stage $stageName."
         }
     }
     foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {

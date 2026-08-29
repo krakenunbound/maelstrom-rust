@@ -24,8 +24,8 @@ pub use texture_renderer::{
 };
 pub use viewer_compositor::{
     MAX_COLOR_CORRECTIONS_PER_LAYER, ViewerColorCorrection, ViewerColorCurve,
-    ViewerCompositorCallbackHandle, ViewerCompositorRenderer, ViewerFrame, ViewerLayerPrimitive,
-    ViewerRgbCurves, ViewerUploadError,
+    ViewerCompositorCallbackHandle, ViewerCompositorEncodeTiming, ViewerCompositorRenderer,
+    ViewerFrame, ViewerLayerPrimitive, ViewerRgbCurves, ViewerUploadError,
 };
 
 /// Thin egui GPU submission adapter; application code retains window/event ownership.
@@ -69,6 +69,11 @@ impl HubRenderer {
     /// Shared retained input for the native project-monitor compositor.
     pub fn viewer_compositor(&self) -> ViewerCompositorCallbackHandle {
         self.viewer_compositor.clone()
+    }
+
+    /// Snapshot CPU command-encoding time for changed viewer compositions only.
+    pub fn viewer_compositor_encode_timing(&self) -> ViewerCompositorEncodeTiming {
+        self.viewer_compositor.compositor_encode_timing()
     }
 
     /// Uploads a decoded RGBA frame into one fixed project-monitor layer slot.

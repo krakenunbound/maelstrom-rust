@@ -93,8 +93,9 @@ Build the evidence harness before adding engine complexity.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,
-      scale, RGBA packing, and the active worker request. Composite/upload GPU boundaries and
-      audio/presentation stages remain open.
+      scale, RGBA packing, and the active worker request. Viewer upload, changed-composition encode,
+      and presentation-call CPU boundaries are also reported. GPU completion/scanout and audio mix
+      timing remain open.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
 
 Exit gate:

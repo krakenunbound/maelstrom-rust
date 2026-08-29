@@ -3,6 +3,7 @@
 use std::{
     fmt,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -10,6 +11,17 @@ use nle_compositor::{CompositeQuad, MAX_COMPOSITE_LAYERS, PixelSize, Uv};
 
 const VIEWER_SHADER: &str = include_str!("viewer_compositor.wgsl");
 const VERTICES_PER_LAYER: usize = 6;
+const COMPOSITOR_TIMING_SAMPLE_COUNT: usize = 120;
+
+/// CPU time spent encoding a changed project-monitor composition.
+///
+/// This deliberately excludes GPU execution, GPU completion, and presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewerCompositorEncodeTiming {
+    pub samples: usize,
+    pub p95_ms: f32,
+    pub max_ms: f32,
+}
 
 /// Maximum number of ordered encoded-sRGB color-correction nodes per monitor layer.
 pub const MAX_COLOR_CORRECTIONS_PER_LAYER: usize = 8;
@@ -172,10 +184,52 @@ impl fmt::Display for ViewerUploadError {
 
 impl std::error::Error for ViewerUploadError {}
 
-#[derive(Default)]
 struct CallbackState {
     frame: Option<ViewerFrame>,
     generation: u64,
+    compositor_encode_ms: [f32; COMPOSITOR_TIMING_SAMPLE_COUNT],
+    compositor_encode_count: usize,
+    compositor_encode_next: usize,
+}
+
+impl Default for CallbackState {
+    fn default() -> Self {
+        Self {
+            frame: None,
+            generation: 0,
+            compositor_encode_ms: [0.0; COMPOSITOR_TIMING_SAMPLE_COUNT],
+            compositor_encode_count: 0,
+            compositor_encode_next: 0,
+        }
+    }
+}
+
+impl CallbackState {
+    fn record_compositor_encode(&mut self, duration: std::time::Duration) {
+        self.compositor_encode_ms[self.compositor_encode_next] = duration.as_secs_f32() * 1_000.0;
+        self.compositor_encode_next =
+            (self.compositor_encode_next + 1) % COMPOSITOR_TIMING_SAMPLE_COUNT;
+        self.compositor_encode_count =
+            (self.compositor_encode_count + 1).min(COMPOSITOR_TIMING_SAMPLE_COUNT);
+    }
+
+    fn compositor_encode_timing(&self) -> ViewerCompositorEncodeTiming {
+        let mut ordered = self.compositor_encode_ms;
+        ordered[..self.compositor_encode_count].sort_unstable_by(f32::total_cmp);
+        let p95_index = self
+            .compositor_encode_count
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        ViewerCompositorEncodeTiming {
+            samples: self.compositor_encode_count,
+            p95_ms: ordered.get(p95_index).copied().unwrap_or_default(),
+            max_ms: ordered
+                .get(self.compositor_encode_count.saturating_sub(1))
+                .copied()
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Thread-safe retained frame input for the project-monitor paint callback.
@@ -202,6 +256,13 @@ impl ViewerCompositorCallbackHandle {
         if state.frame.take().is_some() {
             state.generation = state.generation.wrapping_add(1);
         }
+    }
+
+    pub fn compositor_encode_timing(&self) -> ViewerCompositorEncodeTiming {
+        self.state
+            .lock()
+            .expect("viewer compositor lock")
+            .compositor_encode_timing()
     }
 
     /// Adds the monitor callback at its current painter position.
@@ -242,8 +303,9 @@ impl egui_wgpu::CallbackTrait for ViewerCompositorCallback {
         let Some(renderer) = resources.get_mut::<ViewerCompositorRenderer>() else {
             return Vec::new();
         };
-        let state = self.handle.state.lock().expect("viewer compositor lock");
-        renderer.prepare(
+        let mut state = self.handle.state.lock().expect("viewer compositor lock");
+        let started_at = Instant::now();
+        if renderer.prepare(
             device,
             queue,
             encoder,
@@ -254,7 +316,9 @@ impl egui_wgpu::CallbackTrait for ViewerCompositorCallback {
                 screen.pixels_per_point,
                 screen.size_in_pixels,
             ),
-        );
+        ) {
+            state.record_compositor_encode(started_at.elapsed());
+        }
         Vec::new()
     }
 
@@ -482,11 +546,11 @@ impl ViewerCompositorRenderer {
         frame: Option<ViewerFrame>,
         frame_generation: u64,
         canvas_size: PixelSize,
-    ) {
+    ) -> bool {
         let Some(frame) = frame.filter(|frame| frame.project_size.is_nonzero()) else {
             self.outputs = None;
             self.output_size = None;
-            return;
+            return false;
         };
         let resized = self.ensure_outputs(device, canvas_size);
         if !composition_required(
@@ -496,7 +560,7 @@ impl ViewerCompositorRenderer {
             self.applied_input_generation,
             self.input_generation,
         ) {
-            return;
+            return false;
         }
         let back = 1 - self.front_output;
         let mut vertices = [ViewerVertex::zeroed(); MAX_COMPOSITE_LAYERS * VERTICES_PER_LAYER];
@@ -575,6 +639,7 @@ impl ViewerCompositorRenderer {
         self.front_output = back;
         self.applied_frame_generation = frame_generation;
         self.applied_input_generation = self.input_generation;
+        true
     }
 
     fn paint(&self, pass: &mut wgpu::RenderPass<'_>, info: egui::PaintCallbackInfo) {
@@ -1377,6 +1442,26 @@ mod tests {
     }
 
     #[test]
+    fn compositor_encode_timing_is_bounded_and_ignores_unrecorded_callbacks() {
+        let mut state = CallbackState::default();
+        assert_eq!(
+            state.compositor_encode_timing(),
+            ViewerCompositorEncodeTiming::default()
+        );
+        for milliseconds in 1..=COMPOSITOR_TIMING_SAMPLE_COUNT as u64 + 1 {
+            state.record_compositor_encode(std::time::Duration::from_millis(milliseconds));
+        }
+        assert_eq!(
+            state.compositor_encode_timing(),
+            ViewerCompositorEncodeTiming {
+                samples: COMPOSITOR_TIMING_SAMPLE_COUNT,
+                p95_ms: 115.0,
+                max_ms: 121.0,
+            }
+        );
+    }
+
+    #[test]
     fn physical_canvas_size_uses_current_clamped_viewport_not_project_size() {
         let size = physical_canvas_size(
             egui::Rect::from_min_max(egui::pos2(10.2, 3.4), egui::pos2(90.7, 40.1)),
@@ -1826,14 +1911,22 @@ mod tests {
             mapped_at_creation: false,
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        renderer.prepare(
+        assert!(renderer.prepare(
             &device,
             &queue,
             &mut encoder,
             Some(frame),
             1,
             PixelSize::new(4, 4),
-        );
+        ));
+        assert!(!renderer.prepare(
+            &device,
+            &queue,
+            &mut encoder,
+            Some(frame),
+            1,
+            PixelSize::new(4, 4),
+        ));
         let output = &renderer.outputs.as_ref().expect("output")[renderer.front_output]._texture;
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {

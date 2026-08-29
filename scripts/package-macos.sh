@@ -234,7 +234,7 @@ done
 [[ -f "$SURFACE_REPORT" ]] || { cat "$DIST_ROOT/macos-smoke.log" >&2; echo "Surface submission smoke timed out." >&2; exit 1; }
 [[ -f "$ACCEPTANCE_REPORT" ]] || { cat "$DIST_ROOT/macos-smoke.log" >&2; echo "Real-media acceptance smoke timed out." >&2; exit 1; }
 python3 - "$STARTUP_REPORT" "$SURFACE_REPORT" "$ACCEPTANCE_REPORT" <<'PY'
-import json, sys
+import json, math, sys
 startup = json.load(open(sys.argv[1], encoding="utf-8"))
 surface = json.load(open(sys.argv[2], encoding="utf-8"))
 acceptance = json.load(open(sys.argv[3], encoding="utf-8"))
@@ -248,10 +248,11 @@ for key in (
     "renderer_backend", "renderer_driver", "renderer_driver_info", "decoder_backends",
     "encoder_backend", "cpu_identity", "logical_cpu_count", "total_physical_memory_bytes",
     "selected_preview_quality", "resolved_preview_quality", "preview_width", "preview_height",
-    "monitor_cache_cap_bytes", "display_refresh_millihertz",
+    "monitor_cache_cap_bytes", "display_refresh_millihertz", "decoder_stage_timings",
+    "viewer_stage_timings", "surface_present_call_cpu_p95_ms",
 ):
     assert key in surface, (key, surface)
-assert surface["schema_version"] == 1, surface
+assert surface["schema_version"] == 2, surface
 assert surface["renderer_gpu_name"] and surface["renderer_backend"], surface
 assert surface["decoder_backends"] and surface["encoder_backend"] != "not_observed", surface
 assert surface["logical_cpu_count"] >= 1, surface
@@ -260,6 +261,13 @@ assert surface["total_physical_memory_bytes"] is None or surface["total_physical
 assert surface["preview_width"] >= 1 and surface["preview_height"] >= 1, surface
 assert surface["monitor_cache_cap_bytes"] >= 1, surface
 assert surface["display_refresh_millihertz"] is None or surface["display_refresh_millihertz"] >= 1, surface
+assert math.isfinite(surface["surface_present_call_cpu_p95_ms"]), surface
+assert surface["surface_present_call_cpu_p95_ms"] >= 0, surface
+for stage_name in ("upload_cpu", "compositor_encode_cpu"):
+    stage = surface["viewer_stage_timings"][stage_name]
+    assert all(math.isfinite(stage[key]) for key in ("samples", "p95_ms", "max_ms")), (stage_name, stage)
+    assert stage["samples"] >= 1, (stage_name, stage)
+    assert 0 <= stage["p95_ms"] <= stage["max_ms"], (stage_name, stage)
 for key in (
     "media_pool_drag_completed", "analysis_metadata_ready", "waveform_ready", "monitor_frame_arrived",
     "live_audio_meter_nonzero", "live_fade_reduced", "live_fade_recovered", "live_gain_reduced",

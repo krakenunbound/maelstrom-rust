@@ -1794,6 +1794,7 @@ struct SurfaceSubmissionMetrics {
     samples: usize,
     cpu_p95_ms: f32,
     surface_submission_interval_p95_ms: f32,
+    surface_present_call_cpu_p95_ms: f32,
     average_submission_fps: f32,
 }
 
@@ -1803,6 +1804,7 @@ struct SurfaceSubmissionReport {
     samples: usize,
     cpu_p95_ms: f32,
     surface_submission_interval_p95_ms: f32,
+    surface_present_call_cpu_p95_ms: f32,
     average_submission_fps: f32,
     renderer_gpu_name: String,
     renderer_vendor_id: u32,
@@ -1822,6 +1824,79 @@ struct SurfaceSubmissionReport {
     monitor_cache_cap_bytes: usize,
     display_refresh_millihertz: Option<u32>,
     decoder_stage_timings: DecoderStageTimingsReport,
+    viewer_stage_timings: ViewerStageTimingsReport,
+}
+
+/// CPU/API submission timing only; it does not measure GPU completion or scanout.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct ViewerStageTimingReport {
+    samples: usize,
+    p95_ms: f32,
+    max_ms: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct ViewerStageTimingsReport {
+    upload_cpu: ViewerStageTimingReport,
+    compositor_encode_cpu: ViewerStageTimingReport,
+}
+
+impl From<nle_render::ViewerCompositorEncodeTiming> for ViewerStageTimingReport {
+    fn from(timing: nle_render::ViewerCompositorEncodeTiming) -> Self {
+        Self {
+            samples: timing.samples,
+            p95_ms: timing.p95_ms,
+            max_ms: timing.max_ms,
+        }
+    }
+}
+
+struct ViewerStageTimingWindow {
+    samples_ms: [f32; FRAME_TIME_SAMPLE_COUNT],
+    sample_count: usize,
+    next_sample: usize,
+}
+
+impl Default for ViewerStageTimingWindow {
+    fn default() -> Self {
+        Self {
+            samples_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
+            sample_count: 0,
+            next_sample: 0,
+        }
+    }
+}
+
+impl ViewerStageTimingWindow {
+    fn record(&mut self, duration: Duration) {
+        self.samples_ms[self.next_sample] = duration.as_secs_f32() * 1_000.0;
+        self.next_sample = (self.next_sample + 1) % FRAME_TIME_SAMPLE_COUNT;
+        self.sample_count = (self.sample_count + 1).min(FRAME_TIME_SAMPLE_COUNT);
+    }
+
+    fn snapshot(&self) -> ViewerStageTimingReport {
+        let mut ordered = self.samples_ms;
+        ordered[..self.sample_count].sort_unstable_by(f32::total_cmp);
+        let p95_index = self
+            .sample_count
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        ViewerStageTimingReport {
+            samples: self.sample_count,
+            p95_ms: ordered.get(p95_index).copied().unwrap_or_default(),
+            max_ms: ordered
+                .get(self.sample_count.saturating_sub(1))
+                .copied()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl ViewerStageTimingsReport {
+    fn fully_observed(&self) -> bool {
+        self.upload_cpu.samples > 0 && self.compositor_encode_cpu.samples > 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
@@ -1905,6 +1980,7 @@ struct SurfaceReportEnvironment {
     monitor_cache_cap_bytes: usize,
     display_refresh_millihertz: Option<u32>,
     decoder_stage_timings: DecoderStageTimingsReport,
+    viewer_stage_timings: ViewerStageTimingsReport,
 }
 
 fn surface_report_backends_ready(
@@ -1920,6 +1996,13 @@ fn surface_report_stage_timings_ready(
     timings: &DecoderStageTimingsReport,
 ) -> bool {
     !full_media_smoke || timings.applicable_decode_stages_observed()
+}
+
+fn surface_report_viewer_stage_timings_ready(
+    full_media_smoke: bool,
+    timings: ViewerStageTimingsReport,
+) -> bool {
+    !full_media_smoke || timings.fully_observed()
 }
 
 fn aggregate_monitor_decoder_stage_timings(
@@ -1945,6 +2028,7 @@ struct StartupPresentationProbe {
 struct SurfaceSubmissionProbe {
     cpu_ms: [f32; FRAME_TIME_SAMPLE_COUNT],
     intervals_ms: [f32; FRAME_TIME_SAMPLE_COUNT],
+    present_call_ms: [f32; FRAME_TIME_SAMPLE_COUNT],
     sample_count: usize,
     last_submitted_at: Option<Instant>,
     completed: Option<SurfaceSubmissionMetrics>,
@@ -2014,6 +2098,7 @@ impl SurfaceSubmissionProbe {
         Some(Self {
             cpu_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
             intervals_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
+            present_call_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
             sample_count: 0,
             last_submitted_at: None,
             completed: None,
@@ -2023,7 +2108,12 @@ impl SurfaceSubmissionProbe {
 
     /// Records only already-completed CPU work and present submissions. Report IO belongs to a
     /// dedicated one-shot worker, never the UI frame.
-    fn record(&mut self, cpu_duration: Duration, submitted_at: Instant) -> bool {
+    fn record(
+        &mut self,
+        cpu_duration: Duration,
+        present_call_duration: Duration,
+        submitted_at: Instant,
+    ) -> bool {
         if self.completed.is_some() {
             return false;
         }
@@ -2036,6 +2126,7 @@ impl SurfaceSubmissionProbe {
         self.cpu_ms[self.sample_count] = cpu_duration.as_secs_f32() * 1_000.0;
         self.intervals_ms[self.sample_count] =
             submitted_at.duration_since(previous).as_secs_f32() * 1_000.0;
+        self.present_call_ms[self.sample_count] = present_call_duration.as_secs_f32() * 1_000.0;
         self.sample_count += 1;
         if self.sample_count < FRAME_TIME_SAMPLE_COUNT {
             return true;
@@ -2043,11 +2134,13 @@ impl SurfaceSubmissionProbe {
 
         let cpu_p95_ms = nearest_rank_p95(&self.cpu_ms);
         let surface_submission_interval_p95_ms = nearest_rank_p95(&self.intervals_ms);
+        let surface_present_call_cpu_p95_ms = nearest_rank_p95(&self.present_call_ms);
         let mean_interval_ms = self.intervals_ms.iter().sum::<f32>() / self.sample_count as f32;
         self.completed = Some(SurfaceSubmissionMetrics {
             samples: self.sample_count,
             cpu_p95_ms,
             surface_submission_interval_p95_ms,
+            surface_present_call_cpu_p95_ms,
             average_submission_fps: 1_000.0 / mean_interval_ms.max(f32::EPSILON),
         });
         false
@@ -2061,10 +2154,11 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 1,
+            schema_version: 2,
             samples: metrics.samples,
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
+            surface_present_call_cpu_p95_ms: metrics.surface_present_call_cpu_p95_ms,
             average_submission_fps: metrics.average_submission_fps,
             renderer_gpu_name: environment.renderer.name,
             renderer_vendor_id: environment.renderer.vendor_id,
@@ -2084,6 +2178,7 @@ impl SurfaceSubmissionProbe {
             monitor_cache_cap_bytes: environment.monitor_cache_cap_bytes,
             display_refresh_millihertz: environment.display_refresh_millihertz,
             decoder_stage_timings: environment.decoder_stage_timings,
+            viewer_stage_timings: environment.viewer_stage_timings,
         };
         tx.try_send(report).is_ok()
     }
@@ -2451,6 +2546,7 @@ struct App {
     timeline_rect_scratch: Vec<RectInstance>,
     timeline_texture_scratch: Vec<TexturedRect>,
     frame_metrics: FrameMetrics,
+    viewer_upload_timings: ViewerStageTimingWindow,
     monitor_runtime_metrics: MonitorRuntimeMetrics,
     startup_presentation_probe: Option<StartupPresentationProbe>,
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
@@ -2706,6 +2802,7 @@ impl App {
             timeline_rect_scratch: Vec::with_capacity(64 * 1024),
             timeline_texture_scratch: Vec::with_capacity(16 * 1024),
             frame_metrics: FrameMetrics::default(),
+            viewer_upload_timings: ViewerStageTimingWindow::default(),
             monitor_runtime_metrics: MonitorRuntimeMetrics::default(),
             startup_presentation_probe: StartupPresentationProbe::from_environment(started_at),
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
@@ -2903,6 +3000,18 @@ impl App {
         if !surface_report_stage_timings_ready(full_media_smoke, &decoder_stage_timings) {
             return;
         }
+        let viewer_stage_timings = ViewerStageTimingsReport {
+            upload_cpu: self.viewer_upload_timings.snapshot(),
+            compositor_encode_cpu: self
+                .hub_renderer
+                .as_ref()
+                .map(HubRenderer::viewer_compositor_encode_timing)
+                .unwrap_or_default()
+                .into(),
+        };
+        if !surface_report_viewer_stage_timings_ready(full_media_smoke, viewer_stage_timings) {
+            return;
+        }
         let Some(renderer) = self.renderer_report.clone() else {
             return;
         };
@@ -2925,6 +3034,7 @@ impl App {
                 .and_then(|window| window.current_monitor())
                 .and_then(|monitor| monitor.refresh_rate_millihertz()),
             decoder_stage_timings,
+            viewer_stage_timings,
         };
         let published = self
             .surface_submission_probe
@@ -3107,14 +3217,16 @@ impl App {
             native_primitive_counts.0,
             native_primitive_counts.1,
         );
+        let present_call_started = Instant::now();
         frame.present();
+        let present_call_duration = present_call_started.elapsed();
         let presented_at = Instant::now();
         if let Some(probe) = &mut self.startup_presentation_probe {
             probe.record_first_present(presented_at);
         }
         self.first_surface_presented = true;
         if let Some(probe) = &mut self.surface_submission_probe {
-            let collecting = probe.record(frame_cpu_duration, presented_at);
+            let collecting = probe.record(frame_cpu_duration, present_call_duration, presented_at);
             if let Some(window) = &self.window {
                 if collecting {
                     window.request_redraw();
@@ -4848,8 +4960,12 @@ impl App {
         let renderer = self
             .hub_renderer
             .get_or_insert_with(|| HubRenderer::new(&device, config.format));
+        let started_at = Instant::now();
         match renderer.upload_viewer_layer_rgba(&device, &queue, layer, width, height, rgba) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.viewer_upload_timings.record(started_at.elapsed());
+                true
+            }
             Err(error) => {
                 tracing::warn!("native viewer upload fell back to egui: {error}");
                 false
@@ -6312,16 +6428,18 @@ mod tests {
         let mut probe = SurfaceSubmissionProbe {
             cpu_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
             intervals_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
+            present_call_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
             sample_count: 0,
             last_submitted_at: None,
             completed: None,
             report_tx: Some(report_tx),
         };
         let origin = Instant::now();
-        assert!(probe.record(Duration::from_millis(2), origin));
+        assert!(probe.record(Duration::from_millis(2), Duration::from_millis(1), origin));
         for frame in 1..=FRAME_TIME_SAMPLE_COUNT {
             let keep_running = probe.record(
                 Duration::from_millis(2),
+                Duration::from_millis(1),
                 origin + Duration::from_millis(frame as u64 * 16),
             );
             assert_eq!(keep_running, frame < FRAME_TIME_SAMPLE_COUNT);
@@ -6358,13 +6476,26 @@ mod tests {
                     ..Default::default()
                 }
                 .into(),
+                viewer_stage_timings: ViewerStageTimingsReport {
+                    upload_cpu: ViewerStageTimingReport {
+                        samples: 2,
+                        p95_ms: 1.0,
+                        max_ms: 2.0,
+                    },
+                    compositor_encode_cpu: ViewerStageTimingReport {
+                        samples: 1,
+                        p95_ms: 3.0,
+                        max_ms: 3.0,
+                    },
+                },
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.schema_version, 2);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
+        assert_eq!(report.surface_present_call_cpu_p95_ms, 1.0);
         assert!((report.average_submission_fps - 62.5).abs() < 0.01);
         assert_eq!(report.decoder_backends, ["Software"]);
         assert_eq!(report.encoder_backend, "libopenh264");
@@ -6373,6 +6504,20 @@ mod tests {
         assert_eq!(report.decoder_stage_timings.worker_request.samples, 2);
         assert!((report.decoder_stage_timings.worker_request.total_ms - 5.0).abs() < f64::EPSILON);
         assert!((report.decoder_stage_timings.worker_request.mean_ms - 2.5).abs() < f64::EPSILON);
+        assert_eq!(report.viewer_stage_timings.upload_cpu.samples, 2);
+        assert_eq!(
+            report.viewer_stage_timings.compositor_encode_cpu.max_ms,
+            3.0
+        );
+        let json = serde_json::to_value(&report).expect("surface report serializes");
+        assert_eq!(
+            json.pointer("/viewer_stage_timings/upload_cpu/samples"),
+            Some(&serde_json::Value::from(2))
+        );
+        assert_eq!(
+            json.pointer("/surface_present_call_cpu_p95_ms"),
+            Some(&serde_json::Value::from(1.0))
+        );
     }
 
     #[test]
@@ -6401,6 +6546,35 @@ mod tests {
         timings.rgba_copy_letterbox = observed;
         timings.worker_request = observed;
         assert!(surface_report_stage_timings_ready(true, &timings));
+
+        let empty = ViewerStageTimingsReport::default();
+        assert!(surface_report_viewer_stage_timings_ready(false, empty));
+        assert!(!surface_report_viewer_stage_timings_ready(true, empty));
+        assert!(surface_report_viewer_stage_timings_ready(
+            true,
+            ViewerStageTimingsReport {
+                upload_cpu: ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+                compositor_encode_cpu: ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn viewer_stage_timing_window_wraps_and_reports_p95_and_max() {
+        let mut window = ViewerStageTimingWindow::default();
+        for milliseconds in 1..=FRAME_TIME_SAMPLE_COUNT as u64 + 1 {
+            window.record(Duration::from_millis(milliseconds));
+        }
+        let timing = window.snapshot();
+        assert_eq!(timing.samples, FRAME_TIME_SAMPLE_COUNT);
+        assert_eq!(timing.p95_ms, 115.0);
+        assert_eq!(timing.max_ms, 121.0);
     }
 
     #[test]

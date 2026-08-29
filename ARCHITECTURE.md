@@ -258,6 +258,12 @@ milliseconds. Software decode has zero hardware-transfer samples by design. Thes
 claim GPU upload/compositing completion, scanout, or audio callback timing; those remain separate
 measurement work.
 
+Its viewer timing sub-object records CPU/API submission only: successful native RGBA uploads,
+changed-composition command encoding, and the `frame.present()` call handoff. All three use bounded
+120-sample windows and are deliberately separate from GPU execution, GPU completion, and scanout;
+the package full-media smoke waits for at least one successful upload and one actual composition
+encode before publishing this evidence.
+
 The opt-in Phase 0 scenario matrix is a finite integration check, not a steady-state benchmark. It
 uses generated media and the existing public decoder/App/export paths to verify latest-wins reverse
 scrubbing, alternating editor restoration, missing-file detection followed by decode recovery,
