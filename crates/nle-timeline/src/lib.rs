@@ -828,6 +828,11 @@ pub struct Clip {
     pub start: Tick,
     pub duration: Tick,
     pub source_in: Tick,
+    /// Disabled clips remain placed on the timeline but are bypassed by media
+    /// consumers. Older projects predate this control and therefore restore as
+    /// enabled.
+    #[serde(default = "default_clip_enabled")]
+    pub enabled: bool,
     /// Only meaningful for audio clips. Values are clamped by `set_audio_gain`.
     #[serde(default)]
     pub gain_db: f32,
@@ -846,6 +851,10 @@ pub struct Clip {
     pub transform: ClipTransform,
     pub fade_in: Fade,
     pub fade_out: Fade,
+}
+
+fn default_clip_enabled() -> bool {
+    true
 }
 
 /// Preview transform for the monitor. Identity is scale 1, opacity 1, centered.
@@ -3347,6 +3356,32 @@ impl Timeline {
         Ok(())
     }
 
+    /// Enables or disables `clip_id` and, when requested, its exact linked
+    /// counterparts (same link, start, and duration). The selection is
+    /// resolved before any mutation so a missing target cannot leave a partial
+    /// linked edit behind. Returns only clips whose durable state changed.
+    pub fn set_clip_enabled(
+        &mut self,
+        clip_id: ClipId,
+        enabled: bool,
+        linked_selection: bool,
+    ) -> Result<Vec<ClipId>, TimelineError> {
+        let selected = self.selected_clips(clip_id, linked_selection)?;
+        let changed = selected
+            .iter()
+            .filter(|clip| clip.enabled != enabled)
+            .map(|clip| clip.id)
+            .collect::<Vec<_>>();
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        for id in &changed {
+            self.clip_mut(*id)?.1.enabled = enabled;
+        }
+        self.bump_generations(false);
+        Ok(changed)
+    }
+
     pub fn set_clip_transform(
         &mut self,
         clip_id: ClipId,
@@ -4490,6 +4525,7 @@ impl Timeline {
             start,
             duration,
             source_in,
+            enabled: true,
             gain_db: 0.0,
             gain_left_db: 0.0,
             gain_right_db: 0.0,
@@ -5306,6 +5342,82 @@ mod tests {
     }
 
     #[test]
+    fn clip_enable_is_legacy_safe_nonstructural_and_snapshot_durable() {
+        let mut timeline = Timeline::new_default();
+        let track = first_track(&timeline, TrackKind::Video);
+        let clip = timeline
+            .insert_clip(track, MediaId(7), Tick(0), Tick(20), Tick(0))
+            .unwrap();
+        let generation = timeline.generation();
+        let structural = timeline.structural_generation();
+        assert_eq!(
+            timeline.set_clip_enabled(clip, false, false).unwrap(),
+            [clip]
+        );
+        assert!(!timeline.clip(clip).unwrap().enabled);
+        assert_eq!(timeline.generation(), generation + 1);
+        assert_eq!(timeline.structural_generation(), structural);
+        assert!(
+            timeline
+                .set_clip_enabled(clip, false, false)
+                .unwrap()
+                .is_empty()
+        );
+
+        let snapshot = timeline.snapshot();
+        let restored = Timeline::from_snapshot(snapshot.clone()).unwrap();
+        assert_eq!(restored.snapshot(), snapshot);
+        assert!(!restored.clip(clip).unwrap().enabled);
+
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        legacy["tracks"].as_array_mut().unwrap()[0]["clips"]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("enabled");
+        let restored = Timeline::from_snapshot(serde_json::from_value(legacy).unwrap()).unwrap();
+        assert!(restored.clip(clip).unwrap().enabled);
+        restored.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn clip_enable_link_selection_is_atomic_and_history_round_trips() {
+        let mut timeline = Timeline::new_default();
+        let pair = timeline
+            .insert_linked_av_pair(MediaId(7), Tick(100), Tick(50), Tick(12))
+            .unwrap();
+        let before = timeline.snapshot();
+        assert_eq!(
+            timeline.set_clip_enabled(pair.video, false, true).unwrap(),
+            [pair.video, pair.audio]
+        );
+        let after = timeline.snapshot();
+        let mut history = UndoStack::default();
+        assert!(history.record(&before, &after));
+        assert!(history.undo(&mut timeline));
+        assert!(timeline.clip(pair.video).unwrap().enabled);
+        assert!(timeline.clip(pair.audio).unwrap().enabled);
+        assert!(history.redo(&mut timeline));
+        assert!(!timeline.clip(pair.video).unwrap().enabled);
+        assert!(!timeline.clip(pair.audio).unwrap().enabled);
+
+        assert_eq!(
+            timeline.set_clip_enabled(pair.video, true, false).unwrap(),
+            [pair.video]
+        );
+        assert!(timeline.clip(pair.video).unwrap().enabled);
+        assert!(!timeline.clip(pair.audio).unwrap().enabled);
+        let unchanged = timeline.snapshot();
+        assert!(matches!(
+            timeline.set_clip_enabled(ClipId(u32::MAX), true, true),
+            Err(TimelineError::UnknownClip(ClipId(u32::MAX)))
+        ));
+        assert_eq!(timeline.snapshot(), unchanged);
+        timeline.check_invariants().unwrap();
+    }
+
+    #[test]
     fn audio_controls_restore_from_legacy_snapshot_defaults() {
         let mut timeline = Timeline::new_default();
         let track = first_track(&timeline, TrackKind::Audio);
@@ -5906,6 +6018,7 @@ mod tests {
             start: Tick(15),
             duration: Tick(10),
             source_in: Tick(0),
+            enabled: true,
             gain_db: 0.0,
             gain_left_db: 0.0,
             gain_right_db: 0.0,
@@ -6328,6 +6441,7 @@ mod tests {
             start: Tick(start),
             duration: Tick(duration),
             source_in: Tick(0),
+            enabled: true,
             gain_db: 0.0,
             gain_left_db: 0.0,
             gain_right_db: 0.0,

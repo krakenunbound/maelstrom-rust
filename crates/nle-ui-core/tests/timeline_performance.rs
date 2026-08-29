@@ -72,6 +72,7 @@ fn fifty_thousand_clips() -> Timeline {
             media: MediaId(1),
             track_id: video_track.id,
             link_id: None,
+            enabled: true,
             // One millisecond clip followed by one millisecond of empty timeline. This keeps
             // the source nonoverlapping and makes the wide view a genuine 50,000-clip case.
             start: Tick(i64::from(id - 1) * 2_000),
@@ -118,6 +119,7 @@ fn add_twenty_thousand_bars_behind_real_media(state: &mut EditorState) {
             media: MediaId(1),
             track_id: stress_track.id,
             link_id: None,
+            enabled: true,
             start: Tick(start + i64::from(index) * 2_000),
             duration: Tick(1_000),
             source_in: Tick(0),

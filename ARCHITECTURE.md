@@ -154,6 +154,11 @@ outgoing half and remains opaque beneath the incoming half, which fades up witho
 slot. Structural
 edits prune invalid or overlapping operations; v1–v5 documents migrate idempotently to the v6 typed
 transition schema, with legacy transitions defaulting to Cross Dissolve.
+Each clip also owns a durable `enabled` flag, defaulted to true during legacy deserialization.
+Disabling a linked clip pair is one atomic timeline mutation. Disabled placements still contribute
+their authored end time, preserving project duration and gaps, but are excluded before preview
+decoder/audio target selection and before export probing, input construction, and filter planning.
+Transitions or crossfades touching a disabled clip are bypassed until both sides are enabled again.
 Audible audio tracks are independently trimmed, timed, gain/pan/channel-adjusted, curve-faded, and
 mixed. Equal-power audio crossfades are separate durable operations on exact adjacent same-track
 cuts. The editor validates saved pre/post handles, emits outgoing and incoming targets with a shared

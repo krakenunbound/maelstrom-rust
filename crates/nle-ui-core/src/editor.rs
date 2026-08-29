@@ -904,6 +904,7 @@ struct TimelineClipPaint<'a> {
     label_galley: Option<Arc<egui::Galley>>,
     offline_prefix_galley: Option<Arc<egui::Galley>>,
     selected: bool,
+    enabled: bool,
     show_handles: bool,
 }
 
@@ -1725,7 +1726,10 @@ impl EditorState {
     pub fn quick_export_block_message(&self) -> Option<&'static str> {
         let mut contributing_video_tracks = 0;
         for track in &self.timeline.tracks {
-            if track.kind != TrackKind::Video || track.muted || track.clips.is_empty() {
+            if track.kind != TrackKind::Video
+                || track.muted
+                || !track.clips.iter().any(|clip| clip.enabled)
+            {
                 continue;
             }
             contributing_video_tracks += 1;
@@ -1747,10 +1751,12 @@ impl EditorState {
             .any(|track| track.kind == TrackKind::Audio && track.solo);
         if self.timeline.tracks.iter().any(|track| {
             track.audio_is_audible(any_audio_solo)
+                && track.clips.iter().any(|clip| clip.enabled)
                 && (track.effects.iter().any(audio_effect_blocks_export)
                     || track
                         .clips
                         .iter()
+                        .filter(|clip| clip.enabled)
                         .flat_map(|clip| &clip.effects)
                         .any(audio_effect_blocks_export))
         }) {
@@ -2599,6 +2605,9 @@ impl EditorState {
     ) -> [Option<PlaybackTarget<'_>>; 2] {
         if let Some(transition) = self.timeline.transitions().iter().find(|transition| {
             transition.track_id == track.id
+                && [transition.left_clip, transition.right_clip]
+                    .into_iter()
+                    .all(|clip_id| self.timeline.clip(clip_id).is_some_and(|clip| clip.enabled))
                 && self
                     .timeline
                     .transition_timing(transition.id)
@@ -2776,6 +2785,9 @@ impl EditorState {
         black_matte_before: f32,
         black_matte_after: f32,
     ) -> Option<PlaybackTarget<'_>> {
+        if !clip.enabled {
+            return None;
+        }
         let media_id = clip.media.0;
         let item = self.media.get(media_id.saturating_sub(1) as usize)?;
         let path = (item.id == media_id).then_some(&item.path)?;
@@ -2848,6 +2860,9 @@ impl EditorState {
         {
             let transition = self.timeline.audio_transitions().iter().find(|transition| {
                 transition.track_id == track.id
+                    && [transition.left_clip, transition.right_clip]
+                        .into_iter()
+                        .all(|clip_id| self.timeline.clip(clip_id).is_some_and(|clip| clip.enabled))
                     && self
                         .timeline
                         .audio_transition_timing(transition.id)
@@ -2918,10 +2933,9 @@ impl EditorState {
                 let first_not_ended = track
                     .clips
                     .partition_point(|clip| clip.end() <= self.playhead);
-                let clip = track
-                    .clips
-                    .get(first_not_ended)
-                    .filter(|clip| clip.start <= self.playhead && self.playhead < clip.end())?;
+                let clip = track.clips.get(first_not_ended).filter(|clip| {
+                    clip.enabled && clip.start <= self.playhead && self.playhead < clip.end()
+                })?;
                 let item = self.media.get(clip.media.0.saturating_sub(1) as usize)?;
                 let path = (item.id == clip.media.0).then_some(&item.path)?;
                 Some(AudioPlaybackTarget {
@@ -3447,6 +3461,81 @@ impl EditorState {
         (left.end() == right.start).then_some((track.id, left.id, right.id))
     }
 
+    fn adjacent_audio_cut(
+        &self,
+        clip_id: ClipId,
+        edge: FadeEdge,
+    ) -> Option<(TrackId, ClipId, ClipId)> {
+        let clip = self.timeline.clip(clip_id)?;
+        let track = self.timeline.track(clip.track_id)?;
+        if track.kind != TrackKind::Audio {
+            return None;
+        }
+        let index = track
+            .clips
+            .iter()
+            .position(|candidate| candidate.id == clip_id)?;
+        let (left, right) = match edge {
+            FadeEdge::In if index > 0 => (&track.clips[index - 1], &track.clips[index]),
+            FadeEdge::Out if index + 1 < track.clips.len() => {
+                (&track.clips[index], &track.clips[index + 1])
+            }
+            _ => return None,
+        };
+        (left.end() == right.start).then_some((track.id, left.id, right.id))
+    }
+
+    fn can_add_video_transition(
+        &self,
+        clip_id: ClipId,
+        edge: FadeEdge,
+        kind: VideoTransitionKind,
+    ) -> bool {
+        self.adjacent_video_cut(clip_id, edge)
+            .is_some_and(|(_, left, right)| {
+                self.transition_at_cut(left, right).is_none()
+                    && self
+                        .transition_duration_capacity(left, right, kind, None)
+                        .is_some_and(|capacity| {
+                            capacity.0 >= self.frame_rate.frame_boundary_tick(1).0.max(1)
+                        })
+            })
+    }
+
+    fn toggle_audio_crossfade(&mut self, clip_id: ClipId, edge: FadeEdge) -> bool {
+        let Some((track_id, left, right)) = self.adjacent_audio_cut(clip_id, edge) else {
+            return false;
+        };
+        let before = self.timeline_history_checkpoint();
+        if let Some(existing) = self
+            .timeline
+            .audio_transitions()
+            .iter()
+            .find(|transition| transition.left_clip == left && transition.right_clip == right)
+            .map(|transition| transition.id)
+        {
+            if self.timeline.remove_audio_transition(existing).is_err() {
+                return false;
+            }
+        } else {
+            let Some(capacity) = self.audio_transition_duration_capacity(left, right, None) else {
+                return false;
+            };
+            let duration = Tick(DEFAULT_VIDEO_TRANSITION_DURATION.0.min(capacity.0));
+            if duration.0 <= 0
+                || self
+                    .timeline
+                    .add_audio_transition(track_id, left, right, duration)
+                    .is_err()
+            {
+                return false;
+            }
+        }
+        self.record_timeline_history(before);
+        self.mark_durable_edit();
+        true
+    }
+
     fn transition_handle_capacity(&self, left_clip: ClipId, right_clip: ClipId) -> Option<Tick> {
         let left = self.timeline.clip(left_clip)?;
         let right = self.timeline.clip(right_clip)?;
@@ -3744,6 +3833,25 @@ impl EditorState {
         self.abandon_provisional_timing(removed.iter().map(|clip| clip.id));
         self.record_timeline_history(before);
         self.selected_timeline_clip = None;
+        self.mark_durable_edit();
+        true
+    }
+
+    /// Toggles the right-clicked/selected clip and its exact linked counterpart when Linked
+    /// Selection is active. Disabled clips keep their timeline position and settings but are
+    /// omitted from monitor playback, audio playback, and export.
+    pub fn set_timeline_clip_enabled(&mut self, clip_id: ClipId, enabled: bool) -> bool {
+        let before = self.timeline_history_checkpoint();
+        let Ok(changed) = self
+            .timeline
+            .set_clip_enabled(clip_id, enabled, self.linked_selection)
+        else {
+            return false;
+        };
+        if changed.is_empty() {
+            return false;
+        }
+        self.record_timeline_history(before);
         self.mark_durable_edit();
         true
     }
@@ -7417,6 +7525,19 @@ fn clip_inspector(ui: &mut Ui, state: &mut EditorState) {
     )
     .default_open(true)
     .show(ui, |ui| {
+        let mut enabled = clip.enabled;
+        if ui
+            .checkbox(&mut enabled, t(state.language, "Enabled", "有効"))
+            .on_hover_text(t(
+                state.language,
+                "Disabled clips remain editable but do not play or export.",
+                "無効なクリップは編集可能なままですが、再生や書き出しには含まれません。",
+            ))
+            .changed()
+        {
+            state.set_timeline_clip_enabled(clip_id, enabled);
+        }
+        ui.separator();
         if kind == Some(TrackKind::Video) {
             ui.horizontal(|ui| {
                 ui.label(
@@ -8297,16 +8418,8 @@ fn transition_catalog_item(
                 ),
             ] {
                 let selected = state.selected_timeline_clip;
-                let available = selected
-                    .and_then(|clip| state.adjacent_video_cut(clip, edge))
-                    .is_some_and(|(_, left, right)| {
-                        state.transition_at_cut(left, right).is_none()
-                            && state
-                                .transition_duration_capacity(left, right, kind, None)
-                                .is_some_and(|capacity| {
-                                    capacity.0 >= state.frame_rate.frame_boundary_tick(1).0.max(1)
-                                })
-                    });
+                let available =
+                    selected.is_some_and(|clip| state.can_add_video_transition(clip, edge, kind));
                 if ui
                     .add_enabled(available, egui::Button::new(action))
                     .on_hover_text(if available {
@@ -11032,6 +11145,7 @@ fn timeline_with_canvas_presentation(
                     label_galley,
                     offline_prefix_galley,
                     selected,
+                    enabled: clip.enabled,
                     show_handles: selected || hovered,
                 },
             );
@@ -12262,76 +12376,279 @@ fn timeline_context_menu(ui: &mut Ui, state: &mut EditorState) {
     )
     .on_hover_text(&display_name);
     ui.separator();
-    if ui
-        .button(t(state.language, "Open Inspector", "インスペクタを開く"))
-        .clicked()
-    {
-        select_right_sidebar_tab(state, RightSidebarTab::Inspector);
-        ui.close();
+    timeline_context_open_menu(ui, state, kind, media_id);
+    timeline_context_edit_menu(ui, state, &clip);
+    timeline_context_clip_menu(ui, state, &clip);
+    match kind {
+        TrackKind::Video => timeline_context_video_menu(ui, state, &clip),
+        TrackKind::Audio => timeline_context_audio_menu(ui, state, &clip),
     }
-    let destination = match kind {
-        TrackKind::Audio => RightSidebarTab::Audio,
-        TrackKind::Video => RightSidebarTab::Color,
-    };
-    let destination_label = match kind {
-        TrackKind::Audio => t(state.language, "Open Audio", "オーディオを開く"),
-        TrackKind::Video => t(state.language, "Open Color", "カラーを開く"),
-    };
-    if ui.button(destination_label).clicked() {
-        if kind == TrackKind::Audio && state.selected_media != Some(media_id) {
-            state.selected_media = Some(media_id);
+}
+
+fn timeline_context_open_menu(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    kind: TrackKind,
+    media_id: MediaId,
+) {
+    ui.menu_button(t(state.language, "Open", "開く"), |ui| {
+        if ui
+            .button(t(state.language, "Inspector", "インスペクタ"))
+            .clicked()
+        {
+            select_right_sidebar_tab(state, RightSidebarTab::Inspector);
+            ui.close();
+        }
+        let (destination, label) = match kind {
+            TrackKind::Audio => (
+                RightSidebarTab::Audio,
+                t(state.language, "Audio", "オーディオ"),
+            ),
+            TrackKind::Video => (RightSidebarTab::Color, t(state.language, "Color", "カラー")),
+        };
+        if ui.button(label).clicked() {
+            select_right_sidebar_tab(state, destination);
+            ui.close();
+        }
+        if kind == TrackKind::Video
+            && ui
+                .button(t(state.language, "Effects", "エフェクト"))
+                .clicked()
+        {
+            select_right_sidebar_tab(state, RightSidebarTab::Effects);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button(t(
+                state.language,
+                "Source in Media",
+                "メディアでソースを表示",
+            ))
+            .clicked()
+        {
+            if state.selected_media != Some(media_id) {
+                state.selected_media = Some(media_id);
+                state.mark_durable_edit();
+            }
+            select_right_sidebar_tab(state, RightSidebarTab::Media);
+            ui.close();
+        }
+    });
+}
+
+fn timeline_context_edit_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip) {
+    ui.menu_button(t(state.language, "Edit", "編集"), |ui| {
+        if ui
+            .add_enabled(
+                clip_can_split_at_playhead(clip, state.playhead),
+                egui::Button::new(t(state.language, "Split at Playhead", "再生ヘッドで分割")),
+            )
+            .clicked()
+        {
+            state.selected_timeline_clip = Some(clip.id);
+            state.razor_at_playhead();
+            state.timeline_context_clip = None;
+            ui.close();
+        }
+        if ui
+            .button(t(state.language, "Delete Clip", "クリップを削除"))
+            .clicked()
+        {
+            state.selected_timeline_clip = Some(clip.id);
+            state.delete_selected_timeline_clip();
+            state.timeline_context_clip = None;
+            ui.close();
+        }
+    });
+}
+
+fn timeline_context_clip_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip) {
+    ui.menu_button(t(state.language, "Clip", "クリップ"), |ui| {
+        let mut enabled = clip.enabled;
+        if ui
+            .checkbox(&mut enabled, t(state.language, "Enabled", "有効"))
+            .on_hover_text(t(
+                state.language,
+                "Disabled clips stay in place but do not play or export.",
+                "無効なクリップは位置を保持しますが、再生や書き出しには含まれません。",
+            ))
+            .changed()
+        {
+            state.set_timeline_clip_enabled(clip.id, enabled);
+        }
+        if ui
+            .checkbox(
+                &mut state.linked_selection,
+                t(state.language, "Linked Selection", "リンク選択"),
+            )
+            .changed()
+        {
             state.mark_durable_edit();
         }
-        select_right_sidebar_tab(state, destination);
-        ui.close();
-    }
-    if ui
-        .button(t(
-            state.language,
-            "Show Source in Media",
-            "メディアでソースを表示",
-        ))
-        .clicked()
-    {
-        if state.selected_media != Some(media_id) {
-            state.selected_media = Some(media_id);
-            state.mark_durable_edit();
+    });
+}
+
+fn timeline_context_video_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip) {
+    ui.menu_button(t(state.language, "Video", "ビデオ"), |ui| {
+        let can_add_effect = clip.video_effects.len() < MAX_VIDEO_EFFECTS_PER_CLIP
+            && next_video_effect_id(&clip.video_effects).is_some();
+        ui.add_enabled_ui(can_add_effect, |ui| {
+            ui.menu_button(t(state.language, "Add Effect", "エフェクトを追加"), |ui| {
+                if ui
+                    .button(t(state.language, "Basic Correction", "基本補正"))
+                    .clicked()
+                {
+                    add_video_effect(
+                        state,
+                        clip,
+                        VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
+                    );
+                    select_right_sidebar_tab(state, RightSidebarTab::Color);
+                    ui.close();
+                }
+                if ui
+                    .button(t(state.language, "Vignette", "ビネット"))
+                    .clicked()
+                {
+                    add_video_effect(
+                        state,
+                        clip,
+                        VideoEffectKind::Vignette(VignetteEffect::default()),
+                    );
+                    select_right_sidebar_tab(state, RightSidebarTab::Color);
+                    ui.close();
+                }
+            });
+        });
+        ui.separator();
+        for (edge, label) in [
+            (
+                FadeEdge::In,
+                t(
+                    state.language,
+                    "Transition at Start",
+                    "先頭のトランジション",
+                ),
+            ),
+            (
+                FadeEdge::Out,
+                t(state.language, "Transition at End", "末尾のトランジション"),
+            ),
+        ] {
+            ui.menu_button(label, |ui| {
+                timeline_context_transition_edge_menu(ui, state, clip.id, edge);
+            });
         }
-        select_right_sidebar_tab(state, RightSidebarTab::Media);
-        ui.close();
+    });
+}
+
+fn timeline_context_transition_edge_menu(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    clip_id: ClipId,
+    edge: FadeEdge,
+) {
+    for (english, japanese, kinds) in [
+        (
+            "Dissolve",
+            "ディゾルブ",
+            &[
+                VideoTransitionKind::CrossDissolve,
+                VideoTransitionKind::FilmDissolve,
+            ][..],
+        ),
+        (
+            "Fade",
+            "フェード",
+            &[
+                VideoTransitionKind::DipToBlack,
+                VideoTransitionKind::DipToWhite,
+            ][..],
+        ),
+        (
+            "Wipe",
+            "ワイプ",
+            &[
+                VideoTransitionKind::WipeLeft,
+                VideoTransitionKind::WipeRight,
+                VideoTransitionKind::WipeUp,
+                VideoTransitionKind::WipeDown,
+            ][..],
+        ),
+        (
+            "Slide",
+            "スライド",
+            &[
+                VideoTransitionKind::SlideFromLeft,
+                VideoTransitionKind::SlideFromRight,
+                VideoTransitionKind::SlideFromTop,
+                VideoTransitionKind::SlideFromBottom,
+            ][..],
+        ),
+    ] {
+        ui.menu_button(t(state.language, english, japanese), |ui| {
+            for kind in kinds {
+                let available = state.can_add_video_transition(clip_id, edge, *kind);
+                if ui
+                    .add_enabled(
+                        available,
+                        egui::Button::new(video_transition_kind_label(state.language, *kind)),
+                    )
+                    .clicked()
+                {
+                    state.selected_timeline_clip = Some(clip_id);
+                    state.add_video_transition(edge, *kind);
+                    ui.close();
+                }
+            }
+        });
     }
-    ui.separator();
-    if ui
-        .add_enabled(
-            clip_can_split_at_playhead(&clip, state.playhead),
-            egui::Button::new(t(state.language, "Split at Playhead", "再生ヘッドで分割")),
-        )
-        .clicked()
-    {
-        state.selected_timeline_clip = Some(clip.id);
-        state.razor_at_playhead();
-        state.timeline_context_clip = None;
-        ui.close();
-    }
-    if ui
-        .button(t(state.language, "Delete Clip", "クリップを削除"))
-        .clicked()
-    {
-        state.selected_timeline_clip = Some(clip.id);
-        state.delete_selected_timeline_clip();
-        state.timeline_context_clip = None;
-        ui.close();
-    }
-    ui.separator();
-    if ui
-        .checkbox(
-            &mut state.linked_selection,
-            t(state.language, "Linked Selection", "リンク選択"),
-        )
-        .changed()
-    {
-        state.mark_durable_edit();
-    }
+}
+
+fn timeline_context_audio_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip) {
+    ui.menu_button(t(state.language, "Audio", "オーディオ"), |ui| {
+        ui.menu_button(
+            t(state.language, "Crossfade", "クロスフェード"),
+            |ui| {
+                for (edge, english, japanese) in [
+                    (FadeEdge::In, "At Start", "先頭"),
+                    (FadeEdge::Out, "At End", "末尾"),
+                ] {
+                    let cut = state.adjacent_audio_cut(clip.id, edge);
+                    let existing = cut.is_some_and(|(_, left, right)| {
+                        state.timeline.audio_transitions().iter().any(|transition| {
+                            transition.left_clip == left && transition.right_clip == right
+                        })
+                    });
+                    let available = existing
+                        || cut.is_some_and(|(_, left, right)| {
+                            state
+                                .audio_transition_duration_capacity(left, right, None)
+                                .is_some_and(|capacity| capacity.0 > 0)
+                        });
+                    let action = if existing {
+                        t(state.language, "Remove", "削除")
+                    } else {
+                        t(state.language, "Add Equal-Power", "イコールパワーを追加")
+                    };
+                    if ui
+                        .add_enabled(
+                            available,
+                            egui::Button::new(format!(
+                                "{} · {action}",
+                                t(state.language, english, japanese)
+                            )),
+                        )
+                        .clicked()
+                    {
+                        state.toggle_audio_crossfade(clip.id, edge);
+                        ui.close();
+                    }
+                }
+            },
+        );
+    });
 }
 
 const DEFAULT_TIMELINE_TRACK_HEIGHT: f32 = 32.0;
@@ -13206,6 +13523,29 @@ fn draw_timeline_clip(
             Pos2::new(rect.right(), gain_y),
             1.5,
             Color32::from_rgb(235, 248, 238),
+        );
+    }
+    if !paint.enabled {
+        let disabled_rect = rect.shrink(1.0);
+        let disabled_painter = painter.with_clip_rect(disabled_rect);
+        disabled_painter.rect_filled(disabled_rect, 1.0, Color32::from_black_alpha(158));
+        let stripe_color = Color32::from_rgba_unmultiplied(147, 163, 174, 70);
+        let mut x = disabled_rect.left() - disabled_rect.height();
+        while x < disabled_rect.right() {
+            disabled_painter.line_segment(
+                [
+                    Pos2::new(x, disabled_rect.bottom()),
+                    Pos2::new(x + disabled_rect.height(), disabled_rect.top()),
+                ],
+                Stroke::new(1.0, stripe_color),
+            );
+            x += 12.0;
+        }
+        disabled_painter.rect_stroke(
+            disabled_rect,
+            1.0,
+            Stroke::new(1.0, Color32::from_rgb(105, 119, 129)),
+            StrokeKind::Inside,
         );
     }
     if paint.show_handles {
@@ -15989,6 +16329,7 @@ mod tests {
             media: TimelineMediaId(1),
             track_id: TrackId(1),
             link_id: None,
+            enabled: true,
             start: Tick(0),
             duration: Tick(4_000_000),
             source_in: Tick(0),
@@ -16041,6 +16382,7 @@ mod tests {
             media: TimelineMediaId(1),
             track_id: TrackId(1),
             link_id: None,
+            enabled: true,
             start: Tick(0),
             duration: Tick(1_000_000),
             source_in: Tick(0),
@@ -16094,6 +16436,7 @@ mod tests {
                 media: TimelineMediaId(1),
                 track_id,
                 link_id: None,
+                enabled: true,
                 start: Tick(index * 2_000),
                 duration: Tick(1_000),
                 source_in: Tick(0),
@@ -16147,6 +16490,7 @@ mod tests {
                 media: TimelineMediaId(1),
                 track_id,
                 link_id: None,
+                enabled: true,
                 start: Tick(i64::from(id - 1) * 2_000),
                 duration: Tick(1_000),
                 source_in: Tick(0),
@@ -16766,6 +17110,66 @@ mod tests {
     }
 
     #[test]
+    fn disabled_linked_clips_leave_live_playback_and_undo_restores_them() {
+        let mut editor = EditorState::new(Language::English, "Clip enable");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        editor.set_playhead(Tick(1_000_000));
+        let video = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .and_then(|track| track.clips.first())
+            .unwrap()
+            .id;
+        let audio = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .and_then(|track| track.clips.first())
+            .unwrap()
+            .id;
+        assert_eq!(
+            editor.playback_target().map(|target| target.clip_id),
+            Some(video)
+        );
+        assert_eq!(
+            editor.audio_playback_target().map(|target| target.clip_id),
+            Some(audio)
+        );
+
+        assert!(editor.set_timeline_clip_enabled(video, false));
+        assert!(!editor.timeline.clip(video).unwrap().enabled);
+        assert!(!editor.timeline.clip(audio).unwrap().enabled);
+        assert!(editor.playback_target().is_none());
+        assert!(editor.audio_playback_target().is_none());
+
+        assert!(editor.undo_timeline());
+        assert!(editor.timeline.clip(video).unwrap().enabled);
+        assert!(editor.timeline.clip(audio).unwrap().enabled);
+        assert_eq!(
+            editor.playback_target().map(|target| target.clip_id),
+            Some(video)
+        );
+        assert_eq!(
+            editor.audio_playback_target().map(|target| target.clip_id),
+            Some(audio)
+        );
+
+        editor.linked_selection = false;
+        assert!(editor.set_timeline_clip_enabled(video, false));
+        assert!(!editor.timeline.clip(video).unwrap().enabled);
+        assert!(editor.timeline.clip(audio).unwrap().enabled);
+        assert!(editor.playback_target().is_none());
+        assert_eq!(
+            editor.audio_playback_target().map(|target| target.clip_id),
+            Some(audio)
+        );
+    }
+
+    #[test]
     fn audio_playback_effects_are_enabled_and_ordered_clip_before_track() {
         let mut editor = EditorState::new(Language::English, "Audio rack");
         editor.add_media_paths([PathBuf::from("voice.wav")]);
@@ -16989,6 +17393,16 @@ mod tests {
         assert!(editor.timeline.audio_transitions().is_empty());
         assert!(editor.redo_timeline());
         assert_eq!(editor.timeline.audio_transitions().len(), 1);
+
+        editor
+            .timeline
+            .set_clip_enabled(left, false, false)
+            .unwrap();
+        editor.set_playhead(Tick(2_000_000));
+        let targets = editor.audio_playback_targets();
+        assert_eq!(targets.len(), 2);
+        assert_eq!((targets[0].clip_id, targets[1].clip_id), (right, bed));
+        assert!(targets[0].transition.is_none());
     }
 
     #[test]
@@ -17029,6 +17443,48 @@ mod tests {
             editor.audio_transition_duration_capacity(left, right, None),
             Some(Tick(2_000_001))
         );
+    }
+
+    #[test]
+    fn audio_crossfade_context_toggle_adds_removes_and_undoes() {
+        let mut editor = EditorState::new(Language::English, "Audio crossfade toggle");
+        editor.add_media_paths([PathBuf::from("left.wav"), PathBuf::from("right.wav")]);
+        editor.media[0].duration = Some(Tick(5_000_000));
+        editor.media[1].duration = Some(Tick(5_000_000));
+        let track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .unwrap()
+            .id;
+        let left = editor
+            .timeline
+            .insert_clip(
+                track,
+                TimelineMediaId(1),
+                Tick(0),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        let right = editor
+            .timeline
+            .insert_clip(
+                track,
+                TimelineMediaId(2),
+                Tick(2_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+
+        assert!(editor.toggle_audio_crossfade(left, FadeEdge::Out));
+        assert_eq!(editor.timeline.audio_transitions().len(), 1);
+        assert!(editor.toggle_audio_crossfade(right, FadeEdge::In));
+        assert!(editor.timeline.audio_transitions().is_empty());
+        assert!(editor.undo_timeline());
+        assert_eq!(editor.timeline.audio_transitions().len(), 1);
     }
 
     #[test]
@@ -18751,6 +19207,16 @@ mod tests {
         assert_eq!(targets[0].source_tick, Tick(2_750_000));
         assert_eq!(targets[1].source_tick, Tick(750_000));
         assert!(targets[1].opacity > 0.0 && targets[1].opacity < 0.5);
+
+        editor
+            .timeline
+            .set_clip_enabled(left, false, false)
+            .unwrap();
+        editor.set_playhead(Tick(2_000_000));
+        let targets = editor.playback_targets().collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].clip_id, right);
+        assert_eq!(targets[0].opacity, 1.0);
     }
 
     #[test]
@@ -19939,7 +20405,7 @@ mod tests {
         }
         assert_eq!(editor.quick_export_block_message(), None);
 
-        editor
+        let fifth = editor
             .timeline
             .insert_clip(
                 video_tracks[4],
@@ -19955,6 +20421,15 @@ mod tests {
                 .unwrap()
                 .contains("four visible video layers")
         );
+        editor
+            .timeline
+            .set_clip_enabled(fifth, false, false)
+            .unwrap();
+        assert_eq!(editor.quick_export_block_message(), None);
+        editor
+            .timeline
+            .set_clip_enabled(fifth, true, false)
+            .unwrap();
         editor
             .timeline
             .set_track_muted(video_tracks[4], true)
@@ -19988,6 +20463,26 @@ mod tests {
         editor
             .timeline
             .set_clip_audio_effects(audio, vec![AudioEffect::Limiter])
+            .unwrap();
+        assert!(
+            editor
+                .quick_export_block_message()
+                .unwrap()
+                .contains("audio effects")
+        );
+        editor
+            .timeline
+            .set_clip_enabled(audio, false, false)
+            .unwrap();
+        assert_eq!(editor.quick_export_block_message(), None);
+        editor
+            .timeline
+            .set_track_audio_effects(audio_track, vec![AudioEffect::Limiter])
+            .unwrap();
+        assert_eq!(editor.quick_export_block_message(), None);
+        editor
+            .timeline
+            .set_clip_enabled(audio, true, false)
             .unwrap();
         assert!(
             editor
@@ -21335,6 +21830,7 @@ mod tests {
             media: TimelineMediaId(99),
             track_id,
             link_id: None,
+            enabled: true,
             start: Tick(0),
             duration: Tick(1),
             source_in: Tick(0),

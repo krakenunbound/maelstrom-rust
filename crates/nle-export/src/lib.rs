@@ -293,6 +293,12 @@ fn plan_video_transitions(
             ));
         }
         let (left, right) = validated_transition_clips(timeline, transition)?;
+        // A disabled edit stays durable and can later be re-enabled, but it
+        // contributes no picture. Its transition must not expand either input
+        // range or create a matte that would survive the bypass.
+        if !left.enabled || !right.enabled {
+            continue;
+        }
         let left_half = transition.duration.0 / 2;
         let right_half = transition.duration.0 - left_half;
         let dip_matte_start =
@@ -603,6 +609,10 @@ fn plan_audio_transitions(
             ));
         }
         let (left, right) = validated_audio_transition_clips(timeline, transition)?;
+        // Do not let a crossfade synthesize audio for a disabled section.
+        if !left.enabled || !right.enabled {
+            continue;
+        }
         let left_half = transition.duration.0 / 2;
         let right_half = transition.duration.0 - left_half;
         validate_audio_transition_handles(media, transition, left, right, left_half, right_half)?;
@@ -815,7 +825,9 @@ impl ExportPlan {
             .tracks
             .iter()
             .filter(|track| {
-                track.kind == TrackKind::Video && !track.muted && !track.clips.is_empty()
+                track.kind == TrackKind::Video
+                    && !track.muted
+                    && track.clips.iter().any(|clip| clip.enabled)
             })
             .collect::<Vec<_>>();
         if video_tracks.len() > MAX_COMPOSITE_LAYERS {
@@ -825,7 +837,7 @@ impl ExportPlan {
         }
         let video_count = video_tracks
             .iter()
-            .map(|track| track.clips.len())
+            .map(|track| track.clips.iter().filter(|clip| clip.enabled).count())
             .sum::<usize>();
         if video_count > MAX_EXPORT_VIDEO_CLIPS {
             return Err(format!(
@@ -878,7 +890,7 @@ impl ExportPlan {
         // Timeline vector order is bottom-to-top, exactly as the monitor's compositor uses it.
         for track in video_tracks {
             let mut clips = Vec::with_capacity(track.clips.len());
-            for clip in &track.clips {
+            for clip in track.clips.iter().filter(|clip| clip.enabled) {
                 let (path, _) = media
                     .get(&clip.media.0)
                     .cloned()
@@ -978,7 +990,7 @@ impl ExportPlan {
             .iter()
             .filter(|track| track.audio_is_audible(any_audio_solo))
         {
-            for clip in &track.clips {
+            for clip in track.clips.iter().filter(|clip| clip.enabled) {
                 if audio_clips.len() == MAX_EXPORT_AUDIO_CLIPS {
                     return Err(format!(
                         "export supports at most {MAX_EXPORT_AUDIO_CLIPS} audible audio clips"
@@ -1097,12 +1109,20 @@ fn reject_unmapped_audio_effects(snapshot: &EditorProjectSnapshot) -> Result<(),
         .timeline
         .tracks
         .iter()
-        .filter(|track| track.audio_is_audible(any_solo))
+        .filter(|track| {
+            track.audio_is_audible(any_solo) && track.clips.iter().any(|clip| clip.enabled)
+        })
         .any(|track| {
             track
                 .effects
                 .iter()
-                .chain(track.clips.iter().flat_map(|clip| &clip.effects))
+                .chain(
+                    track
+                        .clips
+                        .iter()
+                        .filter(|clip| clip.enabled)
+                        .flat_map(|clip| &clip.effects),
+                )
                 .filter_map(AudioEffect::enabled)
                 .any(|effect| !effect.is_export_supported())
         })
@@ -3753,6 +3773,104 @@ mod tests {
                 .unwrap_err()
                 .contains("no unmuted video clips or enabled titles")
         );
+    }
+
+    #[test]
+    fn disabled_clips_are_omitted_and_bypass_their_transitions() {
+        let mut editor = EditorState::new(Language::English, "Disabled clips");
+        editor.add_media_paths([PathBuf::from("kept.mp4"), PathBuf::from("disabled.mp4")]);
+        let video_track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        let kept_video = editor
+            .timeline
+            .insert_clip(
+                video_track,
+                MediaId(1),
+                Tick(0),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        let disabled_video = editor
+            .timeline
+            .insert_clip(
+                video_track,
+                MediaId(2),
+                Tick(2_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        editor
+            .timeline
+            .add_video_transition(
+                video_track,
+                kept_video,
+                disabled_video,
+                Tick(1_000_000),
+                0.0,
+            )
+            .unwrap();
+        editor
+            .timeline
+            .set_clip_enabled(disabled_video, false, false)
+            .unwrap();
+
+        let audio_track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .unwrap()
+            .id;
+        let kept_audio = editor
+            .timeline
+            .insert_clip(
+                audio_track,
+                MediaId(1),
+                Tick(0),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        let disabled_audio = editor
+            .timeline
+            .insert_clip(
+                audio_track,
+                MediaId(2),
+                Tick(2_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        editor
+            .timeline
+            .add_audio_transition(audio_track, kept_audio, disabled_audio, Tick(1_000_000))
+            .unwrap();
+        editor
+            .timeline
+            .set_clip_enabled(disabled_audio, false, false)
+            .unwrap();
+
+        let request = request(&editor);
+        let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
+        assert_eq!(plan.video_tracks.len(), 1);
+        assert_eq!(plan.video_tracks[0].clips.len(), 1);
+        assert_eq!(plan.video_tracks[0].clips[0].clip.id, kept_video);
+        assert_eq!(plan.video_tracks[0].clips[0].timeline_end, Tick(2_000_000));
+        assert_eq!(plan.audio_clips.len(), 1);
+        assert_eq!(plan.audio_clips[0].clip.id, kept_audio);
+        assert_eq!(plan.audio_clips[0].input_duration, Tick(2_000_000));
+        assert_eq!(plan.duration, Tick(4_000_000));
+
+        let (args, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        assert!(!args.iter().any(|arg| arg == "disabled.mp4"), "{args:?}");
+        assert!(graph.contains("trim=duration=2.000000"), "{graph}");
     }
 
     #[test]

@@ -476,6 +476,7 @@ mod tests {
             media: nle_timeline::MediaId(1),
             track_id: nle_timeline::TrackId(1),
             link_id: None,
+            enabled: true,
             start: Tick(0),
             duration: Tick(4_000_000),
             source_in: Tick(0),

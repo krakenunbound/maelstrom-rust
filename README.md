@@ -116,6 +116,12 @@ has a persistent mute control; muted video layers leave the monitor transparent 
 lower layers. Every active unmuted audio track is sample-aligned and mixed into the
 single native output; muted tracks are excluded. Audible gain, fade length, and fade
 curve follow each independent timeline envelope.
+Clip right-click menus are grouped by intent: Open, Edit, Clip, Video, and Audio. Their actions are
+the same durable operations used by the Inspector and Effects browser, including enable/disable,
+linked selection, video effects, the full nested transition catalog, and equal-power audio
+crossfades. Disabled clips remain in place for timing and editing, are visibly hatched on the
+timeline, contribute no picture or audio in preview and export, leave lower video layers visible,
+and can be restored with normal undo/redo. Legacy projects load their clips enabled.
 The Windows package gate also requires the rendered Media Pool card to place that linked pair
 through the production timeline drag geometry.
 FFmpeg probes placed media and produces bounded waveform peaks and timeline
