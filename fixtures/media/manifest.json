@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "artifact_root": "artifacts/media-fixtures",
+  "fixtures": [
+    {
+      "id": "bars-aac-2997-mp4",
+      "path": "bars-aac-2997.mp4",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 and sine filters; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "testsrc2=size=320x180:rate=30000/1001 + sine=frequency=1000:sample_rate=48000; 2 seconds; mpeg4/aac MP4",
+      "sha256": "62699C326617297F16BA1C69F788DD93A68CFB318FC09CAE55D12139A912C1B2",
+      "byte_size": 161133,
+      "container": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": { "codec": "mpeg4", "rate": "30000/1001", "width": 320, "height": 180, "gop": 30 },
+      "audio": { "codec": "aac", "sample_rate": 48000, "channels": 2, "layout": "stereo" },
+      "duration_seconds": 2.002,
+      "expected": "success"
+    },
+    {
+      "id": "mono-pcm-48k-wav",
+      "path": "mono-pcm-48k.wav",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi sine filter; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "sine=frequency=440:sample_rate=48000; 1 second; pcm_s16le WAV",
+      "sha256": "B778C35081BB0919112305ACD443ECE7F17850F2B1242CCE788A21CF0A98379E",
+      "byte_size": 96078,
+      "container": "wav",
+      "audio": { "codec": "pcm_s16le", "sample_rate": 48000, "channels": 1, "layout": "mono" },
+      "duration_seconds": 1.0,
+      "expected": "success"
+    },
+    {
+      "id": "truncated-header",
+      "path": "truncated-header.bin",
+      "source": "generated",
+      "provenance": "Fixed 12-byte invalid ISO base-media header written by scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "PowerShell byte literal 00 00 00 0C 66 74 79 70 6D 70 34 32",
+      "sha256": "7014A5A9E702E2D1117AD2EF66BC591D4DC9F38B5386C23F3168817AD0F14819",
+      "byte_size": 12,
+      "container": "invalid",
+      "duration_seconds": 0.0,
+      "expected": "ffprobe_failure"
+    }
+  ],
+  "real_media_corpus": {
+    "environment_variable": "MAELSTROM_REAL_MEDIA_ROOT",
+    "redistribution": "never include proprietary or licensed media in this repository",
+    "usage": "Test-MediaFixtures.ps1 -IncludeRealCorpus reads only files already present below this explicit local root."
+  }
+}

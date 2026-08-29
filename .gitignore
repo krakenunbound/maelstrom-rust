@@ -2,6 +2,7 @@
 /test-build/
 /.deps/
 /dist/
+/artifacts/media-fixtures/
 
 # Local AI weights and model packages are never public source. Keep only the
 # registry contract and its licensing guidance in Git.
