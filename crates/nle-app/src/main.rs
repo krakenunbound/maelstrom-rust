@@ -1590,6 +1590,8 @@ fn viewer_color_correction(effect: nle_timeline::EvaluatedVideoEffect) -> Viewer
                 contrast: correction.contrast,
                 highlights: correction.highlights,
                 shadows: correction.shadows,
+                whites: correction.whites,
+                blacks: correction.blacks,
                 curves: ViewerRgbCurves {
                     master: viewer_curve(correction.curves.master),
                     red: viewer_curve(correction.curves.red),
@@ -5610,6 +5612,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_viewer_maps_basic_correction_whites_and_blacks() {
+        let correction =
+            viewer_color_correction(nle_timeline::EvaluatedVideoEffect::BrightnessContrast(
+                nle_timeline::EvaluatedBrightnessContrast {
+                    whites: 0.45,
+                    blacks: -0.35,
+                    ..Default::default()
+                },
+            ));
+        assert_eq!([correction.whites, correction.blacks], [0.45, -0.35]);
+    }
 
     #[test]
     fn native_viewer_maps_vignette_to_an_identity_curve_effect_slot() {

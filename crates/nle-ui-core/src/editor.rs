@@ -21,17 +21,17 @@ use nle_compositor::{
 use nle_timeline::{
     AnimatedScalar, AudioEffect, AudioTransitionId, BrightnessContrastEffect, Clip, ClipId,
     ColorCurve, ColorParameter, CurvePoint, EditTarget, EvaluatedVideoEffectStack, Fade, FadeEdge,
-    KeyframeInterpolation, MAX_AUDIO_EFFECTS_PER_SCOPE, MAX_BRIGHTNESS, MAX_COLOR_CURVE_POINTS,
-    MAX_CONTRAST, MAX_EXPOSURE, MAX_GAIN_DB, MAX_HIGHLIGHTS, MAX_PAN, MAX_SATURATION, MAX_SHADOWS,
-    MAX_TEMPERATURE, MAX_TINT, MAX_VIDEO_EFFECTS_PER_CLIP, MAX_VIGNETTE_AMOUNT,
-    MAX_VIGNETTE_CENTER, MAX_VIGNETTE_FEATHER, MAX_VIGNETTE_MIDPOINT, MIN_BRIGHTNESS, MIN_CONTRAST,
-    MIN_EXPOSURE, MIN_GAIN_DB, MIN_HIGHLIGHTS, MIN_PAN, MIN_SATURATION, MIN_SHADOWS,
-    MIN_TEMPERATURE, MIN_TINT, MIN_VIGNETTE_AMOUNT, MIN_VIGNETTE_CENTER, MIN_VIGNETTE_FEATHER,
-    MIN_VIGNETTE_MIDPOINT, MediaId as TimelineMediaId, Tick, Timeline, TimelineCache,
-    TimelineError, TimelineSnapshot, TimelineSnapshotError, TitleAlignment, TitleColor, TitleId,
-    TitleOverlay, Track, TrackDrawRecord, TrackId, TrackKind, TransitionId, UndoStack,
-    VideoEffectId, VideoEffectKind, VideoEffectNode, VideoTransition, VideoTransitionKind,
-    VignetteEffect,
+    KeyframeInterpolation, MAX_AUDIO_EFFECTS_PER_SCOPE, MAX_BLACKS, MAX_BRIGHTNESS,
+    MAX_COLOR_CURVE_POINTS, MAX_CONTRAST, MAX_EXPOSURE, MAX_GAIN_DB, MAX_HIGHLIGHTS, MAX_PAN,
+    MAX_SATURATION, MAX_SHADOWS, MAX_TEMPERATURE, MAX_TINT, MAX_VIDEO_EFFECTS_PER_CLIP,
+    MAX_VIGNETTE_AMOUNT, MAX_VIGNETTE_CENTER, MAX_VIGNETTE_FEATHER, MAX_VIGNETTE_MIDPOINT,
+    MAX_WHITES, MIN_BLACKS, MIN_BRIGHTNESS, MIN_CONTRAST, MIN_EXPOSURE, MIN_GAIN_DB,
+    MIN_HIGHLIGHTS, MIN_PAN, MIN_SATURATION, MIN_SHADOWS, MIN_TEMPERATURE, MIN_TINT,
+    MIN_VIGNETTE_AMOUNT, MIN_VIGNETTE_CENTER, MIN_VIGNETTE_FEATHER, MIN_VIGNETTE_MIDPOINT,
+    MIN_WHITES, MediaId as TimelineMediaId, Tick, Timeline, TimelineCache, TimelineError,
+    TimelineSnapshot, TimelineSnapshotError, TitleAlignment, TitleColor, TitleId, TitleOverlay,
+    Track, TrackDrawRecord, TrackId, TrackKind, TransitionId, UndoStack, VideoEffectId,
+    VideoEffectKind, VideoEffectNode, VideoTransition, VideoTransitionKind, VignetteEffect,
 };
 use serde::{Deserialize, Serialize};
 
@@ -568,8 +568,9 @@ pub struct VideoStripLayout {
     pub frame_height: u32,
 }
 
-const MAX_MONITOR_WIDTH: u32 = 1280;
-const MAX_MONITOR_HEIGHT: u32 = 720;
+/// Safety ceiling matching the minimum 2D texture limit of modern wgpu adapters. Ordinary Full
+/// preview is viewer-pixel exact; this guard only prevents pathological/off-screen allocations.
+const MAX_MONITOR_DIMENSION: u32 = 8_192;
 const MONITOR_SIZE_QUANTUM: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3053,8 +3054,8 @@ impl EditorState {
         }
     }
 
-    fn update_monitor_decode_size(&mut self, bounds: Vec2) {
-        self.monitor_decode_size = quantize_monitor_size(bounds.x, bounds.y);
+    fn update_monitor_decode_size(&mut self, bounds: Vec2, pixels_per_point: f32) {
+        self.monitor_decode_size = quantize_monitor_size(bounds.x, bounds.y, pixels_per_point);
     }
 
     pub fn cached_waveform(&self, media_id: MediaId) -> Option<&CachedWaveform> {
@@ -6114,7 +6115,7 @@ fn viewer_with_canvas(ui: &mut Ui, state: &mut EditorState, viewer: &mut dyn Vie
     let desired_h = (max.x / project_aspect).min((max.y - 40.0).max(90.0));
     let (rect, _) = ui.allocate_exact_size(Vec2::new(max.x, desired_h), Sense::hover());
     let canvas = fit_aspect(rect.shrink(1.0), project_aspect);
-    state.update_monitor_decode_size(canvas.size());
+    state.update_monitor_decode_size(canvas.size(), ui.ctx().pixels_per_point());
     ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
     ui.painter().rect_stroke(
         rect,
@@ -8585,7 +8586,7 @@ fn add_video_effect(state: &mut EditorState, clip: &Clip, kind: VideoEffectKind)
     state.active_color_effect = Some(id);
 }
 
-type VideoEffectScalars<'a> = [Option<(ColorParameter, &'a AnimatedScalar)>; 8];
+type VideoEffectScalars<'a> = [Option<(ColorParameter, &'a AnimatedScalar)>; 10];
 
 fn video_effect_scalars(kind: &VideoEffectKind) -> VideoEffectScalars<'_> {
     match kind {
@@ -8597,6 +8598,8 @@ fn video_effect_scalars(kind: &VideoEffectKind) -> VideoEffectScalars<'_> {
             Some((ColorParameter::Contrast, &effect.contrast)),
             Some((ColorParameter::Highlights, &effect.highlights)),
             Some((ColorParameter::Shadows, &effect.shadows)),
+            Some((ColorParameter::Whites, &effect.whites)),
+            Some((ColorParameter::Blacks, &effect.blacks)),
             Some((ColorParameter::Brightness, &effect.brightness)),
         ],
         VideoEffectKind::Vignette(effect) => [
@@ -8605,6 +8608,8 @@ fn video_effect_scalars(kind: &VideoEffectKind) -> VideoEffectScalars<'_> {
             Some((ColorParameter::VignetteFeather, &effect.feather)),
             Some((ColorParameter::VignetteCenterX, &effect.center_x)),
             Some((ColorParameter::VignetteCenterY, &effect.center_y)),
+            None,
+            None,
             None,
             None,
             None,
@@ -8849,6 +8854,8 @@ fn color_effect_group(
                             current.contrast = defaults.contrast;
                             current.highlights = defaults.highlights;
                             current.shadows = defaults.shadows;
+                            current.whites = defaults.whites;
+                            current.blacks = defaults.blacks;
                             current.brightness = defaults.brightness;
                         }
                     }
@@ -8950,6 +8957,32 @@ fn color_effect_group(
                     source_tick,
                     t(state.language, "Shadows", "シャドウ"),
                     MIN_SHADOWS..=MAX_SHADOWS,
+                    InspectorScrubUnit::Percent,
+                    ColorRail::Neutral,
+                );
+                color_parameter_control(
+                    ui,
+                    state,
+                    clip.id,
+                    effect_id,
+                    ColorParameter::Whites,
+                    &effect.whites,
+                    source_tick,
+                    t(state.language, "Whites", "白レベル"),
+                    MIN_WHITES..=MAX_WHITES,
+                    InspectorScrubUnit::Percent,
+                    ColorRail::Neutral,
+                );
+                color_parameter_control(
+                    ui,
+                    state,
+                    clip.id,
+                    effect_id,
+                    ColorParameter::Blacks,
+                    &effect.blacks,
+                    source_tick,
+                    t(state.language, "Blacks", "黒レベル"),
+                    MIN_BLACKS..=MAX_BLACKS,
                     InspectorScrubUnit::Percent,
                     ColorRail::Neutral,
                 );
@@ -12168,6 +12201,8 @@ fn color_parameter_label(language: Language, parameter: ColorParameter) -> Strin
         ColorParameter::Contrast => t(language, "Contrast", "コントラスト"),
         ColorParameter::Highlights => t(language, "Highlights", "ハイライト"),
         ColorParameter::Shadows => t(language, "Shadows", "シャドウ"),
+        ColorParameter::Whites => t(language, "Whites", "白レベル"),
+        ColorParameter::Blacks => t(language, "Blacks", "黒レベル"),
         ColorParameter::Brightness => t(language, "Brightness", "明るさ"),
         ColorParameter::VignetteAmount => t(language, "Vignette Amount", "ビネット適用量"),
         ColorParameter::VignetteMidpoint => t(language, "Vignette Midpoint", "ビネット中間点"),
@@ -12683,7 +12718,7 @@ fn clip_rect_for(
 }
 
 const COLOR_KEYFRAME_MARKER_RADIUS: f32 = 3.5;
-const COLOR_KEYFRAME_LANES: usize = 8;
+const COLOR_KEYFRAME_LANES: usize = 10;
 const MIN_COLOR_KEYFRAME_CLIP_HEIGHT: f32 = 26.0;
 
 fn active_color_effect_for_clip(state: &EditorState, clip: &Clip) -> Option<VideoEffectId> {
@@ -12739,7 +12774,9 @@ fn color_keyframe_lane(parameter: ColorParameter) -> usize {
         ColorParameter::Contrast => 4,
         ColorParameter::Highlights => 5,
         ColorParameter::Shadows => 6,
-        ColorParameter::Brightness => 7,
+        ColorParameter::Whites => 7,
+        ColorParameter::Blacks => 8,
+        ColorParameter::Brightness => 9,
         ColorParameter::VignetteAmount => 0,
         ColorParameter::VignetteMidpoint => 1,
         ColorParameter::VignetteFeather => 2,
@@ -12757,6 +12794,8 @@ fn color_parameter_timeline_color(parameter: ColorParameter) -> Color32 {
         ColorParameter::Contrast => Color32::from_rgb(130, 198, 241),
         ColorParameter::Highlights => Color32::from_rgb(245, 222, 131),
         ColorParameter::Shadows => Color32::from_rgb(142, 133, 211),
+        ColorParameter::Whites => Color32::from_rgb(239, 239, 205),
+        ColorParameter::Blacks => Color32::from_rgb(94, 109, 124),
         ColorParameter::Brightness => Color32::from_rgb(246, 188, 72),
         ColorParameter::VignetteAmount => Color32::from_rgb(193, 135, 232),
         ColorParameter::VignetteMidpoint => Color32::from_rgb(116, 185, 222),
@@ -14039,12 +14078,29 @@ fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
     Rect::from_center_size(bounds.center(), size)
 }
 
-/// FFmpeg preview work remains bounded even on an unusually large workspace.
-pub fn quantize_monitor_size(width: f32, height: f32) -> (u32, u32) {
-    let available_w = width.max(MONITOR_SIZE_QUANTUM as f32);
-    let available_h = height.max(MONITOR_SIZE_QUANTUM as f32);
-    let scale = (MAX_MONITOR_WIDTH as f32 / available_w)
-        .min(MAX_MONITOR_HEIGHT as f32 / available_h)
+/// Resolves the physical viewer raster used by Full preview. Quantization stabilizes cache keys
+/// while preserving the requested display scale; only the 8K allocation guard can reduce it.
+pub fn quantize_monitor_size(
+    width_points: f32,
+    height_points: f32,
+    pixels_per_point: f32,
+) -> (u32, u32) {
+    let sanitize_points = |value: f32| {
+        if value.is_finite() {
+            value.max(MONITOR_SIZE_QUANTUM as f32)
+        } else {
+            MONITOR_SIZE_QUANTUM as f32
+        }
+    };
+    let pixel_scale = if pixels_per_point.is_finite() {
+        pixels_per_point.clamp(0.25, 8.0)
+    } else {
+        1.0
+    };
+    let available_w = sanitize_points(width_points) * pixel_scale;
+    let available_h = sanitize_points(height_points) * pixel_scale;
+    let scale = (MAX_MONITOR_DIMENSION as f32 / available_w)
+        .min(MAX_MONITOR_DIMENSION as f32 / available_h)
         .min(1.0);
     let width = (available_w * scale).floor() as u32;
     let height = (available_h * scale).floor() as u32;
@@ -18462,11 +18518,13 @@ mod tests {
             ColorParameter::Contrast,
             ColorParameter::Highlights,
             ColorParameter::Shadows,
+            ColorParameter::Whites,
+            ColorParameter::Blacks,
             ColorParameter::Brightness,
         ];
         let mut lanes = parameters.map(color_keyframe_lane);
         lanes.sort_unstable();
-        assert_eq!(lanes, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(lanes, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(
             color_parameter_label(Language::English, ColorParameter::Temperature),
             "Temperature"
@@ -18474,6 +18532,10 @@ mod tests {
         assert_eq!(
             color_parameter_label(Language::Japanese, ColorParameter::Highlights),
             "ハイライト"
+        );
+        assert_eq!(
+            color_parameter_label(Language::English, ColorParameter::Whites),
+            "Whites"
         );
     }
 
@@ -20728,16 +20790,23 @@ mod tests {
     }
 
     #[test]
-    fn monitor_size_is_quantized_and_bounded() {
-        assert_eq!(quantize_monitor_size(641.0, 361.0), (640, 352));
-        assert_eq!(quantize_monitor_size(4_000.0, 3_000.0), (960, 720));
-        assert_eq!(quantize_monitor_size(1.0, 1.0), (16, 16));
+    fn full_monitor_size_uses_physical_viewer_pixels_and_only_caps_at_8k() {
+        assert_eq!(quantize_monitor_size(641.0, 361.0, 1.0), (640, 352));
+        assert_eq!(quantize_monitor_size(1_920.0, 1_080.0, 1.0), (1_920, 1_072));
+        assert_eq!(quantize_monitor_size(1_920.0, 1_080.0, 2.0), (3_840, 2_160));
+        assert_eq!(quantize_monitor_size(4_000.0, 3_000.0, 1.0), (4_000, 2_992));
+        assert_eq!(
+            quantize_monitor_size(10_000.0, 6_000.0, 1.0),
+            (8_192, 4_912)
+        );
+        assert_eq!(quantize_monitor_size(1.0, 1.0, 1.0), (16, 16));
+        assert_eq!(quantize_monitor_size(640.0, 360.0, f32::NAN), (640, 352));
     }
 
     #[test]
     fn preview_quality_scales_the_quantized_monitor_decode_hint() {
         let mut editor = EditorState::new(Language::English, "Preview quality");
-        editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0);
+        editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0, 1.0);
         assert_eq!(editor.monitor_decode_size_hint(), (640, 352));
 
         for (quality, expected) in [
@@ -20759,7 +20828,7 @@ mod tests {
     #[test]
     fn scrub_decode_size_uses_the_selected_moving_playback_quality() {
         let mut editor = EditorState::new(Language::English, "Scrub decode quality");
-        editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0);
+        editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0, 1.0);
 
         for (quality, expected) in [
             (PreviewQuality::Full, (640, 352)),
@@ -20879,7 +20948,7 @@ mod tests {
     #[test]
     fn paused_quality_and_high_quality_playback_are_independent_durable_preferences() {
         let mut editor = EditorState::new(Language::English, "Playback preferences");
-        editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0);
+        editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0, 1.0);
         let generation = editor.durable_generation();
 
         assert_eq!(editor.preview_quality(), PreviewQuality::Full);

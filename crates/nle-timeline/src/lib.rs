@@ -343,6 +343,12 @@ pub const MIN_HIGHLIGHTS: f32 = -1.0;
 pub const MAX_HIGHLIGHTS: f32 = 1.0;
 pub const MIN_SHADOWS: f32 = -1.0;
 pub const MAX_SHADOWS: f32 = 1.0;
+/// Near-white tonal adjustment. Zero is identity; values are encoded-sRGB offsets.
+pub const MIN_WHITES: f32 = -1.0;
+pub const MAX_WHITES: f32 = 1.0;
+/// Near-black tonal adjustment. Zero is identity; values are encoded-sRGB offsets.
+pub const MIN_BLACKS: f32 = -1.0;
+pub const MAX_BLACKS: f32 = 1.0;
 pub const MIN_VIGNETTE_AMOUNT: f32 = 0.0;
 pub const MAX_VIGNETTE_AMOUNT: f32 = 1.0;
 pub const MIN_VIGNETTE_MIDPOINT: f32 = 0.0;
@@ -492,6 +498,12 @@ pub struct BrightnessContrastEffect {
     pub highlights: AnimatedScalar,
     #[serde(default = "default_brightness")]
     pub shadows: AnimatedScalar,
+    /// Near-white adjustment, kept separate from the broader Highlights control.
+    #[serde(default = "default_brightness")]
+    pub whites: AnimatedScalar,
+    /// Near-black adjustment, kept separate from the broader Shadows control.
+    #[serde(default = "default_brightness")]
+    pub blacks: AnimatedScalar,
     #[serde(default)]
     pub curves: RgbCurves,
 }
@@ -535,6 +547,8 @@ impl Default for BrightnessContrastEffect {
             exposure: default_exposure(),
             highlights: default_brightness(),
             shadows: default_brightness(),
+            whites: default_brightness(),
+            blacks: default_brightness(),
             curves: RgbCurves::default(),
         }
     }
@@ -617,6 +631,8 @@ pub enum ColorParameter {
     Exposure,
     Highlights,
     Shadows,
+    Whites,
+    Blacks,
     VignetteAmount,
     VignetteMidpoint,
     VignetteFeather,
@@ -677,6 +693,8 @@ pub struct EvaluatedBrightnessContrast {
     pub exposure: f32,
     pub highlights: f32,
     pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
     /// Compact static control points; the renderer expands these directly into its GPU LUT.
     pub curves: EvaluatedRgbCurves,
 }
@@ -692,6 +710,8 @@ impl Default for EvaluatedBrightnessContrast {
             exposure: 0.0,
             highlights: 0.0,
             shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
             curves: EvaluatedRgbCurves::default(),
         }
     }
@@ -1009,6 +1029,8 @@ impl Clip {
                             exposure: effect.exposure.evaluate(source_tick),
                             highlights: effect.highlights.evaluate(source_tick),
                             shadows: effect.shadows.evaluate(source_tick),
+                            whites: effect.whites.evaluate(source_tick),
+                            blacks: effect.blacks.evaluate(source_tick),
                             curves: EvaluatedRgbCurves::from(&effect.curves),
                         },
                     ));
@@ -1181,6 +1203,8 @@ fn normalize_video_effects(effects: &mut [VideoEffectNode]) -> bool {
                             MAX_HIGHLIGHTS,
                         )
                         && normalize_animated_scalar(&mut effect.shadows, MIN_SHADOWS, MAX_SHADOWS)
+                        && normalize_animated_scalar(&mut effect.whites, MIN_WHITES, MAX_WHITES)
+                        && normalize_animated_scalar(&mut effect.blacks, MIN_BLACKS, MAX_BLACKS)
                         && normalize_rgb_curves(&effect.curves)
                 }
                 VideoEffectKind::Vignette(effect) => {
@@ -1242,6 +1266,12 @@ fn color_scalar(
         (VideoEffectKind::BrightnessContrast(effect), ColorParameter::Shadows) => {
             Some(&effect.shadows)
         }
+        (VideoEffectKind::BrightnessContrast(effect), ColorParameter::Whites) => {
+            Some(&effect.whites)
+        }
+        (VideoEffectKind::BrightnessContrast(effect), ColorParameter::Blacks) => {
+            Some(&effect.blacks)
+        }
         (VideoEffectKind::Vignette(effect), ColorParameter::VignetteAmount) => Some(&effect.amount),
         (VideoEffectKind::Vignette(effect), ColorParameter::VignetteMidpoint) => {
             Some(&effect.midpoint)
@@ -1293,6 +1323,12 @@ fn color_scalar_mut(
         (VideoEffectKind::BrightnessContrast(effect), ColorParameter::Shadows) => {
             Some(&mut effect.shadows)
         }
+        (VideoEffectKind::BrightnessContrast(effect), ColorParameter::Whites) => {
+            Some(&mut effect.whites)
+        }
+        (VideoEffectKind::BrightnessContrast(effect), ColorParameter::Blacks) => {
+            Some(&mut effect.blacks)
+        }
         (VideoEffectKind::Vignette(effect), ColorParameter::VignetteAmount) => {
             Some(&mut effect.amount)
         }
@@ -1322,6 +1358,8 @@ fn color_parameter_value(parameter: ColorParameter, value: f32) -> f32 {
         ColorParameter::Exposure => value.clamp(MIN_EXPOSURE, MAX_EXPOSURE),
         ColorParameter::Highlights => value.clamp(MIN_HIGHLIGHTS, MAX_HIGHLIGHTS),
         ColorParameter::Shadows => value.clamp(MIN_SHADOWS, MAX_SHADOWS),
+        ColorParameter::Whites => value.clamp(MIN_WHITES, MAX_WHITES),
+        ColorParameter::Blacks => value.clamp(MIN_BLACKS, MAX_BLACKS),
         ColorParameter::VignetteAmount => value.clamp(MIN_VIGNETTE_AMOUNT, MAX_VIGNETTE_AMOUNT),
         ColorParameter::VignetteMidpoint => {
             value.clamp(MIN_VIGNETTE_MIDPOINT, MAX_VIGNETTE_MIDPOINT)
@@ -7325,6 +7363,8 @@ mod tests {
             "exposure",
             "highlights",
             "shadows",
+            "whites",
+            "blacks",
         ] {
             effect.remove(field);
         }
@@ -7342,6 +7382,8 @@ mod tests {
         assert_eq!(evaluated.exposure, 0.0);
         assert_eq!(evaluated.highlights, 0.0);
         assert_eq!(evaluated.shadows, 0.0);
+        assert_eq!(evaluated.whites, 0.0);
+        assert_eq!(evaluated.blacks, 0.0);
 
         for (parameter, value, expected) in [
             (ColorParameter::Temperature, 9.0, MAX_TEMPERATURE),
@@ -7350,6 +7392,8 @@ mod tests {
             (ColorParameter::Exposure, -9.0, MIN_EXPOSURE),
             (ColorParameter::Highlights, 9.0, MAX_HIGHLIGHTS),
             (ColorParameter::Shadows, -9.0, MIN_SHADOWS),
+            (ColorParameter::Whites, 9.0, MAX_WHITES),
+            (ColorParameter::Blacks, -9.0, MIN_BLACKS),
         ] {
             restored
                 .set_color_parameter(clip, VideoEffectId(1), parameter, value)
@@ -7367,6 +7411,8 @@ mod tests {
                 ColorParameter::Exposure => effect.exposure,
                 ColorParameter::Highlights => effect.highlights,
                 ColorParameter::Shadows => effect.shadows,
+                ColorParameter::Whites => effect.whites,
+                ColorParameter::Blacks => effect.blacks,
                 ColorParameter::Brightness
                 | ColorParameter::Contrast
                 | ColorParameter::VignetteAmount
@@ -7396,6 +7442,37 @@ mod tests {
                     .active()[0],
             )
             .temperature,
+            0.5
+        );
+        restored
+            .set_color_keyframe(
+                clip,
+                VideoEffectId(1),
+                ColorParameter::Whites,
+                Tick(10),
+                0.0,
+                KeyframeInterpolation::Linear,
+            )
+            .unwrap();
+        restored
+            .set_color_keyframe(
+                clip,
+                VideoEffectId(1),
+                ColorParameter::Whites,
+                Tick(30),
+                1.0,
+                KeyframeInterpolation::Linear,
+            )
+            .unwrap();
+        assert_eq!(
+            brightness_contrast(
+                &restored
+                    .clip(clip)
+                    .unwrap()
+                    .evaluate_video_effects(Tick(20))
+                    .active()[0],
+            )
+            .whites,
             0.5
         );
     }

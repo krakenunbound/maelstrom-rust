@@ -61,6 +61,10 @@ pub struct ViewerColorCorrection {
     pub contrast: f32,
     pub highlights: f32,
     pub shadows: f32,
+    /// Near-white tonal adjustment, clamped to -1.0..=1.0 before GPU upload.
+    pub whites: f32,
+    /// Near-black tonal adjustment, clamped to -1.0..=1.0 before GPU upload.
+    pub blacks: f32,
     /// Vignette amount, clamped to 0.0..=1.0 before GPU upload.
     pub vignette_amount: f32,
     /// Vignette radius where darkening starts, clamped to 0.0..=1.0 before GPU upload.
@@ -87,6 +91,8 @@ impl Default for ViewerColorCorrection {
             contrast: 1.0,
             highlights: 0.0,
             shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
             vignette_amount: 0.0,
             vignette_midpoint: 0.5,
             vignette_feather: 0.0,
@@ -282,7 +288,7 @@ struct GpuColorCorrection {
     light: [f32; 4],
     /// operation (0 = basic, 1 = vignette), amount, midpoint, feather
     effect: [f32; 4],
-    /// Vignette center x, center y, padding, padding.
+    /// Vignette center x, center y, or Basic Correction whites, blacks.
     center: [f32; 4],
 }
 
@@ -1054,8 +1060,8 @@ fn gpu_color_correction_stack(primitive: ViewerLayerPrimitive) -> GpuColorCorrec
             center: [
                 sanitize_unit_offset(source.vignette_center_x),
                 sanitize_unit_offset(source.vignette_center_y),
-                0.0,
-                0.0,
+                sanitize_unit_offset(source.whites),
+                sanitize_unit_offset(source.blacks),
             ],
         };
     }
@@ -1475,6 +1481,8 @@ mod tests {
             contrast: 2.0,
             highlights: 0.75,
             shadows: -0.5,
+            whites: 0.6,
+            blacks: -0.7,
             ..Default::default()
         };
         corrections[1] = ViewerColorCorrection {
@@ -1508,6 +1516,7 @@ mod tests {
         assert_eq!(stack.count, 3);
         assert_eq!(stack.corrections[0].color, [0.5, -0.25, 1.5, 2.0]);
         assert_eq!(stack.corrections[0].light, [0.25, 2.0, 0.75, -0.5]);
+        assert_eq!(stack.corrections[0].center, [0.0, 0.0, 0.6, -0.7]);
         assert_eq!(stack.corrections[0].effect[0], 0.0);
         assert_eq!(curves.samples[255], [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(
@@ -1549,6 +1558,26 @@ mod tests {
         let edge = vignette_multiplier([1.0, 1.0], 1.0, 0.5, 0.5, 0.0, 0.0);
         assert_eq!(center, 1.0);
         assert!(edge < center);
+    }
+
+    #[test]
+    fn basic_correction_reuses_center_tail_for_sanitized_whites_and_blacks() {
+        let correction = ViewerColorCorrection {
+            whites: f32::INFINITY,
+            blacks: -2.0,
+            ..Default::default()
+        };
+        let stack = gpu_color_correction_stack(ViewerLayerPrimitive {
+            quad: full_test_quad(1),
+            content_uv: [Uv { u: 0.0, v: 0.0 }; 4],
+            color_corrections: [correction; MAX_COLOR_CORRECTIONS_PER_LAYER],
+            color_correction_count: 1,
+        });
+        assert_eq!(stack.corrections[0].center, [0.0, 0.0, 0.0, -1.0]);
+        assert_eq!(std::mem::size_of::<GpuColorCorrection>(), 64);
+        assert!(VIEWER_SHADER.contains("let tonal_luma = clamp(luma, 0.0, 1.0);"));
+        assert!(VIEWER_SHADER.contains("pow(tonal_luma, 8.0)"));
+        assert!(VIEWER_SHADER.contains("pow(1.0 - tonal_luma, 8.0)"));
     }
 
     #[test]

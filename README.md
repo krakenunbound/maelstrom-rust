@@ -170,12 +170,15 @@ layers remain visibly gated instead of being silently omitted. Completed renders
 are promoted from a same-directory staged file, so probing, graph, encoder, or cancellation failure
 cannot delete an existing destination. The total
 configured monitor-cache budget remains fixed and is divided across the four slots.
-The Viewer header offers Auto, Full, Half, Quarter, and Eighth preview quality without changing
-export resolution. Auto measures completed decoder-request turnaround against the project frame
-budget, downshifts only after sustained pressure, and requires a longer stable recovery before
-raising quality. Its label always shows the resolution fraction currently in use. Manual choices
-are saved with the project, and any resolution change obsoletes old decode requests while the last
-good frame remains visible until its replacement arrives.
+The Playback menu and Viewer header offer separate moving and paused Auto, Full, Half, Quarter, and
+Eighth preview controls without changing export resolution. Full is the default and decodes the
+entire physical viewer raster, including Windows display scaling; it is no longer silently capped
+at 1280×720. High Quality Playback defaults on and uses bicubic scaling. Auto is opt-in, measures
+completed decoder-request turnaround against the project frame budget, downshifts only after
+sustained pressure, and requires a longer stable recovery before raising quality. Its label always
+shows the fraction currently in use. Manual choices are saved with the project, and any resolution
+change obsoletes old decode requests while the last good frame remains visible until its replacement
+arrives.
 Adjacent video clips can carry native centered Cross Dissolve and Dip to Black operations without
 weakening the timeline's sorted, non-overlapping clip model. The timeline gives each type a distinct
 visual and the bilingual Inspector adds, removes, and edits duration and curve with bounded undo/redo.
@@ -191,8 +194,11 @@ sine/cosine gains preserve energy through the cut. Entering or leaving that over
 running device clock and the retained lane's queued audio. Quick Export expands the same source handles,
 uses matching quarter-sine envelopes, and inserts timeline silence by exact 48 kHz sample count.
 Existing v1–v6 documents migrate losslessly to the v7 audio-transition schema.
-Selected video clips expose the active Color Correction's brightness and contrast animation as
-two compact timeline lanes. Colored diamond keys map through source time, so trims and slips do
+Selected video clips expose a compact professional Basic Correction group. Highlights and Shadows
+shape broad tonal regions; Whites and Blacks target the narrow ends of the range with normalized
+`-100%..100%` controls, where zero is identity. Every control can be scrubbed, reset, and animated,
+and the native viewer and Quick Export use the same clamped tonal masks. Colored diamond keys map
+through source time, so trims and slips do
 not rewrite animation. Clicking a key seeks to it; dragging retimes it on project-frame boundaries
 without jumping from an off-center grab, overwriting a neighboring key, or creating more than one
 undo step. Only the selected clip's active correction is scanned and all visible diamonds share one

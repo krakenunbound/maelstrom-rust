@@ -8,7 +8,7 @@ struct ColorCorrection {
     light: vec4<f32>,
     // operation (0 = basic, 1 = vignette), amount, midpoint, feather
     effect: vec4<f32>,
-    // Vignette center x, center y, padding, padding.
+    // Vignette center x, center y, or Basic Correction whites, blacks.
     center: vec4<f32>,
 };
 struct ColorCorrectionStack {
@@ -150,8 +150,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             encoded = (encoded - vec3<f32>(0.5)) * correction.light.y
                 + vec3<f32>(0.5 + correction.light.x);
             luma = dot(encoded, vec3<f32>(0.2126, 0.7152, 0.0722));
-            let tonal = 0.25 * correction.light.z * luma * luma
-                + 0.25 * correction.light.w * (1.0 - luma) * (1.0 - luma);
+            let tonal_luma = clamp(luma, 0.0, 1.0);
+            // Highlights/Shadows use broad quadratic masks. Whites/Blacks use eighth-power
+            // masks, concentrating their equal-strength adjustment nearer the tonal endpoints.
+            let tonal = 0.25 * correction.light.z * tonal_luma * tonal_luma
+                + 0.25 * correction.light.w * (1.0 - tonal_luma) * (1.0 - tonal_luma)
+                + 0.20 * correction.center.z * pow(tonal_luma, 8.0)
+                + 0.20 * correction.center.w * pow(1.0 - tonal_luma, 8.0);
             encoded = clamp(encoded + vec3<f32>(tonal), vec3<f32>(0.0), vec3<f32>(1.0));
             encoded = apply_curve_lut(encoded, index);
         }

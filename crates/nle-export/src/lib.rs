@@ -1691,6 +1691,8 @@ fn brightness_contrast_filter(effect: &BrightnessContrastEffect, source_in: Tick
     let exposure = animated_scalar_expression(&effect.exposure, source_in, "T");
     let highlights = animated_scalar_expression(&effect.highlights, source_in, "T");
     let shadows = animated_scalar_expression(&effect.shadows, source_in, "T");
+    let whites = animated_scalar_expression(&effect.whites, source_in, "T");
+    let blacks = animated_scalar_expression(&effect.blacks, source_in, "T");
     let temperature_tint =
         |component: &str, offset: &str| format!("({component}(X\\,Y)/255+{offset})");
     let red = temperature_tint("r", &format!("0.10*({temperature})+0.05*({tint})"));
@@ -1702,14 +1704,17 @@ fn brightness_contrast_filter(effect: &BrightnessContrastEffect, source_in: Tick
     let blue = format!("({blue})*{exposure_scale}");
     // FFmpeg expression registers keep the generated graph comfortably below Windows' command
     // line limit even with the full eight-node correction stack. Saturation preserves luma, so
-    // the post-contrast luma in register 4 can be derived directly from register 3.
+    // the post-contrast luma in register 4 can be derived directly from register 3. The tonal
+    // order matches the native viewer: broad Highlights/Shadows quadratic masks, then narrower
+    // Whites/Blacks eighth-power masks. All controls are normalized encoded-sRGB offsets.
     let channel = |component_register: u8| {
         format!(
             "st(0\\,{red});st(1\\,{green});st(2\\,{blue});\
              st(3\\,0.2126*ld(0)+0.7152*ld(1)+0.0722*ld(2));\
-             st(4\\,(ld(3)-0.5)*({contrast})+0.5+({brightness}));\
+             st(4\\,max(0\\,min(1\\,(ld(3)-0.5)*({contrast})+0.5+({brightness}))));\
              max(0\\,min(255\\,(((ld(3)+(ld({component_register})-ld(3))*({saturation})-0.5)*({contrast})+0.5+({brightness}))+\
-             0.25*({highlights})*ld(4)*ld(4)+0.25*({shadows})*(1-ld(4))*(1-ld(4)))*255))"
+             0.25*({highlights})*ld(4)*ld(4)+0.25*({shadows})*(1-ld(4))*(1-ld(4))+\
+             0.20*({whites})*pow(ld(4)\\,8)+0.20*({blacks})*pow(1-ld(4)\\,8))*255))"
         )
     };
     let basic = format!(
@@ -2338,7 +2343,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_lowers_static_brightness_contrast_in_rgb_byte_space() {
+    fn graph_clamps_extreme_basic_correction_before_endpoint_powers() {
         let mut editor = EditorState::new(Language::English, "Color export");
         editor.add_media_paths([PathBuf::from("clip.mp4")]);
         assert!(editor.add_selected_to_timeline());
@@ -2351,7 +2356,7 @@ mod tests {
             .unwrap()
             .clips[0];
         clip.video_effects
-            .push(brightness_contrast_node(true, scalar(-0.25), scalar(1.5)));
+            .push(brightness_contrast_node(true, scalar(-1.0), scalar(4.0)));
         let VideoEffectKind::BrightnessContrast(effect) = &mut clip.video_effects[0].kind else {
             panic!("expected the basic correction operation");
         };
@@ -2361,6 +2366,8 @@ mod tests {
         effect.exposure = scalar(0.5);
         effect.highlights = scalar(0.3);
         effect.shadows = scalar(-0.4);
+        effect.whites = scalar(0.55);
+        effect.blacks = scalar(-0.65);
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -2373,9 +2380,12 @@ mod tests {
         assert!(graph.contains("pow(2\\,(0.500000))"));
         assert!(graph.contains("0.2126*"));
         assert!(graph.contains("*(1.250000)"));
-        assert!(graph.contains("*(1.500000)+0.5+(-0.250000)"));
+        assert!(graph.contains("*(4.000000)+0.5+(-1.000000)"));
         assert!(graph.contains("0.25*(0.300000)"));
         assert!(graph.contains("0.25*(-0.400000)"));
+        assert!(graph.contains("0.20*(0.550000)*pow(ld(4)\\,8)"));
+        assert!(graph.contains("0.20*(-0.650000)*pow(1-ld(4)\\,8)"));
+        assert!(graph.contains("st(4\\,max(0\\,min(1\\,"));
         assert!(graph.contains(":a='alpha(X\\,Y)'"));
         assert!(!graph.contains(",curves=interp=natural:"));
     }
@@ -2476,6 +2486,21 @@ mod tests {
                 },
             ],
         };
+        effect.whites = AnimatedScalar {
+            value: 0.0,
+            keyframes: vec![
+                ScalarKeyframe {
+                    source_tick: Tick(1_000_000),
+                    value: -0.25,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+                ScalarKeyframe {
+                    source_tick: Tick(2_000_000),
+                    value: 0.75,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ],
+        };
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -2488,6 +2513,9 @@ mod tests {
         ));
         assert!(graph.contains(
             "-0.500000+(0.500000--0.500000)*(((T+1.000000)-1.000000)/(2.000000-1.000000))"
+        ));
+        assert!(graph.contains(
+            "-0.250000+(0.750000--0.250000)*(((T+1.000000)-1.000000)/(2.000000-1.000000))"
         ));
         // The second key holds its value through the interval leading to the third key.
         assert!(
@@ -4198,6 +4226,8 @@ mod tests {
         let exposure = 0.35;
         let highlights = 0.25;
         let shadows = -0.2;
+        let whites = 0.4;
+        let blacks = -0.3;
         clip.video_effects = vec![brightness_contrast_node(
             true,
             scalar(brightness),
@@ -4212,6 +4242,8 @@ mod tests {
         effect.exposure = scalar(exposure);
         effect.highlights = scalar(highlights);
         effect.shadows = scalar(shadows);
+        effect.whites = scalar(whites);
+        effect.blacks = scalar(blacks);
         effect.curves.red = ColorCurve {
             points: vec![
                 CurvePoint { x: 0.0, y: 0.0 },
@@ -4275,12 +4307,15 @@ mod tests {
             *component =
                 (luma + (*component - luma) * saturation - 0.5) * contrast + 0.5 + brightness;
         }
-        let luma = 0.2126 * encoded[0] + 0.7152 * encoded[1] + 0.0722 * encoded[2];
+        let luma =
+            (0.2126 * encoded[0] + 0.7152 * encoded[1] + 0.0722 * encoded[2]).clamp(0.0, 1.0);
         for (channel, component) in encoded.into_iter().enumerate() {
             let basic = (component
                 + 0.25 * highlights * luma * luma
-                + 0.25 * shadows * (1.0 - luma) * (1.0 - luma))
-                .clamp(0.0, 1.0);
+                + 0.25 * shadows * (1.0 - luma) * (1.0 - luma)
+                + 0.20 * whites * luma.powi(8)
+                + 0.20 * blacks * (1.0 - luma).powi(8))
+            .clamp(0.0, 1.0);
             let component_curve = match channel {
                 0 => &curves.red,
                 1 => &curves.green,

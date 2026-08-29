@@ -171,7 +171,8 @@ disappear from the output.
 
 Every viewer update is first described by immutable, allocation-free preview metadata: sequence
 generation, playhead, selected and resolved quality, output size, and ordered source/priority
-slots. Full, half, quarter, and eighth resolution are derived from the quantized viewer bounds.
+slots. Full uses the quantized physical viewer raster (logical bounds multiplied by display scale),
+with only an 8K allocation guard; half, quarter, and eighth are exact divisors of that raster.
 Auto observes latest-request decoder turnaround against a frame-rate-derived budget, uses sustained
 breach and longer recovery windows to avoid oscillation, and changes only runtime resolution.
 Manual quality is durable view state; Auto's current resolution is runtime-only. Output-size changes
@@ -212,6 +213,11 @@ work. Editing remains live while the worker renders, and cancellation removes th
 and temporary filter graph without leaving an orphaned process or worker. FFmpeg writes a unique
 same-directory staged output; only a successful render crosses the atomic replacement boundary, so
 preflight or encoder failure preserves any existing destination file.
+
+Basic color correction is an ordered, animatable timeline operation. The native WGSL path and the
+FFmpeg export lowering share encoded-sRGB math: Highlights/Shadows use quadratic masks and
+Whites/Blacks use narrower eighth-power masks over clamped tonal luma. Zero is identity and legacy
+documents default newly introduced controls to zero.
 
 ## Rendering, diagnostics, and legal boundary
 
