@@ -90,7 +90,7 @@ Build the evidence harness before adding engine complexity.
       memory-pressure, and export-cancellation scenarios.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
-- [ ] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
+- [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
 
 Exit gate:
 

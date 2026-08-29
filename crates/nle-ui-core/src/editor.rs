@@ -988,6 +988,25 @@ struct PerformanceHudMetrics {
     native_textures: usize,
 }
 
+/// Session-only diagnostics supplied by the application. These counters are never persisted and
+/// are displayed in the performance HUD's hover panel instead of widening the window border.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RuntimeDiagnostics {
+    pub monitor_requests: u64,
+    pub monitor_completed_frames: u64,
+    pub monitor_presented_frames: u64,
+    pub monitor_dropped_frames: u64,
+    pub monitor_hold_events: u64,
+    pub monitor_late_frames: u64,
+    pub monitor_errors: u64,
+    pub monitor_turnaround_p95_ms: f32,
+    pub native_viewer_uploads: u64,
+    pub fallback_viewer_uploads: u64,
+    pub audio_underrun_frames: u64,
+    pub audio_callback_lock_failures: u64,
+    pub audio_late_discarded_frames: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PerformanceHudSummary {
     clip_count: usize,
@@ -1170,6 +1189,7 @@ pub struct EditorState {
     performance_hud: String,
     performance_hud_metrics: Option<PerformanceHudMetrics>,
     performance_hud_summary: Option<PerformanceHudSummary>,
+    runtime_diagnostics: RuntimeDiagnostics,
     audio_meter_levels: (f32, f32),
     audio_output_error: Option<String>,
     media_paths: HashSet<PathBuf>,
@@ -1301,6 +1321,7 @@ impl EditorState {
             performance_hud,
             performance_hud_metrics: None,
             performance_hud_summary: None,
+            runtime_diagnostics: RuntimeDiagnostics::default(),
             audio_meter_levels: (0.0, 0.0),
             audio_output_error: None,
             media_paths: HashSet::new(),
@@ -1646,6 +1667,11 @@ impl EditorState {
             native_textures,
         });
         self.rebuild_performance_hud();
+    }
+
+    /// Replaces the non-durable session counters shown behind the retained performance label.
+    pub fn set_runtime_diagnostics(&mut self, diagnostics: RuntimeDiagnostics) {
+        self.runtime_diagnostics = diagnostics;
     }
 
     /// Rebuilds the retained HUD only after timeline content or view changes.
@@ -4904,9 +4930,11 @@ fn top_bar(ui: &mut Ui, state: &mut EditorState) {
                     ui.label(
                         RichText::new(match state.workspace {
                             EditorWorkspace::Edit => menu_text(state.language, "EDIT", "編集"),
-                            EditorWorkspace::Undertow => {
-                                menu_text(state.language, "UNDERTOW AUDIO", "アンダートウ・オーディオ")
-                            }
+                            EditorWorkspace::Undertow => menu_text(
+                                state.language,
+                                "UNDERTOW AUDIO",
+                                "アンダートウ・オーディオ",
+                            ),
                             EditorWorkspace::KrakenUpscale => {
                                 menu_text(state.language, "KRAKEN UPSCALE", "KRAKEN UPSCALE")
                             }
@@ -4935,13 +4963,114 @@ fn top_bar(ui: &mut Ui, state: &mut EditorState) {
                             .small()
                             .color(Color32::from_rgb(126, 148, 164)),
                     )
-                    .on_hover_text(menu_text(
-                        state.language,
-                        "CPU UI/submit time, rolling p95, clip count, view range, native primitives",
-                        "CPU UI/送信時間、p95、クリップ数、表示範囲、ネイティブ描画数",
-                    ));
+                    .on_hover_ui(|ui| runtime_diagnostics_hover_ui(ui, state));
                 });
             });
+        });
+}
+
+fn runtime_diagnostics_hover_ui(ui: &mut Ui, state: &EditorState) {
+    let diagnostics = state.runtime_diagnostics;
+    ui.set_min_width(290.0);
+    ui.strong(menu_text(
+        state.language,
+        "Session diagnostics",
+        "セッション診断",
+    ));
+    ui.label(
+        RichText::new(menu_text(
+            state.language,
+            "Cumulative counters; project media and settings are unchanged.",
+            "累積カウンターです。プロジェクトのメディアや設定は変更されません。",
+        ))
+        .small()
+        .color(Color32::from_rgb(146, 163, 176)),
+    );
+    ui.add_space(4.0);
+    egui::Grid::new("runtime-diagnostics-grid")
+        .num_columns(2)
+        .spacing([18.0, 3.0])
+        .striped(true)
+        .show(ui, |ui| {
+            for (label, value) in [
+                (
+                    menu_text(state.language, "Decode requests", "デコード要求"),
+                    diagnostics.monitor_requests.to_string(),
+                ),
+                (
+                    menu_text(state.language, "Completed frames", "完了フレーム"),
+                    diagnostics.monitor_completed_frames.to_string(),
+                ),
+                (
+                    menu_text(state.language, "Presented frames", "表示フレーム"),
+                    diagnostics.monitor_presented_frames.to_string(),
+                ),
+                (
+                    menu_text(state.language, "Dropped stale frames", "破棄した旧フレーム"),
+                    diagnostics.monitor_dropped_frames.to_string(),
+                ),
+                (
+                    menu_text(state.language, "Retained-frame holds", "保持フレーム待機"),
+                    diagnostics.monitor_hold_events.to_string(),
+                ),
+                (
+                    menu_text(state.language, "Late completions", "遅延完了"),
+                    diagnostics.monitor_late_frames.to_string(),
+                ),
+                (
+                    menu_text(state.language, "Decode errors", "デコードエラー"),
+                    diagnostics.monitor_errors.to_string(),
+                ),
+                (
+                    menu_text(
+                        state.language,
+                        "Decode turnaround p95",
+                        "デコード所要時間 p95",
+                    ),
+                    format!("{:.2} ms", diagnostics.monitor_turnaround_p95_ms),
+                ),
+                (
+                    menu_text(
+                        state.language,
+                        "Native / fallback uploads",
+                        "ネイティブ / 代替アップロード",
+                    ),
+                    format!(
+                        "{} / {}",
+                        diagnostics.native_viewer_uploads, diagnostics.fallback_viewer_uploads
+                    ),
+                ),
+                (
+                    menu_text(
+                        state.language,
+                        "Audio underrun frames",
+                        "オーディオ不足フレーム",
+                    ),
+                    diagnostics.audio_underrun_frames.to_string(),
+                ),
+                (
+                    menu_text(
+                        state.language,
+                        "Audio callback lock misses",
+                        "音声コールバックロック失敗",
+                    ),
+                    diagnostics.audio_callback_lock_failures.to_string(),
+                ),
+                (
+                    menu_text(
+                        state.language,
+                        "Late audio frames discarded",
+                        "破棄した遅延音声フレーム",
+                    ),
+                    diagnostics.audio_late_discarded_frames.to_string(),
+                ),
+            ] {
+                ui.label(RichText::new(label).small());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(value).monospace().small());
+                });
+                ui.end_row();
+            }
         });
 }
 
@@ -18274,6 +18403,15 @@ mod tests {
         editor.advance_playback(Duration::from_millis(100));
         assert_eq!(editor.durable_generation(), saved);
         editor.set_performance_hud(1.25, 1.75, 42, 7);
+        assert_eq!(editor.durable_generation(), saved);
+        let diagnostics = RuntimeDiagnostics {
+            monitor_requests: 12,
+            monitor_dropped_frames: 3,
+            audio_underrun_frames: 48,
+            ..RuntimeDiagnostics::default()
+        };
+        editor.set_runtime_diagnostics(diagnostics);
+        assert_eq!(editor.runtime_diagnostics, diagnostics);
         assert_eq!(editor.durable_generation(), saved);
 
         editor.set_playhead(Tick(1_000_000));

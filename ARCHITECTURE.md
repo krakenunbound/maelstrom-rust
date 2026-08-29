@@ -235,6 +235,14 @@ green-family, and offline media stays unambiguously magenta. Debug builds expose
 and a VSync toggle. Tracing records the renderer adapter and each sticky decoder backend, never one
 event per rectangle.
 
+The retained title-bar label stays compact at the window edge. Hovering it opens English/Japanese
+session diagnostics for monitor requests, completed/presented frames, rejected stale frames,
+late completions that held a prior frame, decode errors, p95 turnaround, native/fallback uploads,
+and audio underruns. Monitor timing uses a fixed 120-sample ring and is summarized periodically;
+it does not log or allocate per frame. The native audio callback only increments shared atomics for
+lock misses and underrun device frames, while late decoded-frame discards are counted on the worker.
+These counters are runtime-only and never enter project persistence.
+
 Shipping uses the pinned FFmpeg 8.1 LGPL shared bundle. Windows DLLs are packaged beside the
 executable. GPL/nonfree codec libraries are rejected. H.264 export prefers available Windows
 hardware and then Media Foundation/OpenH264. FFmpeg is linked as libraries for playback/scrubbing.

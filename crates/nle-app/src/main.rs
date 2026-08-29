@@ -28,8 +28,9 @@ use nle_render::{
 };
 use nle_ui_core::{
     EditorAction, EditorProjectSnapshot, EditorState, HubAction, HubBackdrops, Language, MediaKind,
-    MonitorFrame, PreviewQuality, ProjectFrameRate, ProjectHubState, TimelineCanvas, ViewerCanvas,
-    classify_path, configure_fonts, show_editor_with_canvases, show_with_backdrops,
+    MonitorFrame, PreviewQuality, ProjectFrameRate, ProjectHubState, RuntimeDiagnostics,
+    TimelineCanvas, ViewerCanvas, classify_path, configure_fonts, show_editor_with_canvases,
+    show_with_backdrops,
 };
 use winit::{
     application::ApplicationHandler,
@@ -1675,6 +1676,115 @@ impl FrameMetrics {
     }
 }
 
+struct MonitorRuntimeMetrics {
+    requests: u64,
+    completed_frames: u64,
+    presented_frames: u64,
+    dropped_frames: u64,
+    hold_events: u64,
+    late_frames: u64,
+    errors: u64,
+    native_uploads: u64,
+    fallback_uploads: u64,
+    turnaround_ms: [f32; FRAME_TIME_SAMPLE_COUNT],
+    turnaround_count: usize,
+    next_turnaround: usize,
+}
+
+impl Default for MonitorRuntimeMetrics {
+    fn default() -> Self {
+        Self {
+            requests: 0,
+            completed_frames: 0,
+            presented_frames: 0,
+            dropped_frames: 0,
+            hold_events: 0,
+            late_frames: 0,
+            errors: 0,
+            native_uploads: 0,
+            fallback_uploads: 0,
+            turnaround_ms: [0.0; FRAME_TIME_SAMPLE_COUNT],
+            turnaround_count: 0,
+            next_turnaround: 0,
+        }
+    }
+}
+
+impl MonitorRuntimeMetrics {
+    fn record_request(&mut self) {
+        self.requests = self.requests.saturating_add(1);
+    }
+
+    fn record_completed(
+        &mut self,
+        turnaround: Option<Duration>,
+        frame_budget_ms: f32,
+        retained_previous_frame: bool,
+    ) {
+        self.completed_frames = self.completed_frames.saturating_add(1);
+        let Some(turnaround) = turnaround else {
+            return;
+        };
+        let milliseconds = turnaround.as_secs_f32() * 1_000.0;
+        self.turnaround_ms[self.next_turnaround] = milliseconds;
+        self.next_turnaround = (self.next_turnaround + 1) % FRAME_TIME_SAMPLE_COUNT;
+        self.turnaround_count = (self.turnaround_count + 1).min(FRAME_TIME_SAMPLE_COUNT);
+        if milliseconds > frame_budget_ms.max(0.0) {
+            self.late_frames = self.late_frames.saturating_add(1);
+            if retained_previous_frame {
+                self.hold_events = self.hold_events.saturating_add(1);
+            }
+        }
+    }
+
+    fn record_presented(&mut self, native_upload: bool) {
+        self.presented_frames = self.presented_frames.saturating_add(1);
+        if native_upload {
+            self.native_uploads = self.native_uploads.saturating_add(1);
+        } else {
+            self.fallback_uploads = self.fallback_uploads.saturating_add(1);
+        }
+    }
+
+    fn record_dropped(&mut self) {
+        self.dropped_frames = self.dropped_frames.saturating_add(1);
+    }
+
+    fn record_error(&mut self) {
+        self.errors = self.errors.saturating_add(1);
+    }
+
+    fn diagnostics(
+        &self,
+        audio_underrun_frames: u64,
+        audio_callback_lock_failures: u64,
+        audio_late_discarded_frames: u64,
+    ) -> RuntimeDiagnostics {
+        let mut ordered = self.turnaround_ms;
+        ordered[..self.turnaround_count].sort_unstable_by(f32::total_cmp);
+        let p95_index = self
+            .turnaround_count
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        RuntimeDiagnostics {
+            monitor_requests: self.requests,
+            monitor_completed_frames: self.completed_frames,
+            monitor_presented_frames: self.presented_frames,
+            monitor_dropped_frames: self.dropped_frames,
+            monitor_hold_events: self.hold_events,
+            monitor_late_frames: self.late_frames,
+            monitor_errors: self.errors,
+            monitor_turnaround_p95_ms: ordered.get(p95_index).copied().unwrap_or_default(),
+            native_viewer_uploads: self.native_uploads,
+            fallback_viewer_uploads: self.fallback_uploads,
+            audio_underrun_frames,
+            audio_callback_lock_failures,
+            audio_late_discarded_frames,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SurfaceSubmissionReport {
     samples: usize,
@@ -2175,6 +2285,7 @@ struct App {
     timeline_rect_scratch: Vec<RectInstance>,
     timeline_texture_scratch: Vec<TexturedRect>,
     frame_metrics: FrameMetrics,
+    monitor_runtime_metrics: MonitorRuntimeMetrics,
     startup_presentation_probe: Option<StartupPresentationProbe>,
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
     media_acceptance_probe: Option<MediaAcceptanceProbe>,
@@ -2424,6 +2535,7 @@ impl App {
             timeline_rect_scratch: Vec::with_capacity(64 * 1024),
             timeline_texture_scratch: Vec::with_capacity(16 * 1024),
             frame_metrics: FrameMetrics::default(),
+            monitor_runtime_metrics: MonitorRuntimeMetrics::default(),
             startup_presentation_probe: StartupPresentationProbe::from_environment(started_at),
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
             media_acceptance_probe: None,
@@ -2782,6 +2894,17 @@ impl App {
         self.advance_media_acceptance_drag_smoke();
         if self.screen == Screen::Editor {
             let performance_hud_rebuilt = if let Some(performance) = frame_performance {
+                let audio = self
+                    .audio_engine
+                    .as_ref()
+                    .map(nle_audio::AudioEngine::runtime_diagnostics)
+                    .unwrap_or_default();
+                self.editor
+                    .set_runtime_diagnostics(self.monitor_runtime_metrics.diagnostics(
+                        audio.underrun_device_frames,
+                        audio.callback_lock_failures,
+                        audio.late_decoded_frames_discarded,
+                    ));
                 self.editor.set_performance_hud(
                     performance.latest_ms,
                     performance.p95_ms,
@@ -4178,12 +4301,14 @@ impl App {
                 acceleration,
             }) {
                 Ok(()) => {
+                    self.monitor_runtime_metrics.record_request();
                     self.monitor_last_requests[layer] = Some(key);
                     self.monitor_latest_request_ids[layer] = request_id;
                     self.monitor_requests_in_flight[layer] = true;
                     self.monitor_request_started_at[layer] = Some((request_id, Instant::now()));
                 }
                 Err(error) => {
+                    self.monitor_runtime_metrics.record_error();
                     self.monitor_request_started_at[layer] = None;
                     self.editor.set_monitor_error(error.to_string());
                 }
@@ -4551,6 +4676,7 @@ impl App {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(error) => {
+                        self.monitor_runtime_metrics.record_error();
                         self.editor.set_monitor_error(error.to_string());
                         break;
                     }
@@ -4569,6 +4695,7 @@ impl App {
                             self.monitor_latest_request_ids[layer],
                             frame.request_id,
                         ) {
+                            self.monitor_runtime_metrics.record_dropped();
                             continue;
                         }
                         if let Some(backend) = frame.backend {
@@ -4595,6 +4722,13 @@ impl App {
                                     .map(|(_, started)| started.elapsed())
                             })
                             .flatten();
+                        if latest_request_completed {
+                            self.monitor_runtime_metrics.record_completed(
+                                turnaround,
+                                preview_frame_budget_ms(&self.editor),
+                                self.editor.monitor_frame_for_layer(layer).is_some(),
+                            );
+                        }
                         // Drag-time requests already use the dedicated scrub cap. Feeding their
                         // deliberately different timings into Auto can downshift again mid-drag,
                         // changing dimensions and forcing an avoidable cancel/reseek.
@@ -4630,6 +4764,7 @@ impl App {
                                 latest_request_completed,
                             )
                         }) {
+                            self.monitor_runtime_metrics.record_dropped();
                             continue;
                         }
                         let media_id = frame.media_id;
@@ -4641,6 +4776,8 @@ impl App {
                             frame.height,
                             &frame.rgba,
                         );
+                        self.monitor_runtime_metrics
+                            .record_presented(native_uploaded);
                         if let Some(probe) = &mut self.media_acceptance_probe {
                             probe.record_monitor_frame(media_id, native_uploaded);
                         }
@@ -4656,6 +4793,7 @@ impl App {
                             error.request_id,
                         ) =>
                     {
+                        self.monitor_runtime_metrics.record_error();
                         self.monitor_requests_in_flight[layer] = false;
                         self.monitor_request_started_at[layer] = None;
                         self.adaptive_preview.mark_layer_unavailable(layer);
@@ -4664,7 +4802,10 @@ impl App {
                             window.request_redraw();
                         }
                     }
-                    _ => {}
+                    nle_decode::DecodeEvent::Frame(_) => {
+                        self.monitor_runtime_metrics.record_dropped();
+                    }
+                    nle_decode::DecodeEvent::Error(_) => {}
                 }
             }
         }
@@ -5730,6 +5871,54 @@ mod tests {
         let published = published.expect("120 samples include a publish boundary");
         assert_eq!(published.latest_ms, 120.0);
         assert_eq!(published.p95_ms, 114.0);
+    }
+
+    #[test]
+    fn monitor_runtime_metrics_publish_bounded_session_diagnostics() {
+        let mut metrics = MonitorRuntimeMetrics::default();
+        metrics.record_request();
+        metrics.record_request();
+        metrics.record_completed(Some(Duration::from_millis(10)), 15.0, true);
+        metrics.record_completed(Some(Duration::from_millis(20)), 15.0, false);
+        metrics.record_completed(Some(Duration::from_millis(30)), 15.0, true);
+        metrics.record_presented(true);
+        metrics.record_presented(false);
+        metrics.record_dropped();
+        metrics.record_error();
+
+        assert_eq!(
+            metrics.diagnostics(480, 2, 24),
+            RuntimeDiagnostics {
+                monitor_requests: 2,
+                monitor_completed_frames: 3,
+                monitor_presented_frames: 2,
+                monitor_dropped_frames: 1,
+                monitor_hold_events: 1,
+                monitor_late_frames: 2,
+                monitor_errors: 1,
+                monitor_turnaround_p95_ms: 30.0,
+                native_viewer_uploads: 1,
+                fallback_viewer_uploads: 1,
+                audio_underrun_frames: 480,
+                audio_callback_lock_failures: 2,
+                audio_late_discarded_frames: 24,
+            }
+        );
+        assert_eq!(metrics.turnaround_count, 3);
+
+        let mut wrapped = MonitorRuntimeMetrics::default();
+        for milliseconds in 0..=FRAME_TIME_SAMPLE_COUNT {
+            wrapped.record_completed(
+                Some(Duration::from_millis(milliseconds as u64)),
+                f32::MAX,
+                false,
+            );
+        }
+        assert_eq!(wrapped.turnaround_count, FRAME_TIME_SAMPLE_COUNT);
+        assert_eq!(
+            wrapped.diagnostics(0, 0, 0).monitor_turnaround_p95_ms,
+            114.0
+        );
     }
 
     #[test]

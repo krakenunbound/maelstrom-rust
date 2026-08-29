@@ -22,6 +22,59 @@ const MIX_BUFFER_SECONDS: usize = 1;
 /// Hard per-decoder-frame guard; normal AAC/PCM frames are orders of magnitude smaller.
 const MAX_DECODED_AUDIO_FRAME_SAMPLES: usize = 262_144;
 
+/// Cumulative, non-blocking diagnostics from the native audio transport.
+///
+/// `callback_lock_failures` counts output callbacks that could not acquire the
+/// mixer lock and therefore produced silence. `underrun_device_frames` counts
+/// playing device frames for which every active lane was empty, including an
+/// entire lock-contended callback. Paused callbacks never contribute to the
+/// underrun-frame count. `late_decoded_frames_discarded` counts decoded stereo
+/// frames dropped by the decode worker because the device clock had already
+/// advanced past them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AudioRuntimeDiagnostics {
+    pub callback_lock_failures: u64,
+    pub underrun_device_frames: u64,
+    pub late_decoded_frames_discarded: u64,
+}
+
+#[derive(Default)]
+struct AudioRuntimeCounters {
+    callback_lock_failures: AtomicU64,
+    underrun_device_frames: AtomicU64,
+    late_decoded_frames_discarded: AtomicU64,
+}
+
+impl AudioRuntimeCounters {
+    fn snapshot(&self) -> AudioRuntimeDiagnostics {
+        AudioRuntimeDiagnostics {
+            callback_lock_failures: self.callback_lock_failures.load(Ordering::Acquire),
+            underrun_device_frames: self.underrun_device_frames.load(Ordering::Acquire),
+            late_decoded_frames_discarded: self
+                .late_decoded_frames_discarded
+                .load(Ordering::Acquire),
+        }
+    }
+
+    fn record_callback_lock_failure(&self) {
+        self.callback_lock_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_underrun_frames(&self, playing: bool, frames: usize) {
+        if playing && frames > 0 {
+            self.underrun_device_frames
+                .fetch_add(frames as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn record_late_discard(&self, frames: usize) {
+        if frames > 0 {
+            self.late_decoded_frames_discarded
+                .fetch_add(frames as u64, Ordering::Relaxed);
+        }
+    }
+}
+
 /// The side of an equal-power audio transition that a clip supplies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AudioTransitionRole {
@@ -236,6 +289,7 @@ struct Shared {
     lanes: HashMap<LaneKey, Lane>,
     generation: u64,
     device_frames: Arc<AtomicU64>,
+    diagnostics: Arc<AudioRuntimeCounters>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -477,6 +531,7 @@ fn enqueue_decoded_frame(
     sample_rate: u32,
 ) -> Result<bool, String> {
     let lane_count = state.lanes.len();
+    let diagnostics = Arc::clone(&state.diagnostics);
     let lane = state.lanes.get_mut(&lane_key).expect("active audio lane");
     let consumed_frames = state
         .device_frames
@@ -495,6 +550,7 @@ fn enqueue_decoded_frame(
     {
         return Err("decoded audio packet exceeds the bounded lane allowance".to_owned());
     }
+    diagnostics.record_late_discard(stale_samples / 2);
     lane.samples.extend(floats[stale_samples..].iter().copied());
     lane.decoded_frames = frame_base.saturating_add((floats.len() / 2) as i64);
     let reached_capacity = lane.samples.len() >= capacity;
@@ -588,6 +644,7 @@ pub struct AudioEngine {
     playing: Arc<AtomicBool>,
     errors: Arc<Mutex<Option<String>>>,
     meter: Arc<AudioMeter>,
+    diagnostics: Arc<AudioRuntimeCounters>,
     scheduler: Arc<(Mutex<SchedulerState>, Condvar)>,
     worker: Option<JoinHandle<()>>,
     sample_rate: u32,
@@ -600,6 +657,7 @@ struct OutputResources {
     device_frames: Arc<AtomicU64>,
     errors: Arc<Mutex<Option<String>>>,
     meter: Arc<AudioMeter>,
+    diagnostics: Arc<AudioRuntimeCounters>,
 }
 
 impl AudioEngine {
@@ -614,8 +672,10 @@ impl AudioEngine {
         let sample_rate = config.sample_rate.0;
         let device_frames = Arc::new(AtomicU64::new(0));
         let source_tick = Arc::new(AtomicI64::new(0));
+        let diagnostics = Arc::new(AudioRuntimeCounters::default());
         let shared = Arc::new(Mutex::new(Shared {
             device_frames: Arc::clone(&device_frames),
+            diagnostics: Arc::clone(&diagnostics),
             ..Shared::default()
         }));
         let playing = Arc::new(AtomicBool::new(false));
@@ -627,6 +687,7 @@ impl AudioEngine {
             device_frames: Arc::clone(&device_frames),
             errors: Arc::clone(&errors),
             meter: Arc::clone(&meter),
+            diagnostics: Arc::clone(&diagnostics),
         };
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => {
@@ -662,6 +723,7 @@ impl AudioEngine {
             playing,
             errors,
             meter,
+            diagnostics,
             scheduler,
             worker: Some(worker),
             sample_rate,
@@ -771,6 +833,11 @@ impl AudioEngine {
     /// Peak levels from the samples actually consumed by the output callback.
     pub fn meter_levels(&self) -> (f32, f32) {
         self.meter.load()
+    }
+
+    /// Returns cumulative callback and decode-worker diagnostics without blocking.
+    pub fn runtime_diagnostics(&self) -> AudioRuntimeDiagnostics {
+        self.diagnostics.snapshot()
     }
 
     /// Source-media position of samples actually consumed by the native device callback.
@@ -914,6 +981,7 @@ where
     let callback_device_frames = Arc::clone(&resources.device_frames);
     let callback_errors = Arc::clone(&resources.errors);
     let callback_meter = Arc::clone(&resources.meter);
+    let callback_diagnostics = Arc::clone(&resources.diagnostics);
     let sample_rate = config.sample_rate.0;
     device
         .build_output_stream(
@@ -921,11 +989,10 @@ where
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 let is_playing = callback_playing.load(Ordering::Acquire);
                 let Ok(mut state) = callback_shared.try_lock() else {
-                    advance_device_clock(
-                        &callback_device_frames,
-                        is_playing,
-                        data.len() / channels.max(1),
-                    );
+                    callback_diagnostics.record_callback_lock_failure();
+                    let frames = data.len() / channels.max(1);
+                    callback_diagnostics.record_underrun_frames(is_playing, frames);
+                    advance_device_clock(&callback_device_frames, is_playing, frames);
                     callback_meter.clear();
                     for sample in data.iter_mut() {
                         *sample = T::from_sample(0.0);
@@ -934,8 +1001,12 @@ where
                 };
                 let mut peak_left = 0.0_f32;
                 let mut peak_right = 0.0_f32;
+                let mut underrun_frames = 0_usize;
                 for frame in data.chunks_mut(channels) {
-                    let (left, right, _) = state.pop_stereo_frame(is_playing, sample_rate);
+                    let (left, right, audible) = state.pop_stereo_frame(is_playing, sample_rate);
+                    if !audible {
+                        underrun_frames += 1;
+                    }
                     peak_left = peak_left.max(left.abs());
                     peak_right = peak_right.max(right.abs());
                     for (channel, sample) in frame.iter_mut().enumerate() {
@@ -950,6 +1021,7 @@ where
                     // observe a distinct timeline tick for every device sample.
                     advance_device_clock(&callback_device_frames, is_playing, 1);
                 }
+                callback_diagnostics.record_underrun_frames(is_playing, underrun_frames);
                 callback_meter.store(peak_left, peak_right);
             },
             move |error| {
@@ -2078,6 +2150,46 @@ mod tests {
     }
 
     #[test]
+    fn runtime_diagnostics_batch_playing_underruns_and_ignore_paused_callbacks() {
+        let diagnostics = AudioRuntimeCounters::default();
+        diagnostics.record_callback_lock_failure();
+        diagnostics.record_underrun_frames(false, 480);
+        diagnostics.record_underrun_frames(true, 480);
+        diagnostics.record_underrun_frames(true, 0);
+        diagnostics.record_late_discard(12);
+
+        assert_eq!(
+            diagnostics.snapshot(),
+            AudioRuntimeDiagnostics {
+                callback_lock_failures: 1,
+                underrun_device_frames: 480,
+                late_decoded_frames_discarded: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn partial_lane_underrun_counts_only_silent_device_frames() {
+        let mut state = Shared {
+            lanes: test_lane(VecDeque::from([0.25, -0.25])),
+            ..Default::default()
+        };
+        let diagnostics = Arc::clone(&state.diagnostics);
+        let mut silent_frames = 0;
+        for _ in 0..3 {
+            let (_, _, audible) = state.pop_stereo_frame(true, 48_000);
+            silent_frames += usize::from(!audible);
+        }
+        diagnostics.record_underrun_frames(true, silent_frames);
+
+        assert_eq!(
+            diagnostics.snapshot().underrun_device_frames,
+            2,
+            "one ready frame must not turn a partially ready callback into a full underrun"
+        );
+    }
+
+    #[test]
     fn device_clock_tracks_native_callback_and_marks_underrun_silence() {
         let mut state = Shared {
             lanes: test_lane(VecDeque::from([0.25, -0.25, 0.5, -0.5])),
@@ -2219,6 +2331,10 @@ mod tests {
         let lane = state.lanes.get(&key).unwrap();
         assert_eq!(lane.samples, VecDeque::from([0.3, -0.3, 0.4, -0.4]));
         assert_eq!(lane.decoded_frames, 4);
+        assert_eq!(
+            state.diagnostics.snapshot().late_decoded_frames_discarded,
+            2
+        );
     }
 
     #[test]
