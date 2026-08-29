@@ -14,6 +14,7 @@ use std::{
         atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 const FORWARD_REUSE_TICKS: i64 = 1_500_000;
@@ -27,7 +28,8 @@ const CALLBACK_LOCK_TRY_ATTEMPTS: usize = 64;
 
 /// Cumulative, non-blocking diagnostics from the native audio transport.
 ///
-/// `callback_lock_failures` counts output callbacks that could not acquire the
+/// `output_callback_cpu_timing` aggregates elapsed CPU-side time spent in each
+/// output callback. `callback_lock_failures` counts output callbacks that could not acquire the
 /// mixer lock and therefore produced silence. `underrun_device_frames` counts
 /// playing device frames for which every active lane was empty, including an
 /// entire lock-contended callback. Paused callbacks never contribute to the
@@ -36,13 +38,26 @@ const CALLBACK_LOCK_TRY_ATTEMPTS: usize = 64;
 /// advanced past them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AudioRuntimeDiagnostics {
+    pub output_callback_cpu_timing: AudioCallbackCpuTiming,
     pub callback_lock_failures: u64,
     pub underrun_device_frames: u64,
     pub late_decoded_frames_discarded: u64,
 }
 
+/// Cumulative CPU-side timing for native output callbacks, in nanoseconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AudioCallbackCpuTiming {
+    pub samples: u64,
+    pub total_nanos: u64,
+    pub max_nanos: u64,
+}
+
 #[derive(Default)]
 struct AudioRuntimeCounters {
+    output_callback_cpu_sequence: AtomicU64,
+    output_callback_cpu_samples: AtomicU64,
+    output_callback_cpu_total_nanos: AtomicU64,
+    output_callback_cpu_max_nanos: AtomicU64,
     callback_lock_failures: AtomicU64,
     underrun_device_frames: AtomicU64,
     late_decoded_frames_discarded: AtomicU64,
@@ -51,12 +66,58 @@ struct AudioRuntimeCounters {
 impl AudioRuntimeCounters {
     fn snapshot(&self) -> AudioRuntimeDiagnostics {
         AudioRuntimeDiagnostics {
+            output_callback_cpu_timing: self.output_callback_cpu_timing_snapshot(),
             callback_lock_failures: self.callback_lock_failures.load(Ordering::Acquire),
             underrun_device_frames: self.underrun_device_frames.load(Ordering::Acquire),
             late_decoded_frames_discarded: self
                 .late_decoded_frames_discarded
                 .load(Ordering::Acquire),
         }
+    }
+
+    fn output_callback_cpu_timing_snapshot(&self) -> AudioCallbackCpuTiming {
+        loop {
+            let sequence_before = self.output_callback_cpu_sequence.load(Ordering::Acquire);
+            if sequence_before % 2 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let timing = AudioCallbackCpuTiming {
+                samples: self.output_callback_cpu_samples.load(Ordering::Relaxed),
+                total_nanos: self.output_callback_cpu_total_nanos.load(Ordering::Relaxed),
+                max_nanos: self.output_callback_cpu_max_nanos.load(Ordering::Relaxed),
+            };
+            let sequence_after = self.output_callback_cpu_sequence.load(Ordering::Acquire);
+            if sequence_before == sequence_after {
+                return timing;
+            }
+        }
+    }
+
+    fn record_output_callback_cpu_nanos(&self, nanos: u64) {
+        // The CPAL output callback is this tuple's sole writer.
+        self.output_callback_cpu_sequence
+            .fetch_add(1, Ordering::AcqRel);
+        let samples = self
+            .output_callback_cpu_samples
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        let total_nanos = self
+            .output_callback_cpu_total_nanos
+            .load(Ordering::Relaxed)
+            .saturating_add(nanos);
+        let max_nanos = self
+            .output_callback_cpu_max_nanos
+            .load(Ordering::Relaxed)
+            .max(nanos);
+        self.output_callback_cpu_samples
+            .store(samples, Ordering::Relaxed);
+        self.output_callback_cpu_total_nanos
+            .store(total_nanos, Ordering::Relaxed);
+        self.output_callback_cpu_max_nanos
+            .store(max_nanos, Ordering::Relaxed);
+        self.output_callback_cpu_sequence
+            .fetch_add(1, Ordering::Release);
     }
 
     fn record_callback_lock_failure(&self) {
@@ -1005,6 +1066,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                let callback_start = Instant::now();
                 let is_playing = callback_playing.load(Ordering::Acquire);
                 let Some(mut state) = try_lock_callback(&callback_shared) else {
                     callback_diagnostics.record_callback_lock_failure();
@@ -1015,6 +1077,13 @@ where
                     for sample in data.iter_mut() {
                         *sample = T::from_sample(0.0);
                     }
+                    callback_diagnostics.record_output_callback_cpu_nanos(
+                        callback_start
+                            .elapsed()
+                            .as_nanos()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                    );
                     return;
                 };
                 let mut peak_left = 0.0_f32;
@@ -1041,6 +1110,13 @@ where
                 }
                 callback_diagnostics.record_underrun_frames(is_playing, underrun_frames);
                 callback_meter.store(peak_left, peak_right);
+                callback_diagnostics.record_output_callback_cpu_nanos(
+                    callback_start
+                        .elapsed()
+                        .as_nanos()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                );
             },
             move |error| {
                 *callback_errors.lock().expect("audio error lock") = Some(error.to_string());
@@ -2179,9 +2255,83 @@ mod tests {
         assert_eq!(
             diagnostics.snapshot(),
             AudioRuntimeDiagnostics {
+                output_callback_cpu_timing: AudioCallbackCpuTiming::default(),
                 callback_lock_failures: 1,
                 underrun_device_frames: 480,
                 late_decoded_frames_discarded: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn output_callback_cpu_timing_is_empty_by_default() {
+        assert_eq!(
+            AudioRuntimeCounters::default()
+                .snapshot()
+                .output_callback_cpu_timing,
+            AudioCallbackCpuTiming::default()
+        );
+    }
+
+    #[test]
+    fn output_callback_cpu_timing_records_total_and_max_with_saturation() {
+        let diagnostics = AudioRuntimeCounters::default();
+        diagnostics.record_output_callback_cpu_nanos(7);
+        diagnostics.record_output_callback_cpu_nanos(11);
+
+        assert_eq!(
+            diagnostics.snapshot().output_callback_cpu_timing,
+            AudioCallbackCpuTiming {
+                samples: 2,
+                total_nanos: 18,
+                max_nanos: 11,
+            }
+        );
+
+        diagnostics
+            .output_callback_cpu_total_nanos
+            .store(u64::MAX - 2, Ordering::Relaxed);
+        diagnostics
+            .output_callback_cpu_samples
+            .store(u64::MAX, Ordering::Relaxed);
+        diagnostics.record_output_callback_cpu_nanos(3);
+
+        assert_eq!(
+            diagnostics.snapshot().output_callback_cpu_timing,
+            AudioCallbackCpuTiming {
+                samples: u64::MAX,
+                total_nanos: u64::MAX,
+                max_nanos: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn output_callback_cpu_timing_snapshots_are_coherent_during_writes() {
+        const RECORDS: u64 = 100_000;
+        const NANOS_PER_RECORD: u64 = 3;
+
+        let diagnostics = Arc::new(AudioRuntimeCounters::default());
+        let writer_diagnostics = Arc::clone(&diagnostics);
+        let writer = thread::spawn(move || {
+            for _ in 0..RECORDS {
+                writer_diagnostics.record_output_callback_cpu_nanos(NANOS_PER_RECORD);
+            }
+        });
+
+        while !writer.is_finished() {
+            let timing = diagnostics.snapshot().output_callback_cpu_timing;
+            assert_eq!(timing.total_nanos, timing.samples * NANOS_PER_RECORD);
+            assert!(timing.max_nanos <= NANOS_PER_RECORD);
+        }
+        writer.join().expect("timing writer should finish");
+
+        assert_eq!(
+            diagnostics.snapshot().output_callback_cpu_timing,
+            AudioCallbackCpuTiming {
+                samples: RECORDS,
+                total_nanos: RECORDS * NANOS_PER_RECORD,
+                max_nanos: NANOS_PER_RECORD,
             }
         );
     }

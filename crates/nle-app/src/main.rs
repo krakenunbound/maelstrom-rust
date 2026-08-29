@@ -1835,6 +1835,7 @@ struct SurfaceSubmissionReport {
     display_refresh_millihertz: Option<u32>,
     decoder_stage_timings: DecoderStageTimingsReport,
     viewer_stage_timings: ViewerStageTimingsReport,
+    audio_stage_timings: AudioStageTimingsReport,
 }
 
 /// CPU/API submission timing only; it does not measure GPU completion or scanout.
@@ -1968,6 +1969,41 @@ impl DecoderStageTimingsReport {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct AudioStageTimingReport {
+    samples: u64,
+    total_ms: f64,
+    mean_ms: f64,
+    max_ms: f64,
+}
+
+impl From<nle_audio::AudioCallbackCpuTiming> for AudioStageTimingReport {
+    fn from(timing: nle_audio::AudioCallbackCpuTiming) -> Self {
+        let total_ms = timing.total_nanos as f64 / 1_000_000.0;
+        Self {
+            samples: timing.samples,
+            total_ms,
+            mean_ms: if timing.samples == 0 {
+                0.0
+            } else {
+                total_ms / timing.samples as f64
+            },
+            max_ms: timing.max_nanos as f64 / 1_000_000.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct AudioStageTimingsReport {
+    output_callback_cpu: AudioStageTimingReport,
+}
+
+impl AudioStageTimingsReport {
+    fn fully_observed(&self) -> bool {
+        self.output_callback_cpu.samples > 0
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RendererReport {
     name: String,
@@ -1991,6 +2027,7 @@ struct SurfaceReportEnvironment {
     display_refresh_millihertz: Option<u32>,
     decoder_stage_timings: DecoderStageTimingsReport,
     viewer_stage_timings: ViewerStageTimingsReport,
+    audio_stage_timings: AudioStageTimingsReport,
 }
 
 fn surface_report_backends_ready(
@@ -2011,6 +2048,13 @@ fn surface_report_stage_timings_ready(
 fn surface_report_viewer_stage_timings_ready(
     full_media_smoke: bool,
     timings: ViewerStageTimingsReport,
+) -> bool {
+    !full_media_smoke || timings.fully_observed()
+}
+
+fn surface_report_audio_stage_timings_ready(
+    full_media_smoke: bool,
+    timings: AudioStageTimingsReport,
 ) -> bool {
     !full_media_smoke || timings.fully_observed()
 }
@@ -2437,7 +2481,7 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 2,
+            schema_version: 3,
             samples: metrics.samples,
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
@@ -2462,6 +2506,7 @@ impl SurfaceSubmissionProbe {
             display_refresh_millihertz: environment.display_refresh_millihertz,
             decoder_stage_timings: environment.decoder_stage_timings,
             viewer_stage_timings: environment.viewer_stage_timings,
+            audio_stage_timings: environment.audio_stage_timings,
         };
         tx.try_send(report).is_ok()
     }
@@ -3297,6 +3342,18 @@ impl App {
         if !surface_report_viewer_stage_timings_ready(full_media_smoke, viewer_stage_timings) {
             return;
         }
+        let audio_stage_timings = AudioStageTimingsReport {
+            output_callback_cpu: self
+                .audio_engine
+                .as_ref()
+                .map(nle_audio::AudioEngine::runtime_diagnostics)
+                .unwrap_or_default()
+                .output_callback_cpu_timing
+                .into(),
+        };
+        if !surface_report_audio_stage_timings_ready(full_media_smoke, audio_stage_timings) {
+            return;
+        }
         let Some(renderer) = self.renderer_report.clone() else {
             return;
         };
@@ -3320,6 +3377,7 @@ impl App {
                 .and_then(|monitor| monitor.refresh_rate_millihertz()),
             decoder_stage_timings,
             viewer_stage_timings,
+            audio_stage_timings,
         };
         let published = self
             .surface_submission_probe
@@ -7010,10 +7068,18 @@ mod tests {
                         max_ms: 3.0,
                     },
                 },
+                audio_stage_timings: AudioStageTimingsReport {
+                    output_callback_cpu: nle_audio::AudioCallbackCpuTiming {
+                        samples: 2,
+                        total_nanos: 5_000_000,
+                        max_nanos: 4_000_000,
+                    }
+                    .into(),
+                },
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.schema_version, 3);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
@@ -7031,6 +7097,13 @@ mod tests {
             report.viewer_stage_timings.compositor_encode_cpu.max_ms,
             3.0
         );
+        assert_eq!(report.audio_stage_timings.output_callback_cpu.samples, 2);
+        assert!(
+            (report.audio_stage_timings.output_callback_cpu.total_ms - 5.0).abs() < f64::EPSILON
+        );
+        assert!(
+            (report.audio_stage_timings.output_callback_cpu.mean_ms - 2.5).abs() < f64::EPSILON
+        );
         let json = serde_json::to_value(&report).expect("surface report serializes");
         assert_eq!(
             json.pointer("/viewer_stage_timings/upload_cpu/samples"),
@@ -7039,6 +7112,10 @@ mod tests {
         assert_eq!(
             json.pointer("/surface_present_call_cpu_p95_ms"),
             Some(&serde_json::Value::from(1.0))
+        );
+        assert_eq!(
+            json.pointer("/audio_stage_timings/output_callback_cpu/max_ms"),
+            Some(&serde_json::Value::from(4.0))
         );
     }
 
@@ -7080,6 +7157,19 @@ mod tests {
                     ..Default::default()
                 },
                 compositor_encode_cpu: ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+            }
+        ));
+
+        let empty = AudioStageTimingsReport::default();
+        assert!(surface_report_audio_stage_timings_ready(false, empty));
+        assert!(!surface_report_audio_stage_timings_ready(true, empty));
+        assert!(surface_report_audio_stage_timings_ready(
+            true,
+            AudioStageTimingsReport {
+                output_callback_cpu: AudioStageTimingReport {
                     samples: 1,
                     ..Default::default()
                 },

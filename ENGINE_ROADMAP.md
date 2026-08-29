@@ -102,8 +102,8 @@ Build the evidence harness before adding engine complexity.
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,
       scale, RGBA packing, and the active worker request. Viewer upload, changed-composition encode,
-      and presentation-call CPU boundaries are also reported. GPU completion/scanout and audio mix
-      timing remain open.
+      presentation-call CPU boundaries, and audio output-callback timing are also reported. This
+      item remains open for GPU completion/scanout.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
 
 Exit gate:

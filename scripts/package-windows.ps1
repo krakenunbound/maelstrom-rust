@@ -6,6 +6,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Test-JsonIntegerValue {
+    param($Value)
+    return $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Test-JsonFiniteNumber {
+    param($Value)
+    $numeric = (Test-JsonIntegerValue $Value) -or $Value -is [single] -or
+        $Value -is [double] -or $Value -is [decimal]
+    if (-not $numeric) { return $false }
+    $doubleValue = [double]$Value
+    return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
+}
 $savedProcessPath = $env:PATH
 $savedFfmpegDir = $env:FFMPEG_DIR
 $savedLibClangPath = $env:LIBCLANG_PATH
@@ -226,7 +243,7 @@ try {
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
         'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings',
-        'viewer_stage_timings'
+        'viewer_stage_timings', 'audio_stage_timings'
     )) {
         if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
             throw "Surface submission probe omitted $property."
@@ -235,7 +252,7 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 2) {
+    if ($surfaceSubmission.schema_version -ne 3) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     if ($surfaceSubmission.cpu_p95_ms -lt 0 -or $surfaceSubmission.cpu_p95_ms -gt 8.0) {
@@ -290,6 +307,45 @@ try {
             if ([Math]::Abs([double]$stage.mean_ms - $expectedMean) -gt $meanTolerance) {
                 throw "Decoder timing stage $stageName has an inconsistent mean."
             }
+        }
+    }
+    foreach ($stageName in @('output_callback_cpu')) {
+        $stage = $surfaceSubmission.audio_stage_timings.$stageName
+        if ($null -eq $stage) { throw "Surface submission probe omitted audio stage $stageName." }
+        foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {
+            if ($stage.PSObject.Properties.Name -notcontains $property) {
+                throw "Audio timing stage $stageName omitted $property."
+            }
+            if ($property -eq 'samples') {
+                if (-not (Test-JsonIntegerValue $stage.$property) -or $stage.$property -lt 0) {
+                    throw "Audio timing stage $stageName returned invalid unsigned integer ${property}: $($stage.$property)."
+                }
+            } elseif (-not (Test-JsonFiniteNumber $stage.$property)) {
+                throw "Audio timing stage $stageName returned invalid numeric ${property}: $($stage.$property)."
+            }
+            $value = [double]$stage.$property
+            if ($value -lt 0) {
+                throw "Audio timing stage $stageName returned invalid ${property}: $value."
+            }
+        }
+        if ($stage.max_ms -lt $stage.mean_ms) {
+            throw "Audio timing stage $stageName has max below mean."
+        }
+        if ($stage.samples -eq 0 -and ($stage.total_ms -ne 0 -or $stage.mean_ms -ne 0 -or $stage.max_ms -ne 0)) {
+            throw "Audio timing stage $stageName reported durations without samples."
+        }
+        if ($stage.samples -gt 0) {
+            if ($stage.total_ms -lt $stage.max_ms) {
+                throw "Audio timing stage $stageName has total below max."
+            }
+            $expectedMean = [double]$stage.total_ms / [double]$stage.samples
+            $meanTolerance = [Math]::Max(0.000001, [Math]::Abs($expectedMean) * 0.000000001)
+            if ([Math]::Abs([double]$stage.mean_ms - $expectedMean) -gt $meanTolerance) {
+                throw "Audio timing stage $stageName has an inconsistent mean."
+            }
+        }
+        if ($stage.samples -lt 1) {
+            throw "Full media smoke did not exercise audio timing stage $stageName."
         }
     }
     foreach ($stageName in @('upload_cpu', 'compositor_encode_cpu')) {

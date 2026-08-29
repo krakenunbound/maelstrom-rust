@@ -1,6 +1,6 @@
 # Performance reports
 
-Maelstrom's existing surface-submission probe writes a schema-version 2 JSON report when
+Maelstrom's existing surface-submission probe writes a schema-version 3 JSON report when
 `MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. It measures a fixed 120-frame window;
 report serialization and disk IO remain on the existing one-shot worker.
 
@@ -22,16 +22,20 @@ The report records:
   `viewer_stage_timings.compositor_encode_cpu` times only callbacks that actually encode changed
   composition work. Each has a fixed 120-sample p95/max snapshot. `surface_present_call_cpu_p95_ms`
   brackets only the `frame.present()` API call; the existing `cpu_p95_ms` ends before that call.
+- native audio output-callback CPU timing at `audio_stage_timings.output_callback_cpu`, with sample
+  count, total, mean, and maximum milliseconds (no p95). It covers callback CPU through lock retry,
+  mix, effects, conversion, and meter work, or the silence fallback when the callback cannot mix.
 
 This is CPU and submission-cadence evidence. It does not claim scanout, GPU-completion, or end-to-end
-display latency. The timing stages likewise end at their named CPU boundaries; the report does not
-claim GPU upload/compositing completion, GPU execution, or presentation/scanout. A standalone
+display latency. The timing stages likewise end at their named CPU boundaries; the audio callback
+timing excludes device/DAC work and GPU/display completion, and the report does not claim GPU
+upload/compositing completion, GPU execution, or presentation/scanout. A standalone
 cadence probe may report an empty decoder list and `encoder_backend: "not_observed"` when that run
 did not exercise media. The full package media smoke defers the report until a decoder has produced
 a frame, all applicable decoder timing stages have completed samples, successful native viewer
-upload and changed-composition samples exist, and an encoder process has actually started. Its
-backend and timing fields are therefore evidence rather than hardware guesses. Project files never
-contain this session-only metadata.
+upload and changed-composition samples exist, native audio output callbacks have completed samples,
+and an encoder process has actually started. Its backend and timing fields are therefore evidence
+rather than hardware guesses. Project files never contain this session-only metadata.
 
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
 `"Unknown"` are not used as hidden unavailable-value sentinels.
