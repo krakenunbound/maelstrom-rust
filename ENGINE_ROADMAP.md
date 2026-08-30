@@ -82,7 +82,10 @@ Build the evidence harness before adding engine complexity.
 
 - [x] Add a versioned local media-fixture manifest with checksum, codec, rate, dimensions, channel
       layout, duration, GOP pattern, and expected failure behavior. See `docs/media-fixtures.md`.
-- [x] Add generated fixtures for tests that cannot depend on redistributable media.
+- [x] Add generated fixtures for tests that cannot depend on redistributable media, including
+      irregular VFR presentation timing and an MPEG-2 transport-stream fixture with observable
+      B-frame packet reordering. This corpus gate validates fixture metadata and probe evidence;
+      it does not establish preview or export behavior.
 - [x] Add an opt-in real-media corpus runner for large local files.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
@@ -272,8 +275,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       forward and decreasing playheads, carries the same PTS/local span into immutable preview
       requests, and holds the final indexed frame from the exclusive source out-point at both 30 and
       30000/1001 project rates. Empty indexes retain CFR fallback. The probe command contract is
-      regression-locked to decoded best-effort timestamps, and a generated reordered B-frame VFR
-      source exercises that scan in decoded presentation order. Export now retains decoder keyframe
+      regression-locked to decoded best-effort timestamps, and an opt-in generated reordered B-frame
+      VFR source exercises that scan in decoded presentation order, normalizes its nonzero stream
+      start to local source time, and gates waveform, software decode, and preview floor/hold
+      addressing at every presentation boundary. Export now retains decoder keyframe
       preroll, applies floor sampling before resetting clip-local time, and bounds the graph at the
       planned source range. A real five-color `0/40/110/150/240 ms` source trimmed to `100..240 ms`
       renders source identities `40/110/150/150 ms` at both 30 and 30000/1001 project rates, proving

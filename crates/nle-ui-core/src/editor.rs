@@ -4631,7 +4631,9 @@ pub fn classify_path(path: &Path) -> MediaKind {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "mp4" | "mov" | "mkv" | "avi" | "webm" | "mxf" | "m4v" => MediaKind::Video,
+        "mp4" | "mov" | "mkv" | "avi" | "webm" | "mxf" | "m4v" | "ts" | "mts" | "m2ts" => {
+            MediaKind::Video
+        }
         "wav" | "mp3" | "aiff" | "aif" | "flac" | "aac" | "m4a" | "ogg" => MediaKind::Audio,
         "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff" | "bmp" | "gif" | "exr" => {
             MediaKind::Image
@@ -15681,6 +15683,13 @@ mod tests {
         assert_eq!(editor.media[0].kind, MediaKind::Video);
         assert_eq!(editor.media[1].kind, MediaKind::Audio);
         assert_eq!(editor.selected_media, Some(1));
+    }
+
+    #[test]
+    fn transport_stream_extensions_are_classified_as_video() {
+        for path in ["fixture.ts", "fixture.MTS", "fixture.m2ts"] {
+            assert_eq!(classify_path(Path::new(path)), MediaKind::Video, "{path}");
+        }
     }
 
     #[test]

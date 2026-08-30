@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "artifact_root": "artifacts/media-fixtures",
   "fixtures": [
     {
@@ -17,7 +17,9 @@
         "width": 320,
         "height": 180,
         "gop": 30,
-        "timing": { "vfr": false }
+        "has_b_frames": 0,
+        "keyframe_positions": [0, 30],
+        "timing": { "vfr": false, "reordered": false }
       },
       "audio": { "codec": "aac", "sample_rate": 48000, "channels": 2, "layout": "stereo" },
       "duration_seconds": 2.002,
@@ -38,8 +40,11 @@
         "width": 160,
         "height": 90,
         "gop": 5,
+        "has_b_frames": 0,
+        "keyframe_positions": [0],
         "timing": {
           "vfr": true,
+          "reordered": false,
           "frame_count": 5,
           "first_pts_us": 0,
           "last_pts_us": 240000,
@@ -48,6 +53,38 @@
         }
       },
       "duration_seconds": 0.241,
+      "expected": "success"
+    },
+    {
+      "id": "vfr-reordered-mpeg2-ts",
+      "path": "vfr-reordered-mpeg2.ts",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 filter; deliberately selected frames with MPEG-2 B-frame reordering; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "testsrc2=size=160x90:rate=24; select frames 0,1,3,4,6,8,11,12; -fps_mode vfr; mpeg2video TS without audio; q:v 8, GOP 8, -bf 2, bitexact flags",
+      "sha256": "E84F715ECD3832183079655F7FCC160C0AB97E4A286BEECD666F5351A1BD9A1E",
+      "byte_size": 15980,
+      "container": "mpegts",
+      "video": {
+        "codec": "mpeg2video",
+        "rate": "24/1",
+        "width": 160,
+        "height": 90,
+        "gop": 8,
+        "has_b_frames": 1,
+        "keyframe_positions": [0],
+        "picture_types": ["I", "B", "B", "P", "B", "B", "P", "P"],
+        "timing": {
+          "vfr": true,
+          "reordered": true,
+          "frame_count": 8,
+          "first_pts_us": 41667,
+          "last_pts_us": 541667,
+          "expected_gap_us": [41666, 41667, 83333, 83334, 125000],
+          "pts_sha256": "1C1B311562170ABA397F8FDDC3E8C52F884ACAF9C34A50E0C8D791810EB550B2",
+          "packet_pts_sha256": "D810B095F6508A18D5CDE0F7F7A94EE526C235A18E870EAE2FEF2D79345D60FC"
+        }
+      },
+      "duration_seconds": 0.541667,
       "expected": "success"
     },
     {

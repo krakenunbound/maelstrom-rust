@@ -5844,8 +5844,9 @@ impl App {
                     .add_filter(
                         "Media",
                         &[
-                            "mp4", "mov", "mkv", "avi", "webm", "mp3", "wav", "flac", "aac", "m4a",
-                            "png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif", "exr",
+                            "mp4", "mov", "mkv", "avi", "webm", "ts", "mts", "m2ts", "mp3", "wav",
+                            "flac", "aac", "m4a", "png", "jpg", "jpeg", "webp", "tif", "tiff",
+                            "bmp", "gif", "exr",
                         ],
                     )
                     .pick_files()
@@ -12320,6 +12321,69 @@ mod tests {
             (40_000, 40_000, Some(70_000)),
             (40_001, 40_000, Some(70_000)),
             (240_001, 240_000, None),
+        ] {
+            app.editor.set_playhead(nle_timeline::Tick(logical_tick));
+            let source = preview_request(&app.editor).sources[0].expect("VFR preview source");
+            assert_eq!(source.source_tick, expected_decode_tick);
+            assert_eq!(source.source_frame_rate, None);
+            assert_eq!(source.source_frame_duration_tick, expected_duration);
+        }
+    }
+
+    #[test]
+    fn supplied_reordered_vfr_fixture_routes_preview_to_local_presentation_boundaries() {
+        let Some(path) = std::env::var_os("MAELSTROM_REORDERED_VFR_TEST_MEDIA").map(PathBuf::from)
+        else {
+            return;
+        };
+        let metadata =
+            nle_waveform::probe_media_metadata(&path).expect("probe reordered VFR fixture");
+        let frame_timing =
+            nle_waveform::analyze_frame_timing(&path).expect("scan reordered VFR fixture");
+        let nle_waveform::FrameTiming::Variable(index) = &frame_timing else {
+            panic!("reordered VFR fixture was not classified as variable");
+        };
+        assert_eq!(
+            index.pts(),
+            &[
+                0, 41_666, 125_000, 166_666, 250_000, 333_333, 458_333, 500_000
+            ]
+        );
+
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths([path]);
+        assert!(app.editor.add_selected_to_timeline());
+        app.media_analysis_tx
+            .send(MediaAnalysisResult {
+                project_epoch: app.media_analysis_epoch,
+                media_id: 1,
+                is_still: false,
+                metadata: Ok(metadata),
+                frame_timing: Ok(frame_timing),
+                waveform: Err("fixture intentionally has no audio".to_owned()),
+                video_strip: Err("strip is irrelevant to timing proof".to_owned()),
+            })
+            .expect("queue reordered VFR analysis");
+        app.poll_media_analysis();
+
+        for (logical_tick, expected_decode_tick, expected_duration) in [
+            (0, 0, Some(41_666)),
+            (41_665, 0, Some(41_666)),
+            (41_666, 41_666, Some(83_334)),
+            (124_999, 41_666, Some(83_334)),
+            (125_000, 125_000, Some(41_666)),
+            (166_665, 125_000, Some(41_666)),
+            (166_666, 166_666, Some(83_334)),
+            (249_999, 166_666, Some(83_334)),
+            (250_000, 250_000, Some(83_333)),
+            (333_332, 250_000, Some(83_333)),
+            (333_333, 333_333, Some(125_000)),
+            (458_332, 333_333, Some(125_000)),
+            (458_333, 458_333, Some(41_667)),
+            (499_999, 458_333, Some(41_667)),
+            (500_000, 500_000, None),
+            (500_001, 500_000, None),
+            (541_666, 500_000, None),
         ] {
             app.editor.set_playhead(nle_timeline::Tick(logical_tick));
             let source = preview_request(&app.editor).sources[0].expect("VFR preview source");

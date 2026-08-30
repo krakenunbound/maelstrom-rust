@@ -29,6 +29,9 @@ use nle_cache::{FrameCache, FrameKey, FrameValue};
 const MAX_DIMENSION: u32 = 4_096;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const FORWARD_REUSE_TICKS: i64 = 5_000_000;
+// B-frame packet DTS can precede the requested presentation timestamp. Keep a bounded
+// keyframe lookbehind so stream-specific seeks retain enough decoder preroll.
+const SEEK_PREROLL_TICKS: i64 = 5_000_000;
 // FFmpeg timestamps are rescaled into microseconds with integer rounding. A 30 fps frame can
 // therefore decode as 33_333 µs while the project-side exact rational boundary is 33_334 µs.
 // This is representational error, not a preroll allowance: never accept more than one µs early.
@@ -2777,6 +2780,31 @@ fn source_tick_reaches_target(source_tick: i64, target_tick: i64) -> bool {
     source_tick.saturating_add(SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS) >= target_tick
 }
 
+fn stream_start_time_microseconds(stream_start_time: i64, time_base: ffmpeg::Rational) -> i64 {
+    if stream_start_time == ffmpeg::ffi::AV_NOPTS_VALUE {
+        0
+    } else {
+        stream_start_time.rescale(time_base, (1, 1_000_000))
+    }
+}
+
+fn local_source_tick(decoded_timestamp: i64, stream_start_time_microseconds: i64) -> i64 {
+    decoded_timestamp
+        .saturating_sub(stream_start_time_microseconds)
+        .max(0)
+}
+
+fn seek_stream_timestamp(
+    local_target_tick: i64,
+    stream_start_time_microseconds: i64,
+    time_base: ffmpeg::Rational,
+) -> i64 {
+    local_target_tick
+        .saturating_add(stream_start_time_microseconds)
+        .saturating_sub(SEEK_PREROLL_TICKS)
+        .rescale((1, 1_000_000), time_base)
+}
+
 struct StickyMonitor {
     // Held for the full lifetime of the libav contexts. Every erase, reset, failed open, and
     // hardware-to-software replacement therefore releases capacity through RAII.
@@ -2785,6 +2813,7 @@ struct StickyMonitor {
     input: ffmpeg::format::context::Input,
     stream_index: usize,
     time_base: ffmpeg::Rational,
+    stream_start_time_microseconds: i64,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ScalingContext>,
     scaler_input: Option<(Pixel, u32, u32)>,
@@ -2817,6 +2846,8 @@ impl StickyMonitor {
             .ok_or_else(|| "monitor media has no video stream".to_owned())?;
         let stream_index = stream.index();
         let time_base = stream.time_base();
+        let stream_start_time_microseconds =
+            stream_start_time_microseconds(stream.start_time(), time_base);
         let (decoder, backend) = open_video_decoder(&stream, request.acceleration)?;
         let fallback_reason = fallback_reason_for_open(request.acceleration, backend);
         tracing::info!(
@@ -2853,6 +2884,7 @@ impl StickyMonitor {
             input,
             stream_index,
             time_base,
+            stream_start_time_microseconds,
             decoder,
             scaler,
             scaler_input,
@@ -2937,11 +2969,27 @@ impl StickyMonitor {
         let can_continue = self.last_source_tick.is_some_and(|last| {
             target > last && target.saturating_sub(last) <= FORWARD_REUSE_TICKS
         });
-        if !can_continue {
-            let target_ts = target.rescale((1, 1_000_000), self.time_base);
-            self.input
-                .seek(target_ts, ..target_ts)
-                .map_err(|error| format!("could not seek monitor media: {error}"))?;
+        let can_read_from_open_start = self.last_source_tick.is_none() && target == 0;
+        if !can_continue && !can_read_from_open_start {
+            // Select the decoded video stream explicitly. MPEG-TS can expose a default-stream
+            // seek point after the only usable preroll keyframe; a stream-specific timestamp
+            // keeps that keyframe eligible for B-frame reconstruction.
+            let target_ts =
+                seek_stream_timestamp(target, self.stream_start_time_microseconds, self.time_base);
+            let seek_result = unsafe {
+                ffmpeg::ffi::av_seek_frame(
+                    self.input.as_mut_ptr(),
+                    self.stream_index as i32,
+                    target_ts,
+                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                )
+            };
+            if seek_result < 0 {
+                return Err(format!(
+                    "could not seek monitor media: {}",
+                    ffmpeg::Error::from(seek_result)
+                ));
+            }
             {
                 let _timer = StageTimer::new(&stage_timings.decoder_calls);
                 self.decoder.flush();
@@ -3004,6 +3052,9 @@ impl StickyMonitor {
                     .timestamp()
                     .or_else(|| decoded.pts())
                     .map(|timestamp| timestamp.rescale(time_base, (1, 1_000_000)))
+                    .map(|timestamp| {
+                        local_source_tick(timestamp, self.stream_start_time_microseconds)
+                    })
                     .unwrap_or(target);
                 if let Some(newer) = newest_target() {
                     let newer_target = newer.source_tick.max(0);
@@ -3094,6 +3145,7 @@ impl StickyMonitor {
                 .timestamp()
                 .or_else(|| decoded.pts())
                 .map(|timestamp| timestamp.rescale(time_base, (1, 1_000_000)))
+                .map(|timestamp| local_source_tick(timestamp, self.stream_start_time_microseconds))
                 .unwrap_or(target);
             if let Some(newer) = newest_target() {
                 let newer_target = newer.source_tick.max(0);
@@ -3898,6 +3950,24 @@ mod tests {
             source_frame_duration_tick: None,
             acceleration: AccelerationPreference::Software,
         }
+    }
+
+    #[test]
+    fn timestamp_origin_helpers_preserve_signed_stream_starts_and_local_ticks() {
+        let time_base = ffmpeg::Rational(1, 90_000);
+        assert_eq!(stream_start_time_microseconds(3_750, time_base), 41_667);
+        assert_eq!(stream_start_time_microseconds(-3_750, time_base), -41_667);
+        assert_eq!(
+            stream_start_time_microseconds(ffmpeg::ffi::AV_NOPTS_VALUE, time_base),
+            0
+        );
+        assert_eq!(local_source_tick(83_333, 41_667), 41_666);
+        assert_eq!(local_source_tick(1, 41_667), 0);
+        assert_eq!(seek_stream_timestamp(0, 41_667, time_base), -446_250);
+        assert_eq!(
+            seek_stream_timestamp(1_000_000, -1_000_000, time_base),
+            -450_000
+        );
     }
 
     fn receive_for(decoder: &MonitorDecoder, request: &DecodeRequest) -> DecodeEvent {
@@ -5098,7 +5168,7 @@ mod tests {
     ) -> Result<StickyMonitor, String> {
         let input = ffmpeg::format::input(&path)
             .map_err(|error| format!("could not open supplied test media: {error}"))?;
-        let (stream_index, time_base, decoder) = {
+        let (stream_index, time_base, stream_start_time_microseconds, decoder) = {
             let stream = input
                 .streams()
                 .best(Type::Video)
@@ -5125,7 +5195,12 @@ mod tests {
                 candidate.device_type,
                 candidate.select_format,
             )?;
-            (stream.index(), stream.time_base(), decoder)
+            (
+                stream.index(),
+                stream.time_base(),
+                stream_start_time_microseconds(stream.start_time(), stream.time_base()),
+                decoder,
+            )
         };
         let output_size = (40, 30);
         let scaled_size = fitted_size(
@@ -5144,6 +5219,7 @@ mod tests {
             input,
             stream_index,
             time_base,
+            stream_start_time_microseconds,
             decoder,
             scaler: None,
             scaler_input: None,
@@ -6169,6 +6245,56 @@ mod tests {
                 DecodeEvent::Frame(frame) => assert_frame_reaches_target(&frame, &desired),
                 DecodeEvent::Error(error) => panic!("supplied media failed: {}", error.message),
             }
+        }
+    }
+
+    #[test]
+    fn supplied_reordered_vfr_fixture_reports_exact_local_frame_boundaries() {
+        let Some(path) = std::env::var_os("MAELSTROM_REORDERED_VFR_TEST_MEDIA") else {
+            return;
+        };
+        let decoder = MonitorDecoder::new();
+        for (index, source_tick) in [
+            0, 41_666, 125_000, 166_666, 250_000, 333_333, 458_333, 500_000,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut desired = request(PathBuf::from(&path), index as u64 + 1);
+            desired.source_tick = source_tick;
+            decoder.request(desired).unwrap();
+            match receive_matching(&decoder, |frame| frame.request_id == index as u64 + 1) {
+                DecodeEvent::Frame(frame) => assert_eq!(frame.source_tick, source_tick),
+                DecodeEvent::Error(error) => panic!(
+                    "reordered VFR fixture target {source_tick} failed: {}",
+                    error.message
+                ),
+            }
+        }
+
+        for (request_id, source_tick) in [(20, 125_000), (21, 458_333)] {
+            let mut desired = request(PathBuf::from(&path), request_id);
+            desired.source_tick = source_tick;
+            decoder.request(desired).unwrap();
+            match receive_matching(&decoder, |frame| frame.request_id == request_id) {
+                DecodeEvent::Frame(frame) => assert_eq!(frame.source_tick, source_tick),
+                DecodeEvent::Error(error) => panic!(
+                    "reordered VFR fixture seek target {source_tick} failed: {}",
+                    error.message
+                ),
+            }
+        }
+
+        let fresh_decoder = MonitorDecoder::new();
+        let mut first_seek = request(PathBuf::from(path), 30);
+        first_seek.source_tick = 250_000;
+        fresh_decoder.request(first_seek).unwrap();
+        match receive_matching(&fresh_decoder, |frame| frame.request_id == 30) {
+            DecodeEvent::Frame(frame) => assert_eq!(frame.source_tick, 250_000),
+            DecodeEvent::Error(error) => panic!(
+                "reordered VFR fixture fresh seek target failed: {}",
+                error.message
+            ),
         }
     }
 

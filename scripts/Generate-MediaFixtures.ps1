@@ -63,6 +63,17 @@ Invoke-FixtureFfmpeg @(
     '-movflags', '+faststart', '-metadata', 'creation_time=1970-01-01T00:00:00Z'
 ) $vfrPath
 
+# MPEG-TS preserves decode packet order, while the selected 24 fps source frames
+# retain deliberately irregular presentation timing. B-frames make the packet PTS
+# order differ from presentation order.
+$reorderedVfrPath = Join-Path $outputPath 'vfr-reordered-mpeg2.ts'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24',
+    '-vf', "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)'",
+    '-frames:v', '8', '-fps_mode', 'vfr', '-an', '-c:v', 'mpeg2video', '-q:v', '8', '-g', '8', '-bf', '2',
+    '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-muxdelay', '0'
+) $reorderedVfrPath
+
 $wavPath = Join-Path $outputPath 'mono-pcm-48k.wav'
 Invoke-FixtureFfmpeg @(
     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1',

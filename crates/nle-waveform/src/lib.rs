@@ -1022,12 +1022,19 @@ fn parse_pts_microseconds(value: &str) -> Result<i64, String> {
 }
 
 fn classify_frame_timing(mut pts_microseconds: Vec<i64>) -> FrameTiming {
-    if pts_microseconds.len() < 2 || pts_microseconds.iter().any(|pts| *pts < 0) {
+    if pts_microseconds.len() < 2 {
         return FrameTiming::Unknown;
     }
     pts_microseconds.sort_unstable();
     if pts_microseconds.windows(2).any(|pair| pair[0] >= pair[1]) {
         return FrameTiming::Unknown;
+    }
+    let origin = pts_microseconds[0];
+    for pts in &mut pts_microseconds {
+        let Some(local_pts) = pts.checked_sub(origin) else {
+            return FrameTiming::Unknown;
+        };
+        *pts = local_pts;
     }
     let mut gaps = pts_microseconds.windows(2).map(|pair| pair[1] - pair[0]);
     let Some(first_gap) = gaps.next() else {
@@ -1670,13 +1677,46 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_or_negative_decoded_frame_timestamps_are_unknown() {
+    fn nonzero_origin_irregular_timestamps_publish_local_frame_index() {
+        assert_eq!(
+            classify_frame_timing(vec![41_667, 83_333, 166_667, 208_333, 291_667]),
+            FrameTiming::Variable(FrameTimeIndex {
+                pts_microseconds: vec![0, 41_666, 125_000, 166_666, 250_000],
+            })
+        );
+    }
+
+    #[test]
+    fn negative_origin_irregular_timestamps_publish_local_frame_index() {
+        assert_eq!(
+            classify_frame_timing(vec![-41_667, 0, 83_333, 125_000]),
+            FrameTiming::Variable(FrameTimeIndex {
+                pts_microseconds: vec![0, 41_667, 125_000, 166_667],
+            })
+        );
+    }
+
+    #[test]
+    fn supplied_reordered_vfr_fixture_publishes_local_presentation_timestamps() {
+        let Some(path) = std::env::var_os("MAELSTROM_REORDERED_VFR_TEST_MEDIA") else {
+            return;
+        };
+        let timing =
+            analyze_frame_timing(PathBuf::from(path)).expect("scan supplied reordered VFR fixture");
+        assert_eq!(
+            timing,
+            FrameTiming::Variable(FrameTimeIndex {
+                pts_microseconds: vec![
+                    0, 41_666, 125_000, 166_666, 250_000, 333_333, 458_333, 500_000,
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn duplicate_or_incomplete_decoded_frame_timestamps_are_unknown() {
         assert_eq!(
             classify_frame_timing(vec![0, 0, 33_333]),
-            FrameTiming::Unknown
-        );
-        assert_eq!(
-            classify_frame_timing(vec![-1, 33_333]),
             FrameTiming::Unknown
         );
         assert_eq!(classify_frame_timing(vec![0]), FrameTiming::Unknown);

@@ -54,6 +54,7 @@ New-Item -ItemType Directory -Force -Path $resolvedArtifactRoot | Out-Null
 
 $fixtureRoot = Join-Path $repoRoot 'artifacts\media-fixtures'
 $mediaPath = Join-Path $fixtureRoot 'bars-aac-2997.mp4'
+$reorderedVfrPath = Join-Path $fixtureRoot 'vfr-reordered-mpeg2.ts'
 $libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
     Join-Path $repoRoot '.deps\libclang-bindgen'
 } else {
@@ -65,6 +66,7 @@ $savedPath = $env:PATH
 $savedFfmpeg = $env:FFMPEG_DIR
 $savedLibclang = $env:LIBCLANG_PATH
 $savedMedia = $env:MAELSTROM_PHASE0_MEDIA
+$savedReorderedVfrMedia = $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA
 $savedReport = $env:MAELSTROM_PHASE0_REPORT
 $savedArtifactRoot = $env:MAELSTROM_PHASE0_ARTIFACT_ROOT
 $repoLocationPushed = $false
@@ -76,6 +78,8 @@ try {
         & (Join-Path $PSScriptRoot 'Test-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath -ArtifactRoot $fixtureRoot
     }
     if (-not (Test-Path -LiteralPath $mediaPath -PathType Leaf)) { throw "Missing generated Phase 0 media fixture: $mediaPath" }
+    if (-not (Test-Path -LiteralPath $reorderedVfrPath -PathType Leaf)) { throw "Missing generated reordered VFR fixture: $reorderedVfrPath" }
+    $reorderedVfrPath = (Resolve-Path -LiteralPath $reorderedVfrPath).Path
 
     Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $resolvedArtifactRoot 'phase0-cancelled.mp4') -Force -ErrorAction SilentlyContinue
@@ -83,12 +87,19 @@ try {
     $env:LIBCLANG_PATH = $libclangRoot
     $env:PATH = (Join-Path $ffmpegRootPath 'bin') + [IO.Path]::PathSeparator + $savedPath
     $env:MAELSTROM_PHASE0_MEDIA = $mediaPath
+    $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA = $reorderedVfrPath
     $env:MAELSTROM_PHASE0_REPORT = $resolvedReportPath
     $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $resolvedArtifactRoot
     Push-Location -LiteralPath $repoRoot
     $repoLocationPushed = $true
-    $cargoExecutable = (Get-Command cargo.exe -ErrorAction Stop).Source
+    $cargoExecutable = (Get-Command cargo.exe -CommandType Application -ErrorAction Stop).Source
     if (-not (Test-AbsolutePath $cargoExecutable)) { throw 'Cargo did not resolve to an absolute executable path.' }
+    & $cargoExecutable test -p nle-waveform tests::supplied_reordered_vfr_fixture_publishes_local_presentation_timestamps -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Focused reordered VFR waveform test failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-decode tests::supplied_reordered_vfr_fixture_reports_exact_local_frame_boundaries -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Focused reordered VFR decode test failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-app tests::supplied_reordered_vfr_fixture_routes_preview_to_local_presentation_boundaries -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Focused reordered VFR app test failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::phase0_scenario_matrix -- --ignored --exact --test-threads=1
     $testExitCode = $LASTEXITCODE
 
@@ -167,6 +178,7 @@ finally {
     if ($null -eq $savedFfmpeg) { Remove-Item Env:FFMPEG_DIR -ErrorAction SilentlyContinue } else { $env:FFMPEG_DIR = $savedFfmpeg }
     if ($null -eq $savedLibclang) { Remove-Item Env:LIBCLANG_PATH -ErrorAction SilentlyContinue } else { $env:LIBCLANG_PATH = $savedLibclang }
     if ($null -eq $savedMedia) { Remove-Item Env:MAELSTROM_PHASE0_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_MEDIA = $savedMedia }
+    if ($null -eq $savedReorderedVfrMedia) { Remove-Item Env:MAELSTROM_REORDERED_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA = $savedReorderedVfrMedia }
     if ($null -eq $savedReport) { Remove-Item Env:MAELSTROM_PHASE0_REPORT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_REPORT = $savedReport }
     if ($null -eq $savedArtifactRoot) { Remove-Item Env:MAELSTROM_PHASE0_ARTIFACT_ROOT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $savedArtifactRoot }
     if ($null -ne $phase0Mutex) { $phase0Mutex.ReleaseMutex(); $phase0Mutex.Dispose() }
