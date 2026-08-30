@@ -65,7 +65,14 @@ if (@($fixtures | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf)
 }
 
 $ffmpegRoot = Join-Path $repoRoot '.deps\ffmpeg-project-8.1'
-$libclangRoot = Join-Path $repoRoot '.deps\libclang-bindgen'
+$libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
+    Join-Path $repoRoot '.deps\libclang-bindgen'
+} else {
+    [IO.Path]::GetFullPath($env:LIBCLANG_PATH)
+}
+if (-not (Test-Path -LiteralPath (Join-Path $libclangRoot 'libclang.dll') -PathType Leaf)) {
+    throw "Missing libclang required by native FFmpeg bindings below: $libclangRoot"
+}
 $savedPath = $env:PATH; $savedFfmpeg = $env:FFMPEG_DIR; $savedLibclang = $env:LIBCLANG_PATH
 $savedFirst = $env:MAELSTROM_TEST_MEDIA; $savedSecond = $env:MAELSTROM_TEST_MEDIA_SECOND
 $savedThird = $env:MAELSTROM_TEST_MEDIA_THIRD; $savedFourth = $env:MAELSTROM_TEST_MEDIA_FOURTH

@@ -36,6 +36,11 @@ const FFMPEG: &str = "ffmpeg";
 const FFPROBE: &str = "ffprobe";
 const DECODE_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
+/// The timing index stores signed microsecond source ticks, so one million
+/// points consumes roughly 8 MiB while still covering several hours of common
+/// frame rates. Packet output is streamed; this is only the retained index.
+pub const MAX_FRAME_TIMING_POINTS: usize = 1_000_000;
+const MAX_FRAME_TIMING_LINE_BYTES: usize = 4 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(8);
 
 fn media_tool(name: &'static str) -> PathBuf {
@@ -104,6 +109,46 @@ pub struct MediaMetadata {
 pub struct FrameRate {
     numerator: u64,
     denominator: u64,
+}
+
+/// Complete source-frame presentation timestamps in the decoder's microsecond
+/// time base. This is runtime data and intentionally has no serialization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameTimeIndex {
+    pts_microseconds: Vec<i64>,
+}
+
+impl FrameTimeIndex {
+    /// Number of indexed presentation timestamps.
+    pub fn len(&self) -> usize {
+        self.pts_microseconds.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pts_microseconds.is_empty()
+    }
+
+    /// Sorted presentation timestamps in microseconds.
+    pub fn pts(&self) -> &[i64] {
+        &self.pts_microseconds
+    }
+
+    /// Consumes the index and returns its sorted microsecond timestamps.
+    pub fn into_pts(self) -> Vec<i64> {
+        self.pts_microseconds
+    }
+}
+
+/// Frame-timing classification derived from a complete packet PTS scan.
+///
+/// `Variable` is the only state that publishes a frame index. `Unknown` means
+/// the scan produced too little or unusable timing data and must not be used
+/// for CFR snapping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameTiming {
+    Constant,
+    Variable(FrameTimeIndex),
+    Unknown,
 }
 
 impl FrameRate {
@@ -237,6 +282,8 @@ pub enum WaveformError {
     Decode { path: PathBuf, message: String },
     /// FFmpeg could not decode or assemble the requested video preview.
     VideoDecode { path: PathBuf, message: String },
+    /// FFprobe could not produce a complete bounded video packet timing scan.
+    FrameTiming { path: PathBuf, message: String },
     /// The owning media-analysis job was superseded and its subprocesses were reaped.
     Cancelled { path: PathBuf },
 }
@@ -281,6 +328,13 @@ impl fmt::Display for WaveformError {
             }
             Self::VideoDecode { path, message } => {
                 write!(f, "could not decode video in {}: {message}", path.display())
+            }
+            Self::FrameTiming { path, message } => {
+                write!(
+                    f,
+                    "could not scan frame timing in {}: {message}",
+                    path.display()
+                )
             }
             Self::Cancelled { path } => {
                 write!(f, "media analysis cancelled for {}", path.display())
@@ -773,6 +827,221 @@ pub fn probe_duration_cancellable(
             path: path.to_path_buf(),
             message: "FFprobe did not report a positive container duration".to_owned(),
         })
+}
+
+/// Scan the best video stream's packet presentation timestamps without
+/// decoding frames. This blocks on process I/O and belongs on a media worker.
+pub fn analyze_frame_timing(path: impl AsRef<Path>) -> Result<FrameTiming, WaveformError> {
+    analyze_frame_timing_cancellable(path, Arc::new(AtomicBool::new(false)))
+}
+
+/// Cancellable variant of [`analyze_frame_timing`]. The FFprobe child and its
+/// bounded stdout/stderr reader threads are always reaped before this returns.
+pub fn analyze_frame_timing_cancellable(
+    path: impl AsRef<Path>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<FrameTiming, WaveformError> {
+    let path = path.as_ref();
+    fs::metadata(path).map_err(|source| WaveformError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(WaveformError::Cancelled {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let mut command = Command::new(media_tool(FFPROBE));
+    hide_console_window(&mut command);
+    let mut child = command
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_packets",
+            "-show_entries",
+            "packet=pts_time",
+            "-of",
+            "compact=p=0:nk=0",
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| executable_error(FFPROBE, source))?;
+    let (chunks, stdout_worker) = stream_stdout(child.stdout.take().expect("piped stdout"));
+    let stderr_worker = drain_stderr(child.stderr.take().expect("piped stderr"));
+    let mut pts = Vec::new();
+    let mut pending = Vec::new();
+
+    let scan = 'scan: loop {
+        let chunk = match receive_chunk(&chunks, &mut child, &cancelled, path) {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break Ok(()),
+            Err(WaveformError::Cancelled { .. }) => {
+                break Err(WaveformError::Cancelled {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(error) => break Err(frame_timing_error(path, error.to_string())),
+        };
+        pending.extend_from_slice(&chunk);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = pending.drain(..=newline).collect::<Vec<_>>();
+            let pts_time = match parse_packet_pts_line(&line) {
+                Ok(Some(pts_time)) => pts_time,
+                Ok(None) => continue,
+                Err(message) => break 'scan Err(frame_timing_error(path, message)),
+            };
+            if let Err(message) = retain_frame_timing_point(&mut pts, pts_time) {
+                break 'scan Err(frame_timing_error(path, message));
+            }
+        }
+        if pending.len() > MAX_FRAME_TIMING_LINE_BYTES {
+            break Err(frame_timing_error(
+                path,
+                "FFprobe emitted an oversized packet timing line",
+            ));
+        }
+    };
+
+    if scan.is_err() {
+        terminate_child(&mut child);
+    }
+    drop(chunks);
+    let stdout_result = join_stream_stdout(stdout_worker);
+    let stderr = join_stderr(stderr_worker);
+    if let Err(error) = scan {
+        return Err(error);
+    }
+    if let Err(source) = stdout_result {
+        return Err(frame_timing_error(path, source.to_string()));
+    }
+    let status = wait_for_child(&mut child, &cancelled, path).map_err(|error| match error {
+        WaveformError::Cancelled { .. } => WaveformError::Cancelled {
+            path: path.to_path_buf(),
+        },
+        error => frame_timing_error(path, error.to_string()),
+    })?;
+    if !status.success() {
+        return Err(frame_timing_error(path, stderr_message(&stderr)));
+    }
+    if !pending.is_empty() {
+        let pts_time =
+            parse_packet_pts_line(&pending).map_err(|message| frame_timing_error(path, message))?;
+        if let Some(pts_time) = pts_time {
+            retain_frame_timing_point(&mut pts, pts_time)
+                .map_err(|message| frame_timing_error(path, message))?;
+        }
+    }
+    Ok(classify_frame_timing(pts))
+}
+
+fn retain_frame_timing_point(pts: &mut Vec<i64>, pts_time: i64) -> Result<(), String> {
+    if pts.len() == MAX_FRAME_TIMING_POINTS {
+        return Err(format!(
+            "video packet timing exceeds the {MAX_FRAME_TIMING_POINTS}-point safety cap"
+        ));
+    }
+    pts.push(pts_time);
+    Ok(())
+}
+
+fn frame_timing_error(path: &Path, message: impl Into<String>) -> WaveformError {
+    WaveformError::FrameTiming {
+        path: path.to_path_buf(),
+        message: message.into(),
+    }
+}
+
+fn parse_packet_pts_line(line: &[u8]) -> Result<Option<i64>, String> {
+    let line = std::str::from_utf8(line)
+        .map_err(|_| "FFprobe emitted non-UTF-8 packet timing output".to_owned())?
+        .trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let mut pts_time = None;
+    for field in line.split('|') {
+        let Some((key, value)) = field.split_once('=') else {
+            return Err("FFprobe emitted malformed compact packet timing output".to_owned());
+        };
+        if key == "pts_time" {
+            if pts_time.replace(value).is_some() {
+                return Err("FFprobe emitted duplicate pts_time fields".to_owned());
+            }
+        }
+    }
+    parse_pts_microseconds(
+        pts_time.ok_or_else(|| "FFprobe packet output omitted pts_time".to_owned())?,
+    )
+    .map(Some)
+}
+
+/// Converts FFprobe's decimal seconds to the decoder's integer microsecond
+/// tick using nearest-integer rational rounding.
+fn parse_pts_microseconds(value: &str) -> Result<i64, String> {
+    let (negative, digits) = match value.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, value),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!("invalid packet pts_time {value:?}"));
+    }
+    let whole = whole
+        .parse::<u128>()
+        .map_err(|_| format!("packet pts_time is out of range: {value:?}"))?;
+    let denominator = 10_u128
+        .checked_pow(fraction.len() as u32)
+        .ok_or_else(|| format!("packet pts_time has excessive precision: {value:?}"))?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u128>()
+            .map_err(|_| format!("packet pts_time is out of range: {value:?}"))?
+    };
+    let numerator = whole
+        .checked_mul(denominator)
+        .and_then(|value| value.checked_add(fraction))
+        .and_then(|value| value.checked_mul(1_000_000))
+        .ok_or_else(|| format!("packet pts_time is out of range: {value:?}"))?;
+    let rounded = numerator
+        .checked_add(denominator / 2)
+        .ok_or_else(|| format!("packet pts_time is out of range: {value:?}"))?
+        / denominator;
+    let magnitude = i64::try_from(rounded)
+        .map_err(|_| format!("packet pts_time is out of range: {value:?}"))?;
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
+fn classify_frame_timing(mut pts_microseconds: Vec<i64>) -> FrameTiming {
+    if pts_microseconds.len() < 2 || pts_microseconds.iter().any(|pts| *pts < 0) {
+        return FrameTiming::Unknown;
+    }
+    pts_microseconds.sort_unstable();
+    if pts_microseconds.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return FrameTiming::Unknown;
+    }
+    let mut gaps = pts_microseconds.windows(2).map(|pair| pair[1] - pair[0]);
+    let Some(first_gap) = gaps.next() else {
+        return FrameTiming::Unknown;
+    };
+    let (min_gap, max_gap) = gaps.fold((first_gap, first_gap), |(min_gap, max_gap), gap| {
+        (min_gap.min(gap), max_gap.max(gap))
+    });
+    if max_gap - min_gap <= 1 {
+        FrameTiming::Constant
+    } else {
+        FrameTiming::Variable(FrameTimeIndex { pts_microseconds })
+    }
 }
 
 /// Probe displayable container and all stream metadata without decoding media.
@@ -1292,6 +1561,66 @@ mod tests {
         assert_eq!(probe.sample_rate, None);
         assert_eq!(probe.channels, None);
         assert_eq!(probe.duration_seconds, None);
+    }
+
+    #[test]
+    fn packet_timing_parser_is_named_and_rounds_to_decoder_microseconds() {
+        assert_eq!(
+            parse_packet_pts_line(b"duration_time=0.033367|pts_time=0.033366667\n"),
+            Ok(Some(33_367))
+        );
+        assert_eq!(
+            parse_packet_pts_line(b"pts_time=0.033366\n"),
+            Ok(Some(33_366))
+        );
+        assert!(parse_packet_pts_line(b"pts_time=N/A\n").is_err());
+        assert!(parse_packet_pts_line(b"duration_time=1\n").is_err());
+    }
+
+    #[test]
+    fn alternating_ntsc_microsecond_gaps_are_constant() {
+        assert_eq!(
+            classify_frame_timing(vec![0, 33_367, 66_733, 100_100, 133_467]),
+            FrameTiming::Constant
+        );
+    }
+
+    #[test]
+    fn irregular_packet_gaps_publish_a_complete_variable_index() {
+        let timing = classify_frame_timing(vec![100_000, 0, 33_333]);
+        assert_eq!(
+            timing,
+            FrameTiming::Variable(FrameTimeIndex {
+                pts_microseconds: vec![0, 33_333, 100_000],
+            })
+        );
+        let FrameTiming::Variable(index) = timing else {
+            panic!("expected variable timing");
+        };
+        assert_eq!(index.len(), 3);
+        assert_eq!(index.pts(), &[0, 33_333, 100_000]);
+        assert_eq!(index.into_pts(), vec![0, 33_333, 100_000]);
+    }
+
+    #[test]
+    fn duplicate_or_negative_packet_pts_are_unknown() {
+        assert_eq!(
+            classify_frame_timing(vec![0, 0, 33_333]),
+            FrameTiming::Unknown
+        );
+        assert_eq!(
+            classify_frame_timing(vec![-1, 33_333]),
+            FrameTiming::Unknown
+        );
+        assert_eq!(classify_frame_timing(vec![0]), FrameTiming::Unknown);
+    }
+
+    #[test]
+    fn timing_point_retention_stops_at_the_hard_cap() {
+        let mut pts = Vec::with_capacity(MAX_FRAME_TIMING_POINTS);
+        pts.resize(MAX_FRAME_TIMING_POINTS, 0);
+        assert!(retain_frame_timing_point(&mut pts, 1).is_err());
+        assert_eq!(pts.len(), MAX_FRAME_TIMING_POINTS);
     }
 
     #[test]

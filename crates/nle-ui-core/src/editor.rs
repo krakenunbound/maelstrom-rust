@@ -459,6 +459,8 @@ pub struct PlaybackTarget<'a> {
     /// Exact positive source frame rate used to coalesce monitor requests on source-frame
     /// boundaries without rounding NTSC-style rates.
     pub source_frame_rate: Option<SourceFrameRate>,
+    /// Duration to the following indexed source-frame boundary, when packet timing supplied it.
+    pub source_frame_duration_tick: Option<Tick>,
     /// Clip-local video opacity after applying the default fade-to-black envelope.
     pub opacity: f32,
     /// Opaque project-black matte inserted immediately before this decoded layer.
@@ -506,6 +508,55 @@ impl SourceFrameRate {
 
     pub const fn denominator(self) -> u64 {
         self.denominator
+    }
+}
+
+/// Maximum retained source-frame boundaries for one runtime media index.
+/// One million microsecond ticks occupy roughly 8 MiB and bound background-analysis output.
+pub const MAX_SOURCE_FRAME_TIME_INDEX_POINTS: usize = 1_000_000;
+
+/// Runtime-only packet-derived source-frame boundaries for one media item.
+///
+/// This deliberately stays out of snapshots: it can be rebuilt from the source file and must
+/// never make a project dirty merely because media analysis completed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFrameTimeIndex {
+    ticks: Vec<Tick>,
+}
+
+impl SourceFrameTimeIndex {
+    /// Accepts only complete, nonnegative, strictly increasing timing data within the fixed cap.
+    pub fn new(ticks: Vec<Tick>) -> Option<Self> {
+        (ticks.len() <= MAX_SOURCE_FRAME_TIME_INDEX_POINTS
+            && ticks.iter().all(|tick| tick.0 >= 0)
+            && ticks.windows(2).all(|pair| pair[0] < pair[1]))
+        .then_some(Self { ticks })
+    }
+
+    pub fn len(&self) -> usize {
+        self.ticks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ticks.is_empty()
+    }
+
+    pub fn ticks(&self) -> &[Tick] {
+        &self.ticks
+    }
+
+    pub fn into_ticks(self) -> Vec<Tick> {
+        self.ticks
+    }
+
+    fn resolve(&self, logical_source_tick: Tick) -> Option<(Tick, Option<Tick>)> {
+        let index = self
+            .ticks
+            .partition_point(|tick| *tick <= logical_source_tick)
+            .saturating_sub(1);
+        let tick = *self.ticks.get(index)?;
+        let duration = self.ticks.get(index + 1).map(|next| Tick(next.0 - tick.0));
+        Some((tick, duration))
     }
 }
 
@@ -1256,6 +1307,8 @@ pub struct EditorState {
     waveform_errors: HashMap<MediaId, String>,
     media_errors: HashMap<MediaId, String>,
     media_metadata: HashMap<MediaId, MediaMetadata>,
+    /// Packet timing is rebuildable runtime state and is deliberately never serialized.
+    source_frame_time_indexes: HashMap<MediaId, SourceFrameTimeIndex>,
     media_decoder_backends: HashMap<MediaId, String>,
     video_strips: HashMap<MediaId, CachedVideoStrip>,
     /// Retained text layouts indexed by media-vector position. The timeline hot loop only clones
@@ -1388,6 +1441,7 @@ impl EditorState {
             waveform_errors: HashMap::new(),
             media_errors: HashMap::new(),
             media_metadata: HashMap::new(),
+            source_frame_time_indexes: HashMap::new(),
             media_decoder_backends: HashMap::new(),
             video_strips: HashMap::new(),
             timeline_label_galleys: Vec::new(),
@@ -2343,6 +2397,7 @@ impl EditorState {
 
     pub fn set_media_error(&mut self, media_id: MediaId, error: impl Into<String>) {
         self.media_metadata.remove(&media_id);
+        self.source_frame_time_indexes.remove(&media_id);
         self.media_errors.insert(media_id, error.into());
         self.timeline_media_draw_slots_dirty = true;
     }
@@ -2351,6 +2406,19 @@ impl EditorState {
     /// This is read-only runtime state, deliberately excluded from project snapshots.
     pub fn media_is_offline(&self, media_id: MediaId) -> bool {
         self.media_errors.contains_key(&media_id)
+    }
+
+    /// Replaces or clears packet timing for runtime source-frame addressing without affecting saves.
+    pub fn set_media_frame_time_index(
+        &mut self,
+        media_id: MediaId,
+        index: Option<SourceFrameTimeIndex>,
+    ) {
+        if let Some(index) = index {
+            self.source_frame_time_indexes.insert(media_id, index);
+        } else {
+            self.source_frame_time_indexes.remove(&media_id);
+        }
     }
 
     /// Records the actual decoder used by the live monitor, not a hardware capability guess.
@@ -2890,10 +2958,14 @@ impl EditorState {
                     .saturating_add(self.playhead.0.saturating_sub(clip.start.0)),
             )
         };
+        let indexed_frame = (item.kind != MediaKind::Image)
+            .then(|| self.source_frame_time_indexes.get(&media_id))
+            .flatten()
+            .and_then(|index| index.resolve(source_tick));
         let decode_tick = if item.kind == MediaKind::Image {
             Tick(0)
         } else {
-            source_tick
+            indexed_frame.map_or(source_tick, |(tick, _)| tick)
         };
         let envelope_tick = Tick(
             self.playhead
@@ -2907,11 +2979,16 @@ impl EditorState {
             path,
             source_tick,
             decode_tick,
-            source_frame_rate: self
-                .media_metadata
-                .get(&media_id)
-                .and_then(|metadata| metadata.frame_rate_ratio)
-                .filter(|_| item.kind != MediaKind::Image),
+            source_frame_rate: indexed_frame
+                .is_none()
+                .then(|| {
+                    self.media_metadata
+                        .get(&media_id)
+                        .and_then(|metadata| metadata.frame_rate_ratio)
+                        .filter(|_| item.kind != MediaKind::Image)
+                })
+                .flatten(),
+            source_frame_duration_tick: indexed_frame.and_then(|(_, duration)| duration),
             opacity: video_opacity_at(clip, envelope_tick) * transition_opacity.clamp(0.0, 1.0),
             black_matte_before: black_matte_before.clamp(0.0, 1.0),
             black_matte_after: black_matte_after.clamp(0.0, 1.0),
@@ -18570,6 +18647,101 @@ mod tests {
         assert_eq!(target.path, Path::new("upper.mp4"));
         assert_eq!(target.source_tick, Tick(6_000_000));
         assert_eq!(target.decode_tick, target.source_tick);
+    }
+
+    #[test]
+    fn source_frame_index_resolves_before_at_between_and_after_boundaries() {
+        let index = SourceFrameTimeIndex::new(vec![Tick(100), Tick(140), Tick(210)]).unwrap();
+        assert_eq!(index.resolve(Tick(0)), Some((Tick(100), Some(Tick(40)))));
+        assert_eq!(index.resolve(Tick(140)), Some((Tick(140), Some(Tick(70)))));
+        assert_eq!(index.resolve(Tick(180)), Some((Tick(140), Some(Tick(70)))));
+        assert_eq!(index.resolve(Tick(999)), Some((Tick(210), None)));
+        assert!(SourceFrameTimeIndex::new(vec![Tick(0), Tick(0)]).is_none());
+        assert!(SourceFrameTimeIndex::new(vec![Tick(-1)]).is_none());
+    }
+
+    #[test]
+    fn indexed_video_target_maps_trimmed_source_to_its_held_frame_boundary() {
+        let mut editor = EditorState::new(Language::English, "Indexed source");
+        editor.add_media_paths([PathBuf::from("indexed.mp4")]);
+        let video_track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        editor
+            .timeline
+            .insert_clip(
+                video_track,
+                TimelineMediaId(1),
+                Tick(1_000),
+                Tick(1_000),
+                Tick(50),
+            )
+            .unwrap();
+        editor.set_media_metadata(
+            1,
+            MediaMetadata {
+                frame_rate_ratio: SourceFrameRate::new(30, 1),
+                ..Default::default()
+            },
+        );
+        editor.set_media_frame_time_index(
+            1,
+            Some(SourceFrameTimeIndex::new(vec![Tick(0), Tick(100), Tick(250)]).unwrap()),
+        );
+        editor.set_playhead(Tick(1_025));
+
+        let target = editor.playback_target().unwrap();
+        assert_eq!(target.source_tick, Tick(75));
+        assert_eq!(target.decode_tick, Tick(0));
+        assert_eq!(target.source_frame_duration_tick, Some(Tick(100)));
+        assert_eq!(target.source_frame_rate, None);
+    }
+
+    #[test]
+    fn indexed_timing_does_not_change_still_decode_behavior() {
+        let mut editor = EditorState::new(Language::English, "Indexed still");
+        editor.add_media_paths([PathBuf::from("still.png")]);
+        assert!(editor.add_selected_to_timeline());
+        editor.set_media_frame_time_index(
+            1,
+            Some(SourceFrameTimeIndex::new(vec![Tick(100), Tick(200)]).unwrap()),
+        );
+        editor.set_playhead(Tick(150));
+
+        let target = editor.playback_target().unwrap();
+        assert_eq!(target.decode_tick, Tick(0));
+        assert_eq!(target.source_frame_rate, None);
+        assert_eq!(target.source_frame_duration_tick, None);
+    }
+
+    #[test]
+    fn source_frame_indexes_are_runtime_only_and_reset_on_restore_or_media_error() {
+        let mut editor = EditorState::new(Language::English, "Indexed runtime");
+        editor.add_media_paths([PathBuf::from("indexed.mp4")]);
+        let snapshot = editor.snapshot();
+        let generation = editor.durable_generation();
+        editor.set_media_frame_time_index(
+            1,
+            Some(SourceFrameTimeIndex::new(vec![Tick(0), Tick(100)]).unwrap()),
+        );
+        assert_eq!(editor.snapshot(), snapshot);
+        assert_eq!(editor.durable_generation(), generation);
+        editor.set_media_frame_time_index(1, None);
+        assert!(!editor.source_frame_time_indexes.contains_key(&1));
+        editor.set_media_frame_time_index(
+            1,
+            Some(SourceFrameTimeIndex::new(vec![Tick(0), Tick(100)]).unwrap()),
+        );
+        editor.set_media_error(1, "offline");
+        assert!(!editor.source_frame_time_indexes.contains_key(&1));
+
+        let restored =
+            EditorState::restore(Language::English, "Indexed runtime", snapshot).unwrap();
+        assert!(restored.source_frame_time_indexes.is_empty());
     }
 
     #[test]

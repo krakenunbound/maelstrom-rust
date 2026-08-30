@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "artifact_root": "artifacts/media-fixtures",
   "fixtures": [
     {
@@ -11,9 +11,43 @@
       "sha256": "62699C326617297F16BA1C69F788DD93A68CFB318FC09CAE55D12139A912C1B2",
       "byte_size": 161133,
       "container": "mov,mp4,m4a,3gp,3g2,mj2",
-      "video": { "codec": "mpeg4", "rate": "30000/1001", "width": 320, "height": 180, "gop": 30 },
+      "video": {
+        "codec": "mpeg4",
+        "rate": "30000/1001",
+        "width": 320,
+        "height": 180,
+        "gop": 30,
+        "timing": { "vfr": false }
+      },
       "audio": { "codec": "aac", "sample_rate": 48000, "channels": 2, "layout": "stereo" },
       "duration_seconds": 2.002,
+      "expected": "success"
+    },
+    {
+      "id": "vfr-irregular-mpeg4-mp4",
+      "path": "vfr-irregular-mpeg4.mp4",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 filter; deliberately selected frames only; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "testsrc2=size=160x90:rate=1000; select frames 0,40,110,150,240; -fps_mode vfr; mpeg4 MP4 without audio or B-frames",
+      "sha256": "1B37B37DE466F064853D954F709F2EF6BF68B23CD44BD1238295D6A7B66012AD",
+      "byte_size": 8278,
+      "container": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": {
+        "codec": "mpeg4",
+        "rate": "1000/1",
+        "width": 160,
+        "height": 90,
+        "gop": 5,
+        "timing": {
+          "vfr": true,
+          "frame_count": 5,
+          "first_pts_us": 0,
+          "last_pts_us": 240000,
+          "expected_gap_us": [40000, 70000, 90000],
+          "pts_sha256": "3BA1CEA76829A3E3224DEF979C7ED263693103C979CF3E19074824109309358A"
+        }
+      },
+      "duration_seconds": 0.241,
       "expected": "success"
     },
     {

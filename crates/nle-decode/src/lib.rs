@@ -567,9 +567,10 @@ pub struct DecodeRequest {
     /// Publishes timed intermediate frames while a scrub traverses an inter-frame GOP.
     /// Frames between publication intervals remain decode-only and avoid scaling/copying work.
     pub progressive_scrub_frames: bool,
-    /// Probed source-frame duration. When known, scrub cache lookup may reuse the first frame no
-    /// more than one source frame after the requested timestamp. `None` permits exact matches only;
-    /// it must not invent a constant-rate tolerance for unknown or variable timing.
+    /// Exact local source-frame duration, derived from CFR timing or adjacent VFR timestamps.
+    /// When known, scrub cache lookup may reuse the first frame no more than one source frame
+    /// after the requested timestamp. `None` permits exact matches only; it must not invent a
+    /// constant-rate tolerance when timing is unknown or the final indexed VFR span is unavailable.
     pub source_frame_duration_tick: Option<i64>,
     pub acceleration: AccelerationPreference,
 }

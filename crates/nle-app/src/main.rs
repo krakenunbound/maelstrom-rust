@@ -959,6 +959,7 @@ struct MediaAnalysisResult {
     media_id: u32,
     is_still: bool,
     metadata: Result<nle_waveform::MediaMetadata, String>,
+    frame_timing: Result<nle_waveform::FrameTiming, String>,
     waveform: Result<nle_waveform::Waveform, String>,
     video_strip: Result<nle_waveform::VideoStrip, String>,
 }
@@ -1042,6 +1043,7 @@ struct MonitorRequestKey {
     prewarm_scrub_workers: bool,
     high_quality_scaling: bool,
     source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
+    source_frame_duration_tick: Option<i64>,
 }
 
 /// Decoder ownership is keyed separately from output policy.  Changing dimensions, scrub
@@ -1077,6 +1079,8 @@ struct PreviewSourceRequest {
     media_id: u32,
     source_tick: i64,
     source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
+    /// Exact local VFR frame span. CFR sources derive this from `source_frame_rate`.
+    source_frame_duration_tick: Option<i64>,
 }
 
 /// Lightweight audio scheduling metadata. Paths, effect stacks, and gains remain owned by the
@@ -1138,6 +1142,7 @@ fn preview_request(editor: &EditorState) -> PreviewRequest {
             media_id: target.media_id,
             source_tick: target.decode_tick.0,
             source_frame_rate: target.source_frame_rate,
+            source_frame_duration_tick: target.source_frame_duration_tick.map(|tick| tick.0),
         });
     }
     let mut audio_sources = [None; MAX_PREVIEW_AUDIO_SOURCES];
@@ -1193,7 +1198,11 @@ fn monitor_source_tick_for_preview(
 
 fn monitor_source_frame_duration_tick(
     source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
+    indexed_duration_tick: Option<i64>,
 ) -> Option<i64> {
+    if let Some(duration) = indexed_duration_tick.filter(|duration| *duration > 0) {
+        return Some(duration);
+    }
     let source_rate = source_frame_rate?;
     let frame_ticks = 1_000_000_u128 * u128::from(source_rate.denominator());
     Some(
@@ -5146,6 +5155,7 @@ impl App {
                 prewarm_scrub_workers: prewarm_layer == Some(layer),
                 high_quality_scaling,
                 source_frame_rate: source.source_frame_rate,
+                source_frame_duration_tick: source.source_frame_duration_tick,
             };
             if preview.is_scrubbing && preview.resolved_quality != PreviewQuality::Full {
                 let current = self
@@ -5159,7 +5169,10 @@ impl App {
                             frame.height,
                         ))
                     });
-                let tolerance = monitor_source_frame_duration_tick(source.source_frame_rate);
+                let tolerance = monitor_source_frame_duration_tick(
+                    source.source_frame_rate,
+                    source.source_frame_duration_tick,
+                );
                 if !should_retain_close_full_monitor_frame(
                     current,
                     source.media_id,
@@ -5199,6 +5212,7 @@ impl App {
                 progressive_scrub_frames: progressive_scrub_frames(&preview),
                 source_frame_duration_tick: monitor_source_frame_duration_tick(
                     source.source_frame_rate,
+                    source.source_frame_duration_tick,
                 ),
                 acceleration,
             }) {
@@ -5817,7 +5831,7 @@ impl App {
                 .name(format!("maelstrom-ffmpeg-analysis-{media_id}"))
                 .spawn(move || {
                     let is_still = classify_path(&path) == MediaKind::Image;
-                    let (metadata, waveform, video_strip) = if is_still {
+                    let (metadata, frame_timing, waveform, video_strip) = if is_still {
                         match analyze_still_image(&path, &worker_cancellation) {
                             Ok(analysis) => {
                                 let duration_seconds = nle_ui_core::DEFAULT_STILL_IMAGE_DURATION.0
@@ -5847,14 +5861,25 @@ impl App {
                                 };
                                 (
                                     Ok(metadata),
+                                    Ok(nle_waveform::FrameTiming::Unknown),
                                     Err("still images do not contain audio".to_owned()),
                                     Ok(analysis.strip),
                                 )
                             }
-                            Err(error) => (Err(error.clone()), Err(error.clone()), Err(error)),
+                            Err(error) => (
+                                Err(error.clone()),
+                                Err(error.clone()),
+                                Err(error.clone()),
+                                Err(error),
+                            ),
                         }
                     } else {
                         let metadata = nle_waveform::probe_media_metadata_cancellable(
+                            &path,
+                            Arc::clone(&worker_cancellation),
+                        )
+                        .map_err(|error| error.to_string());
+                        let frame_timing = nle_waveform::analyze_frame_timing_cancellable(
                             &path,
                             Arc::clone(&worker_cancellation),
                         )
@@ -5884,13 +5909,14 @@ impl App {
                                     )
                                     .map_err(|error| error.to_string())
                                 });
-                        (metadata, waveform, video_strip)
+                        (metadata, frame_timing, waveform, video_strip)
                     };
                     let _ = tx.send(MediaAnalysisResult {
                         project_epoch,
                         media_id,
                         is_still,
                         metadata,
+                        frame_timing,
                         waveform,
                         video_strip,
                     });
@@ -5933,51 +5959,84 @@ impl App {
                 probe.record_analysis(result.metadata.is_ok(), 0);
             }
             match result.metadata {
-                Ok(metadata) => self.editor.set_media_metadata(
-                    media_id,
-                    nle_ui_core::MediaMetadata {
-                        duration_seconds: metadata.duration_seconds,
-                        file_size: metadata.file_size,
-                        container: metadata.container,
-                        overall_bit_rate: metadata.overall_bit_rate,
-                        video_codec: metadata.video_codec,
-                        width: metadata.width,
-                        height: metadata.height,
-                        frame_rate: metadata.frame_rate,
-                        frame_rate_ratio: metadata.frame_rate_ratio.and_then(|rate| {
-                            nle_ui_core::SourceFrameRate::new(rate.numerator(), rate.denominator())
-                        }),
-                        video_bit_rate: metadata.video_bit_rate,
-                        audio_codec: metadata.audio_codec,
-                        sample_rate: metadata.sample_rate,
-                        channels: metadata.channels,
-                        audio_bit_rate: metadata.audio_bit_rate,
-                        streams: metadata
-                            .streams
-                            .into_iter()
-                            .map(|stream| nle_ui_core::MediaStreamMetadata {
-                                index: stream.index,
-                                kind: stream.kind,
-                                codec: stream.codec,
-                                start_seconds: stream.start_seconds,
-                                duration_seconds: stream.duration_seconds,
-                                time_base: stream.time_base,
-                                bit_rate: stream.bit_rate,
-                                width: stream.width,
-                                height: stream.height,
-                                frame_rate: stream.frame_rate,
-                                frame_rate_ratio: stream.frame_rate_ratio.and_then(|rate| {
-                                    nle_ui_core::SourceFrameRate::new(
-                                        rate.numerator(),
-                                        rate.denominator(),
-                                    )
-                                }),
-                                sample_rate: stream.sample_rate,
-                                channels: stream.channels,
-                            })
-                            .collect(),
-                    },
-                ),
+                Ok(mut metadata) => {
+                    let timing_is_constant = matches!(
+                        &result.frame_timing,
+                        Ok(nle_waveform::FrameTiming::Constant)
+                    );
+                    if !timing_is_constant {
+                        // An average probe rate is useful inspector text, but it is not a safe
+                        // seek grid for VFR or incomplete timing scans.
+                        metadata.frame_rate_ratio = None;
+                        for stream in &mut metadata.streams {
+                            if stream.kind.as_deref() == Some("video") {
+                                stream.frame_rate_ratio = None;
+                            }
+                        }
+                    }
+                    let frame_time_index = match result.frame_timing {
+                        Ok(nle_waveform::FrameTiming::Variable(index)) => {
+                            nle_ui_core::SourceFrameTimeIndex::new(
+                                index
+                                    .into_pts()
+                                    .into_iter()
+                                    .map(nle_timeline::Tick)
+                                    .collect(),
+                            )
+                        }
+                        _ => None,
+                    };
+                    self.editor.set_media_metadata(
+                        media_id,
+                        nle_ui_core::MediaMetadata {
+                            duration_seconds: metadata.duration_seconds,
+                            file_size: metadata.file_size,
+                            container: metadata.container,
+                            overall_bit_rate: metadata.overall_bit_rate,
+                            video_codec: metadata.video_codec,
+                            width: metadata.width,
+                            height: metadata.height,
+                            frame_rate: metadata.frame_rate,
+                            frame_rate_ratio: metadata.frame_rate_ratio.and_then(|rate| {
+                                nle_ui_core::SourceFrameRate::new(
+                                    rate.numerator(),
+                                    rate.denominator(),
+                                )
+                            }),
+                            video_bit_rate: metadata.video_bit_rate,
+                            audio_codec: metadata.audio_codec,
+                            sample_rate: metadata.sample_rate,
+                            channels: metadata.channels,
+                            audio_bit_rate: metadata.audio_bit_rate,
+                            streams: metadata
+                                .streams
+                                .into_iter()
+                                .map(|stream| nle_ui_core::MediaStreamMetadata {
+                                    index: stream.index,
+                                    kind: stream.kind,
+                                    codec: stream.codec,
+                                    start_seconds: stream.start_seconds,
+                                    duration_seconds: stream.duration_seconds,
+                                    time_base: stream.time_base,
+                                    bit_rate: stream.bit_rate,
+                                    width: stream.width,
+                                    height: stream.height,
+                                    frame_rate: stream.frame_rate,
+                                    frame_rate_ratio: stream.frame_rate_ratio.and_then(|rate| {
+                                        nle_ui_core::SourceFrameRate::new(
+                                            rate.numerator(),
+                                            rate.denominator(),
+                                        )
+                                    }),
+                                    sample_rate: stream.sample_rate,
+                                    channels: stream.channels,
+                                })
+                                .collect(),
+                        },
+                    );
+                    self.editor
+                        .set_media_frame_time_index(media_id, frame_time_index);
+                }
                 Err(error) => self.editor.set_media_error(media_id, error),
             }
             match result.waveform {
@@ -7719,6 +7778,7 @@ mod tests {
             prewarm_scrub_workers: false,
             high_quality_scaling: true,
             source_frame_rate: nle_ui_core::SourceFrameRate::new(30, 1),
+            source_frame_duration_tick: None,
         };
         let identity = MonitorSourceIdentity {
             media_id: 42,
@@ -7961,6 +8021,7 @@ mod tests {
             media_id,
             source_tick: 0,
             source_frame_rate: None,
+            source_frame_duration_tick: None,
         }
     }
 
@@ -8109,6 +8170,7 @@ mod tests {
                 media_id: 1,
                 is_still: false,
                 metadata: Err("finished old metadata".to_owned()),
+                frame_timing: Err("finished old timing".to_owned()),
                 waveform: Err("finished old waveform".to_owned()),
                 video_strip: Err("finished old strip".to_owned()),
             })
@@ -9625,7 +9687,7 @@ mod tests {
             0,
             "missing timing must retain the nonnegative source tick"
         );
-        assert_eq!(monitor_source_frame_duration_tick(None), None);
+        assert_eq!(monitor_source_frame_duration_tick(None, None), None);
     }
 
     #[test]
@@ -9638,12 +9700,17 @@ mod tests {
             "equivalent rates must use one canonical request key"
         );
         assert_eq!(
-            monitor_source_frame_duration_tick(Some(ntsc_30)),
+            monitor_source_frame_duration_tick(Some(ntsc_30), None),
             Some(33_367)
         );
         assert_eq!(
-            monitor_source_frame_duration_tick(Some(ntsc_60)),
+            monitor_source_frame_duration_tick(Some(ntsc_60), None),
             Some(16_684)
+        );
+        assert_eq!(
+            monitor_source_frame_duration_tick(Some(ntsc_30), Some(70_000)),
+            Some(70_000),
+            "an indexed VFR span must override the average probe rate"
         );
         assert_eq!(monitor_source_tick_for_preview(33_366, Some(ntsc_30)), 0);
         assert_eq!(
@@ -9678,6 +9745,51 @@ mod tests {
             monitor_source_tick_for_preview(sixty_expected, Some(ntsc_60)),
             sixty_expected
         );
+    }
+
+    #[test]
+    fn supplied_vfr_fixture_routes_preview_to_complete_packet_boundaries() {
+        let Some(path) = std::env::var_os("MAELSTROM_VFR_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        let metadata =
+            nle_waveform::probe_media_metadata(&path).expect("probe deterministic VFR fixture");
+        let frame_timing =
+            nle_waveform::analyze_frame_timing(&path).expect("scan deterministic VFR fixture");
+        let nle_waveform::FrameTiming::Variable(index) = &frame_timing else {
+            panic!("deterministic VFR fixture was not classified as variable");
+        };
+        assert_eq!(index.pts(), &[0, 40_000, 110_000, 150_000, 240_000]);
+
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths([path]);
+        assert!(app.editor.add_selected_to_timeline());
+        app.media_analysis_tx
+            .send(MediaAnalysisResult {
+                project_epoch: app.media_analysis_epoch,
+                media_id: 1,
+                is_still: false,
+                metadata: Ok(metadata),
+                frame_timing: Ok(frame_timing),
+                waveform: Err("fixture intentionally has no audio".to_owned()),
+                video_strip: Err("strip is irrelevant to timing proof".to_owned()),
+            })
+            .expect("queue VFR analysis");
+        app.poll_media_analysis();
+
+        for (logical_tick, expected_decode_tick, expected_duration) in [
+            (0, 0, Some(40_000)),
+            (1, 0, Some(40_000)),
+            (40_000, 40_000, Some(70_000)),
+            (40_001, 40_000, Some(70_000)),
+            (240_001, 240_000, None),
+        ] {
+            app.editor.set_playhead(nle_timeline::Tick(logical_tick));
+            let source = preview_request(&app.editor).sources[0].expect("VFR preview source");
+            assert_eq!(source.source_tick, expected_decode_tick);
+            assert_eq!(source.source_frame_rate, None);
+            assert_eq!(source.source_frame_duration_tick, expected_duration);
+        }
     }
 
     #[test]
@@ -10680,6 +10792,7 @@ mod tests {
                         duration_seconds: Some(60.0),
                         ..Default::default()
                     }),
+                    frame_timing: Ok(nle_waveform::FrameTiming::Unknown),
                     waveform: Ok(nle_waveform::Waveform {
                         peaks: vec![
                             nle_waveform::Peak {

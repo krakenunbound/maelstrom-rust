@@ -1,17 +1,21 @@
+#requires -Version 7.0
 [CmdletBinding()]
 param(
     [ValidateNotNullOrEmpty()]
     [string]$FfmpegRoot = $env:FFMPEG_DIR,
-    [string]$ArtifactRoot = (Join-Path $PSScriptRoot '..\artifacts\media-fixtures'),
+    [string]$ArtifactRoot,
     [switch]$ManifestOnly,
     [switch]$IncludeRealCorpus
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
+    $ArtifactRoot = Join-Path $repoRoot 'artifacts\media-fixtures'
+}
 $manifestPath = Join-Path $repoRoot 'fixtures\media\manifest.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.schema_version -ne 1 -or [string]::IsNullOrWhiteSpace($manifest.artifact_root)) {
+if ($manifest.schema_version -ne 2 -or [string]::IsNullOrWhiteSpace($manifest.artifact_root)) {
     throw 'Unsupported or incomplete media fixture manifest.'
 }
 if ($manifest.artifact_root -ne 'artifacts/media-fixtures') { throw 'Unexpected fixture artifact root.' }
@@ -32,6 +36,17 @@ foreach ($fixture in $manifest.fixtures) {
         foreach ($field in 'codec', 'rate', 'width', 'height', 'gop') { if ($null -eq $fixture.video.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.video.$field)) { throw "Video fixture is missing ${field}: $($fixture.id)." } }
         if ([int]$fixture.video.width -lt 1 -or [int]$fixture.video.height -lt 1 -or [int]$fixture.video.gop -lt 1) { throw "Video dimensions and GOP must be positive: $($fixture.id)." }
         if ([string]$fixture.video.rate -notmatch '^(\d+)/(\d+)$' -or [int64]$Matches[1] -lt 1 -or [int64]$Matches[2] -lt 1) { throw "Video rate must be a positive rational: $($fixture.id)." }
+        if (-not ($fixture.video.PSObject.Properties.Name -contains 'timing')) { throw "Video fixture is missing timing metadata: $($fixture.id)." }
+        if ($fixture.video.timing.vfr -isnot [bool]) { throw "Video timing VFR flag must be Boolean: $($fixture.id)." }
+        if ($fixture.video.timing.vfr) {
+            foreach ($field in 'frame_count', 'first_pts_us', 'last_pts_us', 'expected_gap_us', 'pts_sha256') {
+                if ($null -eq $fixture.video.timing.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.video.timing.$field)) { throw "VFR video timing is missing ${field}: $($fixture.id)." }
+            }
+            if ([int]$fixture.video.timing.frame_count -lt 3 -or [int64]$fixture.video.timing.first_pts_us -lt 0 -or [int64]$fixture.video.timing.last_pts_us -le [int64]$fixture.video.timing.first_pts_us) { throw "VFR video timing bounds are invalid: $($fixture.id)." }
+            $distinctExpectedGaps = @($fixture.video.timing.expected_gap_us | ForEach-Object { [int64]$_ } | Select-Object -Unique)
+            if ($distinctExpectedGaps.Count -lt 2 -or @($distinctExpectedGaps | Where-Object { $_ -le 0 }).Count -ne 0) { throw "VFR video needs at least two positive expected gaps: $($fixture.id)." }
+            if ([string]$fixture.video.timing.pts_sha256 -notmatch '^[A-F0-9]{64}$') { throw "VFR PTS hash is not SHA-256: $($fixture.id)." }
+        }
     }
     if ($fixture.PSObject.Properties.Name -contains 'audio') {
         foreach ($field in 'codec', 'sample_rate', 'channels', 'layout') { if ($null -eq $fixture.audio.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.audio.$field)) { throw "Audio fixture is missing ${field}: $($fixture.id)." } }
@@ -52,6 +67,11 @@ $expectedArtifactPath = Join-Path $repoRoot 'artifacts\media-fixtures'
 if (-not [string]::Equals($artifactPath, $expectedArtifactPath, [StringComparison]::OrdinalIgnoreCase)) { throw "Fixture artifacts must be the ignored local artifact directory: $expectedArtifactPath" }
 
 function Assert-Equal([object]$Actual, [object]$Expected, [string]$Label) { if ([string]$Actual -ne [string]$Expected) { throw "$Label expected $Expected, got $Actual." } }
+function Get-Sha256Hex([string]$Text) {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { return ([Convert]::ToHexString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))) }
+    finally { $sha256.Dispose() }
+}
 foreach ($fixture in $manifest.fixtures) {
     $path = Join-Path $artifactPath $fixture.path
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing fixture: $path" }
@@ -69,7 +89,9 @@ foreach ($fixture in $manifest.fixtures) {
         $video = @($probe.streams | Where-Object codec_type -eq 'video')[0]
         if ($null -eq $video) { throw "Missing video stream: $($fixture.id)" }
         Assert-Equal $video.codec_name $fixture.video.codec "Video codec for $($fixture.id)"
-        Assert-Equal $video.r_frame_rate $fixture.video.rate "Video rate for $($fixture.id)"
+        if (-not $fixture.video.timing.vfr) {
+            Assert-Equal $video.r_frame_rate $fixture.video.rate "Video rate for $($fixture.id)"
+        }
         Assert-Equal $video.width $fixture.video.width "Video width for $($fixture.id)"
         Assert-Equal $video.height $fixture.video.height "Video height for $($fixture.id)"
         Assert-Equal $video.has_b_frames 0 "Video GOP/B-frame contract for $($fixture.id)"
@@ -83,6 +105,29 @@ foreach ($fixture in $manifest.fixtures) {
         if ($keyPositions.Count -ne $expectedKeyPositions.Count) { throw "GOP keyframe count for $($fixture.id) expected $($expectedKeyPositions.Count), got $($keyPositions.Count)." }
         for ($index = 0; $index -lt $expectedKeyPositions.Count; $index++) {
             if ($keyPositions[$index] -ne $expectedKeyPositions[$index]) { throw "GOP keyframe $index for $($fixture.id) expected $($expectedKeyPositions[$index]), got $($keyPositions[$index])." }
+        }
+        if ($fixture.video.timing.vfr) {
+            $frameJson = & $ffprobe -v error -select_streams v:0 -show_frames -show_entries frame=pts -of json $path 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "ffprobe timestamp scan failed: $($fixture.id)" }
+            $frames = @((($frameJson | ConvertFrom-Json).frames) | Where-Object { $null -ne $_.pts })
+            $timeBaseParts = [string]$video.time_base -split '/'
+            if ($timeBaseParts.Count -ne 2 -or [int64]$timeBaseParts[0] -lt 1 -or [int64]$timeBaseParts[1] -lt 1) { throw "Invalid video time base: $($fixture.id)" }
+            $ptsUs = @($frames | ForEach-Object { ([int64]$_.pts * [int64]$timeBaseParts[0] * 1000000) / [int64]$timeBaseParts[1] })
+            Assert-Equal $ptsUs.Count $fixture.video.timing.frame_count "VFR frame count for $($fixture.id)"
+            Assert-Equal $ptsUs[0] $fixture.video.timing.first_pts_us "VFR first PTS for $($fixture.id)"
+            Assert-Equal $ptsUs[$ptsUs.Count - 1] $fixture.video.timing.last_pts_us "VFR last PTS for $($fixture.id)"
+            $gapsUs = @()
+            for ($index = 1; $index -lt $ptsUs.Count; $index++) {
+                $gap = [int64]$ptsUs[$index] - [int64]$ptsUs[$index - 1]
+                if ($gap -le 0) { throw "VFR PTS are not strictly monotonic at frame ${index}: $($fixture.id)" }
+                $gapsUs += $gap
+            }
+            $actualDistinctGaps = @($gapsUs | Select-Object -Unique)
+            if ($actualDistinctGaps.Count -lt 2) { throw "VFR PTS gaps are not irregular: $($fixture.id)" }
+            foreach ($expectedGap in @($fixture.video.timing.expected_gap_us | ForEach-Object { [int64]$_ } | Select-Object -Unique)) {
+                if ($expectedGap -notin $actualDistinctGaps) { throw "Expected VFR PTS gap $expectedGap us not found: $($fixture.id)" }
+            }
+            Assert-Equal (Get-Sha256Hex ($ptsUs -join ',')) $fixture.video.timing.pts_sha256 "VFR PTS fingerprint for $($fixture.id)"
         }
     }
     if ($fixture.PSObject.Properties.Name -contains 'audio') {

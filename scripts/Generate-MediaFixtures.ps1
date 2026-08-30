@@ -1,12 +1,16 @@
+#requires -Version 7.0
 [CmdletBinding()]
 param(
     [ValidateNotNullOrEmpty()]
     [string]$FfmpegRoot = $env:FFMPEG_DIR,
-    [string]$OutputRoot = (Join-Path $PSScriptRoot '..\artifacts\media-fixtures')
+    [string]$OutputRoot
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = Join-Path $repoRoot 'artifacts\media-fixtures'
+}
 if ([string]::IsNullOrWhiteSpace($FfmpegRoot)) {
     throw 'Pass -FfmpegRoot with an absolute FFmpeg bundle root or set FFMPEG_DIR.'
 }
@@ -47,6 +51,17 @@ Invoke-FixtureFfmpeg @(
     '-c:a', 'aac', '-ac', '2', '-ar', '48000', '-movflags', '+faststart',
     '-metadata', 'creation_time=1970-01-01T00:00:00Z'
 ) $avPath
+
+# Select source frames at deliberately uneven millisecond timestamps.  The select
+# filter preserves the 1/1000-second input PTS and -fps_mode vfr prevents the
+# muxer from filling those gaps with CFR duplicates.
+$vfrPath = Join-Path $outputPath 'vfr-irregular-mpeg4.mp4'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=1000',
+    '-vf', "select='eq(n,0)+eq(n,40)+eq(n,110)+eq(n,150)+eq(n,240)'",
+    '-frames:v', '5', '-fps_mode', 'vfr', '-an', '-c:v', 'mpeg4', '-q:v', '8', '-g', '5', '-bf', '0',
+    '-movflags', '+faststart', '-metadata', 'creation_time=1970-01-01T00:00:00Z'
+) $vfrPath
 
 $wavPath = Join-Path $outputPath 'mono-pcm-48k.wav'
 Invoke-FixtureFfmpeg @(

@@ -100,7 +100,14 @@ $appReportPath = Join-Path $artifactRoot 'phase1-sustained-app-report.json'
 $stdoutPath = Join-Path $artifactRoot 'phase1-sustained-test.stdout.txt'
 $stderrPath = Join-Path $artifactRoot 'phase1-sustained-test.stderr.txt'
 $ffmpegRoot = Join-Path $repoRoot '.deps\ffmpeg-project-8.1'
-$libclangRoot = Join-Path $repoRoot '.deps\libclang-bindgen'
+$libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
+    Join-Path $repoRoot '.deps\libclang-bindgen'
+} else {
+    [IO.Path]::GetFullPath($env:LIBCLANG_PATH)
+}
+if (-not (Test-Path -LiteralPath (Join-Path $libclangRoot 'libclang.dll') -PathType Leaf)) {
+    throw "Missing libclang required by native FFmpeg bindings below: $libclangRoot"
+}
 $cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction Stop
 $cargoExecutable = [IO.Path]::GetFullPath($cargoCommand.Source)
 

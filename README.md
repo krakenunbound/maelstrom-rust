@@ -25,14 +25,20 @@ remain resident for the future inference engines.
 ## Run
 
 ```powershell
-cargo run -p nle-app
+& 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
 ```
+
+This is the supported editor entry point; it resolves the packaged executable by its full path and
+preflights every adjacent FFmpeg/MinGW runtime DLL. Developer `cargo run` and `cargo test` binaries
+are routed by `.cargo\config.toml` through `scripts\cargo-runtime-runner.bat`, which prepends the
+project-local runtime and reports an incomplete bundle in the terminal instead of opening a chain
+of Windows missing-DLL dialogs. Neither path installs DLLs into Windows.
 
 The monitor decoders share one decoded-frame cache. Its app-wide hard cap
 defaults to 1024 MB and can be bounded explicitly:
 
 ```powershell
-cargo run -p nle-app -- --cache-mb 512
+& 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat' --cache-mb 512
 ```
 
 The v1.1 plan adds the two-machines model (timeline versus picture), explicit

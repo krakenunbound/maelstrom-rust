@@ -143,9 +143,14 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       targets, immutable preview requests, request keys, and decoder cache tolerance without
       millihertz rounding. Fractional frame boundaries use the first representable microsecond, and
       unknown timing is neither snapped to an invented 120 fps grid nor allowed to substitute a
-      later cached frame. This remains open: `avg_frame_rate` is not a VFR timestamp index, and a
-      bounded/cancellable PTS index, deterministic irregular-timestamp fixture, slip mapping, and
-      reverse-policy proof are still required.
+      later cached frame. A bounded/cancellable one-million-point packet-PTS scan now classifies
+      constant, variable, and unknown timing off the UI thread. Variable sources retain a
+      runtime-only index, suppress the unsafe average-rate seek grid, hold the greatest source PTS
+      at or before the logical playhead, and carry each adjacent local span into request/cache
+      policy. The deterministic MPEG-4 fixture proves exact `0/40/110/150/240 ms` irregular PTS
+      through analysis and preview addressing. This remains open: packet PTS is a safe bounded
+      demux index rather than decoded best-effort frame timing for every complex codec, and slip
+      mapping plus reverse-policy proof are still required.
 - [ ] Add decode-session eviction that respects the global byte/session cap.
 - [ ] Expose active source backend, preview scale, proxy/original choice, and fallback reason.
 

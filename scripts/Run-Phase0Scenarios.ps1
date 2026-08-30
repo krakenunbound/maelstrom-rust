@@ -41,7 +41,11 @@ New-Item -ItemType Directory -Force -Path $resolvedArtifactRoot | Out-Null
 
 $fixtureRoot = Join-Path $repoRoot 'artifacts\media-fixtures'
 $mediaPath = Join-Path $fixtureRoot 'bars-aac-2997.mp4'
-$libclangRoot = Join-Path $repoRoot '.deps\libclang-bindgen'
+$libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
+    Join-Path $repoRoot '.deps\libclang-bindgen'
+} else {
+    [IO.Path]::GetFullPath($env:LIBCLANG_PATH)
+}
 $libclang = Join-Path $libclangRoot 'libclang.dll'
 if (-not (Test-Path -LiteralPath $libclang -PathType Leaf)) { throw "Missing local libclang required by native FFmpeg bindings: $libclang" }
 $savedPath = $env:PATH

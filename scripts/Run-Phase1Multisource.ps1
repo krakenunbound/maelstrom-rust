@@ -64,7 +64,11 @@ $cargoExecutable = [IO.Path]::GetFullPath($cargoCommand.Source)
 $ffmpegRoot = Join-Path $repoRoot '.deps\ffmpeg-project-8.1'
 $ffmpeg = Join-Path $ffmpegRoot 'bin\ffmpeg.exe'
 $ffprobe = Join-Path $ffmpegRoot 'bin\ffprobe.exe'
-$libclangRoot = Join-Path $repoRoot '.deps\libclang-bindgen'
+$libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
+    Join-Path $repoRoot '.deps\libclang-bindgen'
+} else {
+    [IO.Path]::GetFullPath($env:LIBCLANG_PATH)
+}
 $libclang = Join-Path $libclangRoot 'libclang.dll'
 $artifactRoot = Join-Path $repoRoot 'artifacts\phase1-multisource'
 $resolvedArtifactRoot = [IO.Path]::GetFullPath($artifactRoot)
