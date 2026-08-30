@@ -52,4 +52,9 @@ if /I "%~1"=="--verify-runtime" (
 )
 
 set "PATH=%MAELSTROM_EDITOR_DIR%;%PATH%"
+rem Opt-in qualification runners retain this exact launcher as the process-tree root.
+if /I "%MAELSTROM_LAUNCHER_WAIT%"=="1" (
+    start "Maelstrom Video Editor" /wait /D "%MAELSTROM_EDITOR_DIR%" "%MAELSTROM_EDITOR_EXE%" %*
+    exit /b
+)
 start "Maelstrom Video Editor" /D "%MAELSTROM_EDITOR_DIR%" "%MAELSTROM_EDITOR_EXE%" %*

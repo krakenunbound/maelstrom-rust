@@ -1176,6 +1176,18 @@ struct TimelineDropGeometry {
     visible_ticks: f32,
 }
 
+/// Runtime-only layout evidence for injecting pointer input into the timeline ruler.
+///
+/// This is populated only after the current frame has created the ruler scrub widget. It is not
+/// part of project snapshots or durable editor state.
+#[derive(Clone, Copy, Debug)]
+pub struct TimelineScrubGeometry {
+    pub handle_center: Pos2,
+    pub content: Rect,
+    pub view_start: Tick,
+    pub view_span: Tick,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TimelineTrackRowGeometry {
     track_id: TrackId,
@@ -1542,6 +1554,8 @@ pub struct EditorState {
     /// Transition catalog drag ownership independent of egui's cross-panel payload lifetime.
     active_transition_drag: Option<VideoTransitionKind>,
     timeline_drop_geometry: Option<TimelineDropGeometry>,
+    /// Runtime-only ruler geometry retained from the current layout pass for input probes.
+    timeline_scrub_geometry: Option<TimelineScrubGeometry>,
     /// Visible rows from the most recent timeline frame. Transition drops deliberately resolve
     /// against this geometry so they can never land on an off-screen or audio track.
     timeline_track_rows: Vec<TimelineTrackRowGeometry>,
@@ -1668,6 +1682,7 @@ impl EditorState {
             active_media_drag: None,
             active_transition_drag: None,
             timeline_drop_geometry: None,
+            timeline_scrub_geometry: None,
             timeline_track_rows: Vec::new(),
             media_drag_rects: HashMap::new(),
             action: None,
@@ -2981,6 +2996,13 @@ impl EditorState {
     /// True only while the timeline ruler owns an active scrub gesture.
     pub fn is_scrubbing(&self) -> bool {
         matches!(self.timeline_drag, Some(TimelineDrag::Scrub))
+    }
+
+    /// Returns the measured ruler-handle and timeline mapping geometry from the current frame.
+    ///
+    /// The value is runtime-only and unavailable until the timeline has been laid out.
+    pub fn timeline_scrub_geometry(&self) -> Option<TimelineScrubGeometry> {
+        self.timeline_scrub_geometry
     }
 
     /// Resolves up to four visible video sources, in bottom-to-top visual order.
@@ -4682,6 +4704,8 @@ pub fn show_editor_with_canvases(
     viewer_canvas: &mut dyn ViewerCanvas,
 ) {
     editor_style(ui.ctx());
+    // Geometry is valid only for the frame that draws its corresponding timeline widget.
+    state.timeline_scrub_geometry = None;
     claim_media_press_from_previous_layout(ui, state);
     handle_editor_shortcuts(ui, state);
     handle_timeline_tool_shortcuts(ui, state);
@@ -11612,7 +11636,8 @@ fn timeline_with_canvas_presentation(
         state.timeline_scroll_y = scroll_y;
         state.mark_durable_edit();
     }
-    let visible_ticks = state.timeline_view_span.0.max(1) as f32;
+    let view_span = Tick(state.timeline_view_span.0.max(1));
+    let visible_ticks = view_span.0 as f32;
     let view_start = state.timeline_view_start;
     state.timeline_drop_geometry = Some(TimelineDropGeometry {
         rect,
@@ -11760,6 +11785,12 @@ fn timeline_with_canvas_presentation(
         ui.id().with("timeline-playhead-scrub"),
         Sense::drag(),
     );
+    state.timeline_scrub_geometry = Some(TimelineScrubGeometry {
+        handle_center: scrub_response.rect.center(),
+        content,
+        view_start,
+        view_span,
+    });
     if scrub_response.hovered() || scrub_response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
@@ -17650,6 +17681,86 @@ mod tests {
             }],
         );
         assert!(!editor.is_scrubbing());
+    }
+
+    #[test]
+    fn timeline_scrub_geometry_drives_a_ruler_gesture_and_stays_runtime_only() {
+        let context = egui::Context::default();
+        let mut editor = EditorState::new(Language::English, "Scrub geometry");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        editor.set_playhead(Tick(7_500_000));
+        editor.set_detail_zoom();
+        assert!(editor.timeline_scrub_geometry().is_none());
+
+        timeline_input_frame(&context, &mut editor, Vec::new());
+        let generation = editor.durable_generation();
+        let geometry = editor
+            .timeline_scrub_geometry()
+            .expect("layout should expose the actual ruler handle");
+        assert_eq!(
+            editor.durable_generation(),
+            generation,
+            "reading geometry is not an edit"
+        );
+        let target = Pos2::new(
+            geometry.content.left() + geometry.content.width() * 0.75,
+            geometry.handle_center.y,
+        );
+        let expected = Tick(
+            geometry.view_start.0
+                + (((target.x - geometry.content.left()) / geometry.content.width()
+                    * geometry.view_span.0 as f32)
+                    .round() as i64),
+        );
+        let primary = egui::PointerButton::Primary;
+
+        timeline_input_frame(
+            &context,
+            &mut editor,
+            vec![
+                egui::Event::PointerMoved(geometry.handle_center),
+                egui::Event::PointerButton {
+                    pos: geometry.handle_center,
+                    button: primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(editor.is_scrubbing());
+        timeline_input_frame(
+            &context,
+            &mut editor,
+            vec![egui::Event::PointerMoved(target)],
+        );
+        assert_eq!(editor.playhead, expected);
+        assert!(editor.is_scrubbing());
+        timeline_input_frame(
+            &context,
+            &mut editor,
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(!editor.is_scrubbing());
+        // The real gesture may persist the playhead. Reading its retained geometry must not
+        // contribute another durable edit or become part of the saved project.
+        let generation_after_gesture = editor.durable_generation();
+        assert!(editor.timeline_scrub_geometry().is_some());
+        assert_eq!(editor.durable_generation(), generation_after_gesture);
+
+        editor.set_kraken_upscale_capability(true, "");
+        editor.set_workspace(EditorWorkspace::KrakenUpscale);
+        editor_input_frame(&context, &mut editor, Vec::new());
+        assert!(editor.timeline_scrub_geometry().is_none());
+
+        let restored = EditorState::restore(Language::English, "Scrub geometry", editor.snapshot())
+            .expect("restore runtime-only geometry test snapshot");
+        assert!(restored.timeline_scrub_geometry().is_none());
     }
 
     #[test]

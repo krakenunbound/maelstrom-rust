@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod model_preload;
+mod phase1_ui;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -3332,6 +3333,7 @@ struct App {
     monitor_runtime_metrics: MonitorRuntimeMetrics,
     startup_presentation_probe: Option<StartupPresentationProbe>,
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
+    phase1_ui_probe: Option<phase1_ui::Probe>,
     playback_soak_probe: Option<PlaybackSoakProbe>,
     machine_profile: MachineProfile,
     renderer_report: Option<RendererReport>,
@@ -3571,7 +3573,8 @@ impl App {
         let startup_notify = Arc::clone(&notify);
         Self::new_with_catalog_and_notifier(
             demo_hub,
-            (!demo_hub).then(project_catalog_path),
+            (!demo_hub && std::env::var_os("MAELSTROM_PHASE1_UI_CONFIG").is_none())
+                .then(project_catalog_path),
             move || monitor_notify(AppEvent::Monitor),
             move || writer_notify(AppEvent::ProjectWriter),
             move || catalog_notify(AppEvent::ProjectWriter),
@@ -3698,6 +3701,7 @@ impl App {
             monitor_runtime_metrics: MonitorRuntimeMetrics::default(),
             startup_presentation_probe: StartupPresentationProbe::from_environment(started_at),
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
+            phase1_ui_probe: phase1_ui::Probe::from_environment(),
             playback_soak_probe: PlaybackSoakProbe::from_environment(),
             machine_profile: hardware::detect_machine(),
             renderer_report: None,
@@ -4249,7 +4253,11 @@ impl App {
         } else {
             let window = self.window.as_ref().expect("window lives while rendering");
             let state = self.egui_state.as_mut().expect("application event state");
-            let raw_input = state.take_egui_input(window);
+            let mut raw_input = state.take_egui_input(window);
+            let measured_input = self
+                .phase1_ui_probe
+                .as_mut()
+                .is_some_and(|probe| probe.inject_input(&mut raw_input, &self.editor));
             // HOT PATH — no IO. Dialogs and media work are dispatched after drawing.
             let hub_backdrops = self
                 .hub_backdrop_textures
@@ -4290,6 +4298,9 @@ impl App {
                 }
                 Screen::Splash => {}
             });
+            if measured_input && let Some(probe) = &mut self.phase1_ui_probe {
+                probe.ui_complete(editor);
+            }
             native_primitive_counts = (
                 timeline_canvas.rect_scratch.len(),
                 timeline_canvas.texture_scratch.len(),
@@ -4298,8 +4309,8 @@ impl App {
             viewer_canvas.submit();
             state.handle_platform_output(window, output.platform_output);
             let primitives = context.tessellate(output.shapes, output.pixels_per_point);
-            let measure_gpu_completion =
-                self.screen == Screen::Editor && self.surface_submission_probe.is_some();
+            let measure_gpu_completion = self.screen == Screen::Editor
+                && (self.surface_submission_probe.is_some() || self.phase1_ui_probe.is_some());
             let hub_renderer = self
                 .hub_renderer
                 .get_or_insert_with(|| HubRenderer::new(&device, config.format));
@@ -4340,6 +4351,7 @@ impl App {
         // editor actions and is allocation-free when this request already matches.
         if self.screen == Screen::Editor && self.editor.is_scrubbing() {
             self.sync_monitor_decode();
+            self.capture_phase1_ui_targets();
         }
         let frame_cpu_duration = frame_cpu_started.elapsed();
         let frame_performance = self.frame_metrics.record(
@@ -4395,6 +4407,7 @@ impl App {
             self.sync_audio_transport();
             self.sync_monitor_decode();
         }
+        self.advance_phase1_ui(frame_cpu_duration);
     }
 
     fn show_project_hub(&mut self) {
@@ -6117,6 +6130,10 @@ impl App {
             }
             preview = preview_request(&self.editor);
         }
+        if self.phase1_ui_probe.is_some() {
+            // Explicit stress workload: Full source raster, independent of viewer panel size.
+            preview.output_size = [1920, 1080];
+        }
         self.submit_monitor_decode_request(preview);
     }
 
@@ -6959,6 +6976,33 @@ impl App {
                 );
                 self.monitor_runtime_metrics
                     .record_presented(native_uploaded);
+                if let Some(probe) = &mut self.phase1_ui_probe {
+                    let serial = if native_uploaded {
+                        self.hub_renderer
+                            .as_ref()
+                            .map(|renderer| {
+                                renderer.viewer_presentation_evidence().upload_serials[layer]
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    probe.decoded(
+                        layer,
+                        media_id,
+                        self.editor
+                            .playback_targets()
+                            .nth(layer)
+                            .map(|target| target.clip_id.0)
+                            .unwrap_or(0),
+                        frame.project_epoch,
+                        frame.request_id,
+                        frame.source_tick,
+                        [frame.width, frame.height],
+                        frame.backend,
+                        serial,
+                    );
+                }
                 if let Some(probe) = &mut self.media_acceptance_probe {
                     probe.record_monitor_frame(media_id, native_uploaded);
                 }
@@ -7473,7 +7517,9 @@ impl ApplicationHandler<AppEvent> for App {
             ));
         }
         self.create_gpu(window);
-        if std::env::var("MAELSTROM_SMOKE_EDITOR").as_deref() == Ok("1") {
+        if self.phase1_ui_probe.is_some() {
+            self.start_phase1_ui();
+        } else if std::env::var("MAELSTROM_SMOKE_EDITOR").as_deref() == Ok("1") {
             self.show_editor_screen(
                 "Package Smoke".to_owned(),
                 Language::English,
@@ -7773,6 +7819,14 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .phase1_ui_probe
+            .as_ref()
+            .is_some_and(|probe| probe.should_exit())
+        {
+            event_loop.exit();
+            return;
+        }
         if self.first_surface_presented {
             // Project IO remains on a worker. CPAL streams are not Send on every supported
             // platform, so native audio negotiation stays on the owner thread but begins only

@@ -4,7 +4,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -30,6 +30,81 @@ pub struct ViewerCompositorGpuTiming {
     pub samples: usize,
     pub p95_ms: f32,
     pub max_ms: f32,
+}
+
+/// Retained command-encoding evidence for the project-monitor presentation path.
+///
+/// An upload serial identifies a successfully written layer texture. A painted serial is the
+/// upload identity captured by the most recent canvas blit. This reports command encoding and
+/// submission only; it does not establish GPU completion or display scanout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewerPresentationEvidence {
+    pub upload_serials: [u64; MAX_COMPOSITE_LAYERS],
+    pub painted_upload_serials: [Option<u64>; MAX_COMPOSITE_LAYERS],
+    pub paint_serial: u64,
+}
+
+#[derive(Default)]
+struct ViewerPresentationTracker {
+    next_upload_serial: u64,
+    composed_upload_serials: [Option<u64>; MAX_COMPOSITE_LAYERS],
+    upload_serials: [AtomicU64; MAX_COMPOSITE_LAYERS],
+    painted_upload_serials: [AtomicU64; MAX_COMPOSITE_LAYERS],
+    paint_serial: AtomicU64,
+}
+
+impl ViewerPresentationTracker {
+    fn record_upload(&mut self, layer: usize) {
+        self.next_upload_serial = self
+            .next_upload_serial
+            .checked_add(1)
+            .expect("viewer upload serial exhausted");
+        self.upload_serials[layer].store(self.next_upload_serial, Ordering::Relaxed);
+    }
+
+    fn clear_layer(&mut self, layer: usize) {
+        self.upload_serials[layer].store(0, Ordering::Relaxed);
+        self.composed_upload_serials[layer] = None;
+    }
+
+    fn clear(&mut self) {
+        for serial in &self.upload_serials {
+            serial.store(0, Ordering::Relaxed);
+        }
+        self.composed_upload_serials = [None; MAX_COMPOSITE_LAYERS];
+    }
+
+    fn capture_composition(&mut self, rendered: [bool; MAX_COMPOSITE_LAYERS]) {
+        self.composed_upload_serials = std::array::from_fn(|layer| {
+            rendered[layer]
+                .then(|| self.upload_serials[layer].load(Ordering::Relaxed))
+                .filter(|serial| *serial != 0)
+        });
+    }
+
+    fn record_paint(&self) {
+        for (painted, serial) in self
+            .painted_upload_serials
+            .iter()
+            .zip(self.composed_upload_serials)
+        {
+            painted.store(serial.unwrap_or_default(), Ordering::Relaxed);
+        }
+        self.paint_serial.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn evidence(&self) -> ViewerPresentationEvidence {
+        ViewerPresentationEvidence {
+            upload_serials: std::array::from_fn(|layer| {
+                self.upload_serials[layer].load(Ordering::Relaxed)
+            }),
+            painted_upload_serials: std::array::from_fn(|layer| {
+                let serial = self.painted_upload_serials[layer].load(Ordering::Relaxed);
+                (serial != 0).then_some(serial)
+            }),
+            paint_serial: self.paint_serial.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -549,6 +624,7 @@ pub struct ViewerCompositorRenderer {
     input_generation: u64,
     applied_input_generation: u64,
     applied_frame_generation: u64,
+    presentation: ViewerPresentationTracker,
     gpu_timing_enabled: bool,
     gpu_timestamps: Option<GpuTimestampResources>,
 }
@@ -613,6 +689,7 @@ impl ViewerCompositorRenderer {
             input_generation: 0,
             applied_input_generation: u64::MAX,
             applied_frame_generation: u64::MAX,
+            presentation: ViewerPresentationTracker::default(),
             gpu_timing_enabled: false,
             gpu_timestamps: device
                 .features()
@@ -657,6 +734,10 @@ impl ViewerCompositorRenderer {
         self.gpu_timestamps
             .as_ref()
             .is_some_and(|timestamps| timestamps.mailbox.pending())
+    }
+
+    pub fn presentation_evidence(&self) -> ViewerPresentationEvidence {
+        self.presentation.evidence()
     }
 
     /// Drains a previously mapped pass timestamp after a nonblocking device poll.
@@ -721,6 +802,7 @@ impl ViewerCompositorRenderer {
             },
         );
         self.input_generation = self.input_generation.wrapping_add(1);
+        self.presentation.record_upload(layer);
         Ok(())
     }
 
@@ -730,6 +812,7 @@ impl ViewerCompositorRenderer {
             self.input_generation = self.input_generation.wrapping_add(1);
         }
         self.layer_sizes[layer] = None;
+        self.presentation.clear_layer(layer);
         Ok(())
     }
 
@@ -740,6 +823,7 @@ impl ViewerCompositorRenderer {
         self.layer_sizes = [None; MAX_COMPOSITE_LAYERS];
         self.input_generation = self.input_generation.wrapping_add(1);
         self.applied_input_generation = u64::MAX;
+        self.presentation.clear();
     }
 
     fn prepare(
@@ -754,6 +838,7 @@ impl ViewerCompositorRenderer {
         let Some(frame) = frame.filter(|frame| frame.project_size.is_nonzero()) else {
             self.outputs = None;
             self.output_size = None;
+            self.presentation.composed_upload_serials = [None; MAX_COMPOSITE_LAYERS];
             return false;
         };
         let resized = self.ensure_outputs(device, canvas_size);
@@ -790,6 +875,8 @@ impl ViewerCompositorRenderer {
                 layer_count[layer] = VERTICES_PER_LAYER as u32;
             }
         }
+        self.presentation
+            .capture_composition(std::array::from_fn(|layer| layer_count[layer] != 0));
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         queue.write_buffer(&self.matte_vertex_buffer, 0, bytemuck::cast_slice(&mattes));
         let outputs = self.outputs.as_ref().expect("output targets allocated");
@@ -917,6 +1004,7 @@ impl ViewerCompositorRenderer {
             clip.height_px as u32,
         );
         pass.draw(0..6, 0..1);
+        self.presentation.record_paint();
     }
 
     fn ensure_outputs(&mut self, device: &wgpu::Device, size: PixelSize) -> bool {
@@ -2073,6 +2161,58 @@ mod tests {
         );
         let _callback_guard = handle.state.lock().expect("callback state lock");
         assert_eq!(handle.try_compositor_encode_timing(), None);
+    }
+
+    #[test]
+    fn presentation_evidence_tracks_upload_composition_and_blit_separately() {
+        let mut tracker = ViewerPresentationTracker::default();
+        tracker.record_upload(1);
+        assert_eq!(
+            tracker.evidence(),
+            ViewerPresentationEvidence {
+                upload_serials: [0, 1, 0, 0],
+                ..Default::default()
+            }
+        );
+
+        tracker.capture_composition([false, true, false, false]);
+        assert_eq!(
+            tracker.evidence().painted_upload_serials,
+            [None; MAX_COMPOSITE_LAYERS]
+        );
+        tracker.record_paint();
+        assert_eq!(
+            tracker.evidence(),
+            ViewerPresentationEvidence {
+                upload_serials: [0, 1, 0, 0],
+                painted_upload_serials: [None, Some(1), None, None],
+                paint_serial: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn presentation_evidence_clears_current_identity_without_reusing_serials() {
+        let mut tracker = ViewerPresentationTracker::default();
+        tracker.record_upload(0);
+        tracker.capture_composition([true, false, false, false]);
+        tracker.record_paint();
+        tracker.clear_layer(0);
+        assert_eq!(tracker.evidence().upload_serials, [0; MAX_COMPOSITE_LAYERS]);
+        // The prior blit remains historical evidence until a later blit supersedes it.
+        assert_eq!(tracker.evidence().painted_upload_serials[0], Some(1));
+
+        tracker.record_upload(0);
+        assert_eq!(tracker.evidence().upload_serials[0], 2);
+        tracker.clear();
+        tracker.record_paint();
+        assert_eq!(
+            tracker.evidence(),
+            ViewerPresentationEvidence {
+                paint_serial: 2,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

@@ -301,6 +301,10 @@ An agent may open the editor only after an explicit user request, through
 `H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`. The launcher's `--verify-runtime` option checks
 required files without opening a window.
 
+The opt-in [four-source windowed qualification harness](./docs/phase1-ui-qualification.md)
+also defaults to preparation without opening the editor. Its authorized run mode uses the exact
+launcher with `MAELSTROM_LAUNCHER_WAIT=1` to retain process ownership until the editor exits.
+
 Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
 AMD64 directory supplied with
 `-VcRedistCrtDirectory` or the newest auto-discovered installed Visual Studio x64

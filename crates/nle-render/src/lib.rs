@@ -32,8 +32,8 @@ pub use texture_renderer::{
 pub use viewer_compositor::{
     MAX_COLOR_CORRECTIONS_PER_LAYER, ViewerColorCorrection, ViewerColorCurve,
     ViewerCompositorCallbackHandle, ViewerCompositorEncodeTiming, ViewerCompositorGpuTiming,
-    ViewerCompositorRenderer, ViewerFrame, ViewerLayerPrimitive, ViewerRgbCurves,
-    ViewerUploadError,
+    ViewerCompositorRenderer, ViewerFrame, ViewerLayerPrimitive, ViewerPresentationEvidence,
+    ViewerRgbCurves, ViewerUploadError,
 };
 
 const GPU_COMPLETION_SAMPLE_WINDOW: usize = 120;
@@ -189,6 +189,18 @@ impl HubRenderer {
             .get::<ViewerCompositorRenderer>()
             .expect("viewer compositor renderer is registered")
             .gpu_timing()
+    }
+
+    /// Snapshot retained project-monitor command-encoding evidence without a callback lock.
+    ///
+    /// This records texture uploads, composition, and canvas blits; it does not imply GPU
+    /// completion or display scanout.
+    pub fn viewer_presentation_evidence(&self) -> ViewerPresentationEvidence {
+        self.renderer
+            .callback_resources
+            .get::<ViewerCompositorRenderer>()
+            .expect("viewer compositor renderer is registered")
+            .presentation_evidence()
     }
 
     /// Snapshot bounded submission-to-GPU-completion timing samples.
