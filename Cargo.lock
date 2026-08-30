@@ -1653,6 +1653,7 @@ dependencies = [
  "nle-decode",
  "nle-export",
  "nle-project-io",
+ "nle-proxy",
  "nle-render",
  "nle-timeline",
  "nle-ui-core",
@@ -1719,6 +1720,10 @@ dependencies = [
  "serde_json",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "nle-proxy"
+version = "0.1.0"
 
 [[package]]
 name = "nle-render"

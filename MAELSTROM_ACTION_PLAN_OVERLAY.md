@@ -129,7 +129,10 @@ Finish holes. Do not replace working crates.
 
 1. **Multi-source scheduler.** Immutable multi-source requests, shared source actors, hard caps, and speculative-prewarm-first priority/recency eviction now exist. Visible reverse-scrub work is protected from speculative release. The remaining gate is UI-present/cross-hardware proof that four 1080p sources do not hitch the timeline and a slow source does not stall the clock.
 2. **VFR / rational rates.** Project rate exists; source-time mapping across trim, slip, reverse, and 30000/1001 is still a correctness hole.
-3. **Proxies.** Optional derived media. Never a prerequisite to play or edit.
+3. **Proxies.** The first optional derived-media slice is complete: cancellable background 720p
+   generation, bounded disposable cache, nested EN/JA media/clip menus, monitor-only selection, and
+   original fallback. Proxies never replace project, audio, or export source truth. Queues,
+   persistent attachment, and multiple profiles are later extensions, not prerequisites to edit.
 4. **Premultiplied alpha.** Layers composite; image/video alpha semantics are unfinished. Redo the blend path, not the compositor crate.
 5. **Effect graph.** Brightness/contrast keys on a clip are not a node graph. Design stable IDs, ports, and schema-versioned serialization before a catalog of sliders.
 6. **Color.** No working-space pipeline, no LUTs, no scopes. Rec.709 SDR first. Do not drop OCIO onto a display-referred preview.

@@ -125,6 +125,20 @@ truth for an edit. Waveforms and thumbnail strips are derived display caches. An
 after media is placed on the timeline. Missing/unreadable media remains editable as a magenta
 offline bar.
 
+User proxy media is a separate derived-video path owned by `nle-proxy`. A cancellable worker uses
+the packaged LGPL FFmpeg to create a video-only, intra-frame, timestamp-preserving 720p MPEG-4 file,
+publishes it atomically, and prunes the disposable local-app-data cache to 64 files / 8 GiB. The app
+keeps the proxy record and enable choice in runtime state only. It substitutes that path solely at
+monitor `DecodeRequest` construction; audio targets, media analysis, project snapshots, and export
+plans always retain the original source. A distinct monitor-cache epoch advances on every routing
+change so original and proxy pixels cannot share one cache identity. Completion revalidates the
+source fingerprint, explicit enable rechecks the proxy file, and post-generation pruning is
+reconciled against retained records. If an enabled proxy is deleted or cannot decode, the decoder
+error boundary disables it and resubmits the original without adding disk access to the monitor hot
+path. Regeneration and deletion perform replacement/removal on owned workers; failed removal keeps
+a disabled cleanup record so Retry/Delete cannot rediscover a bad file as Ready. See
+`docs/proxy-media.md`.
+
 Live preview resolves at most four visible, unmuted video tracks into a fixed bottom-to-top
 target array. Each slot owns an independent latest-wins monitor decoder, generation, retained frame,
 and native texture. Its single worker keeps only the current source's FFmpeg session sticky, and the

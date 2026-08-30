@@ -225,7 +225,27 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.
 - [x] Add adaptive full/half/quarter/eighth preview resolution based on measured frame budget.
 - [x] Add manual preview-quality override and an honest Auto mode.
-- [ ] Add background proxy generation as optional derived media, never a prerequisite to edit/play.
+- [x] Add background proxy generation as optional derived media, never a prerequisite to edit/play.
+      Video media and timeline clips now expose one bilingual nested Proxy Media workflow: generate
+      a balanced 720p proxy in the background, cancel it, switch between proxy/original, retry, or
+      delete it. `nle-proxy` publishes only complete video-only intra-frame MPEG-4 files through an
+      atomic rename, fingerprints the original path/size/mtime plus a profile version, preserves
+      VFR timestamp spacing while normalizing the source origin, and kills/waits its FFmpeg child
+      on cancellation. A real 1080p irregular-PTS gate preserves source/proxy frame-interval count
+      within 1 ms; a separate real gate proves video-only, <=720p, all-intra output. Its disposable
+      local-app-data cache is capped at 64 files / 8 GiB, with sparse-file byte-cap proof. Runtime
+      selection is applied only where monitor video `DecodeRequest` paths are constructed; audio
+      targets, `.nleproj`, source metadata, and export snapshots keep the original. Missing/stale/
+      failed/incomplete proxies therefore fall back to the original and never block editing. The
+      monitor frame-cache namespace advances whenever routing changes, preventing original/proxy
+      pixels from aliasing under one media ID. A proxy decode failure (including concurrent cache
+      cleanup by another process) disables the derived route and immediately resubmits the original.
+      Regeneration force-replaces the deterministic artifact on its worker; deletion is also an
+      owned background job, and a locked-file failure retains the disabled cleanup handle for retry.
+      Post-generation reconciliation also retires any older record evicted by the cache cap. The
+      default remains original media. This first slice intentionally supports one background job
+      and one fixed 720p profile; persistent attachment, job queues, and multiple profiles remain
+      later product work. See `docs/proxy-media.md`.
 - [ ] Preserve exact source-time mapping for VFR, rational project rates, trims, slips, and reverse
       seeks. Exact reduced FFprobe `avg_frame_rate` ratios now flow through media analysis, playback
       targets, immutable preview requests, request keys, and decoder cache tolerance without
@@ -260,8 +280,9 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       shared cache hits explicitly report backend and fallback as unobserved rather than borrowing
       a different session's identity. Diagnostics clear with their monitor layer and are excluded
       from `.nleproj`; full decoder, UI-core, and app suites cover fallback retention, cache
-      provenance, per-layer lifecycle, localization, and persistence. This does not claim a user
-      proxy/optimized-media workflow; that remains separate Phase 1 product work.
+      provenance, per-layer lifecycle, localization, and persistence. It now also distinguishes
+      the original source, user-selected Proxy Media, and internal scrub preview in English and
+      Japanese without conflating the two derived preview paths.
 
 Exit gate:
 

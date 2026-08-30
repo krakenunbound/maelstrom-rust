@@ -11,6 +11,7 @@ nle-export = { path = "../nle-export" }
 nle-audio = { path = "../nle-audio" }
 nle-render = { path = "../nle-render" }
 nle-project-io = { path = "../nle-project-io" }
+nle-proxy = { path = "../nle-proxy" }
 nle-timeline = { path = "../nle-timeline" }
 nle-ui-core = { path = "../nle-ui-core" }
 nle-upscale = { path = "../nle-upscale" }

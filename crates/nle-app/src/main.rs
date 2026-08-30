@@ -30,8 +30,8 @@ use nle_ui_core::{
     ActivePreviewDecoderBackend, ActivePreviewDiagnostic, ActivePreviewFallbackReason,
     ActivePreviewSourceKind, EditorAction, EditorProjectSnapshot, EditorState, HubAction,
     HubBackdrops, Language, MediaKind, MonitorFrame, PreviewQuality, ProjectFrameRate,
-    ProjectHubState, RuntimeDiagnostics, TimelineCanvas, ViewerCanvas, classify_path,
-    configure_fonts, show_editor_with_canvases, show_with_backdrops,
+    ProjectHubState, ProxyMediaStatus, RuntimeDiagnostics, TimelineCanvas, ViewerCanvas,
+    classify_path, configure_fonts, show_editor_with_canvases, show_with_backdrops,
 };
 use winit::{
     application::ApplicationHandler,
@@ -69,6 +69,15 @@ const SCRUB_PREVIEW_MIN_FRAMES: usize = 12;
 const SCRUB_PREVIEW_FRAME_HEIGHT: u32 = 90;
 const MAX_RUNTIME_VIDEO_STRIPS: usize = 4;
 const MAX_RUNTIME_VIDEO_STRIP_BYTES: usize = 256 * 1024 * 1024;
+
+/// Disposable user proxies live outside project truth. The bounded proxy crate owns pruning.
+fn proxy_cache_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Maelstrom")
+        .join("Proxy Media")
+}
 /// The finite Phase 0 pressure checkpoint uses five 70 MiB strips. Four candidates would occupy
 /// 280 MiB before the byte cap evicts the oldest retained strip.
 #[cfg(test)]
@@ -3346,6 +3355,12 @@ struct App {
     export_job: Option<nle_export::ExportJob>,
     export_project_id: Option<u32>,
     upscale_job: Option<nle_upscale::UpscaleJob>,
+    proxy_job: Option<nle_proxy::ProxyJob>,
+    proxy_job_media_id: Option<u32>,
+    proxy_delete_job: Option<nle_proxy::ProxyDeleteJob>,
+    proxy_delete_media_id: Option<u32>,
+    proxy_records: HashMap<u32, ProxyRecord>,
+    proxy_cache_root: PathBuf,
     editor: EditorState,
     project_dialog_tx: mpsc::Sender<ProjectDialogResult>,
     project_dialog_rx: mpsc::Receiver<ProjectDialogResult>,
@@ -3359,6 +3374,7 @@ struct App {
     media_analysis_cancellations: HashMap<(u64, u32), Arc<AtomicBool>>,
     media_analysis_workers: HashMap<(u64, u32), thread::JoinHandle<()>>,
     media_analysis_epoch: u64,
+    monitor_cache_epoch: u64,
     hardware_tx: Option<mpsc::Sender<HardwareProfile>>,
     hardware_rx: mpsc::Receiver<HardwareProfile>,
     hardware_detection_started_at: Option<Instant>,
@@ -3369,6 +3385,44 @@ struct App {
     app_resources_ready: bool,
     splash_continue_available: bool,
     started_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct ProxyRecord {
+    artifact: nle_proxy::ProxyArtifact,
+    enabled: bool,
+}
+
+fn resolved_monitor_media_path<'a>(
+    records: &'a HashMap<u32, ProxyRecord>,
+    media_id: u32,
+    original: &'a Path,
+) -> &'a Path {
+    records
+        .get(&media_id)
+        .filter(|record| record.enabled)
+        .map(|record| record.artifact.path.as_path())
+        .unwrap_or(original)
+}
+
+fn proxy_text(language: Language, english: &str, japanese: &str) -> String {
+    match language {
+        Language::English => english,
+        Language::Japanese => japanese,
+    }
+    .to_owned()
+}
+
+fn proxy_error_text(
+    language: Language,
+    english_prefix: &str,
+    japanese_prefix: &str,
+    detail: &str,
+) -> String {
+    match language {
+        Language::English => format!("{english_prefix}: {detail}"),
+        Language::Japanese => format!("{japanese_prefix}: {detail}"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3667,6 +3721,12 @@ impl App {
             export_job: None,
             export_project_id: None,
             upscale_job: None,
+            proxy_job: None,
+            proxy_job_media_id: None,
+            proxy_delete_job: None,
+            proxy_delete_media_id: None,
+            proxy_records: HashMap::new(),
+            proxy_cache_root: proxy_cache_root(),
             editor,
             project_dialog_tx,
             project_dialog_rx,
@@ -3680,6 +3740,7 @@ impl App {
             media_analysis_cancellations: HashMap::new(),
             media_analysis_workers: HashMap::new(),
             media_analysis_epoch: 0,
+            monitor_cache_epoch: 0,
             hardware_tx: Some(hardware_tx),
             hardware_rx,
             hardware_detection_started_at: None,
@@ -4280,6 +4341,7 @@ impl App {
             audio.pause();
         }
         self.audio_transport = None;
+        self.reset_proxy_session();
         self.reset_media_analysis_session();
         self.project_save_blocked = save_blocked;
         self.current_project_settings = settings;
@@ -4932,6 +4994,418 @@ impl App {
         }
     }
 
+    fn request_proxy_media(&mut self, media_id: u32, requested_path: PathBuf) {
+        let Some(media) = self.editor.media.iter().find(|media| media.id == media_id) else {
+            return;
+        };
+        if media.kind != MediaKind::Video || media.path != requested_path {
+            self.editor.set_proxy_media_status(
+                media_id,
+                ProxyMediaStatus::Failed {
+                    message: proxy_text(
+                        self.editor.language,
+                        "The original video source changed; using original media",
+                        "元の動画ソースが変更されたため、オリジナルを使用します",
+                    ),
+                },
+            );
+            return;
+        }
+        if let Some(active_media_id) = self.proxy_job_media_id {
+            if active_media_id != media_id {
+                self.editor.set_proxy_media_status(
+                    media_id,
+                    ProxyMediaStatus::Failed {
+                        message: proxy_text(
+                            self.editor.language,
+                            "Another proxy is already generating",
+                            "別のプロキシを生成中です",
+                        ),
+                    },
+                );
+            }
+            return;
+        }
+        let request = nle_proxy::ProxyRequest {
+            input: requested_path,
+            cache_root: self.proxy_cache_root.clone(),
+            ffmpeg: bundled_media_tool("ffmpeg"),
+            replace_existing: true,
+        };
+        let notify = Arc::clone(&self.project_dialog_notify);
+        match nle_proxy::ProxyJob::start(request, move || notify()) {
+            Ok(job) => {
+                self.proxy_job = Some(job);
+                self.proxy_job_media_id = Some(media_id);
+                self.editor.set_proxy_media_status(
+                    media_id,
+                    ProxyMediaStatus::Generating { progress: 0.0 },
+                );
+                self.hub.status = Some(proxy_text(
+                    self.editor.language,
+                    "Generating optional proxy media…",
+                    "任意のプロキシメディアを生成中…",
+                ));
+            }
+            Err(message) => self.editor.set_proxy_media_status(
+                media_id,
+                ProxyMediaStatus::Failed {
+                    message: proxy_error_text(
+                        self.editor.language,
+                        "Proxy generation could not start",
+                        "プロキシ生成を開始できませんでした",
+                        &message,
+                    ),
+                },
+            ),
+        }
+    }
+
+    fn poll_proxy_job(&mut self) {
+        let events = self
+            .proxy_job
+            .as_ref()
+            .map(|job| {
+                std::iter::from_fn(|| job.try_recv().ok()).collect::<Vec<nle_proxy::ProxyEvent>>()
+            })
+            .unwrap_or_default();
+        if events.is_empty() {
+            return;
+        }
+        let Some(media_id) = self.proxy_job_media_id else {
+            self.proxy_job.take();
+            return;
+        };
+        let mut terminal = false;
+        for event in events {
+            match event {
+                nle_proxy::ProxyEvent::Progress(progress) => self
+                    .editor
+                    .set_proxy_media_status(media_id, ProxyMediaStatus::Generating { progress }),
+                nle_proxy::ProxyEvent::Completed(artifact) => {
+                    let source_is_current = self
+                        .editor
+                        .media
+                        .iter()
+                        .find(|media| media.id == media_id)
+                        .is_some_and(|media| {
+                            media.kind == MediaKind::Video
+                                && artifact.source.matches(&media.path)
+                                && artifact.path.is_file()
+                        });
+                    if source_is_current {
+                        self.proxy_records.insert(
+                            media_id,
+                            ProxyRecord {
+                                artifact,
+                                enabled: true,
+                            },
+                        );
+                        self.editor.set_proxy_media_status(
+                            media_id,
+                            ProxyMediaStatus::Ready { enabled: true },
+                        );
+                        self.hub.status = Some(proxy_text(
+                            self.editor.language,
+                            "Proxy media ready; preview is using it",
+                            "プロキシメディアの準備完了。プレビューで使用中です",
+                        ));
+                        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+                    } else {
+                        self.proxy_records.remove(&media_id);
+                        self.editor.set_proxy_media_status(
+                            media_id,
+                            ProxyMediaStatus::Failed {
+                                message: proxy_text(
+                                    self.editor.language,
+                                    "Proxy became stale; preview is using the original",
+                                    "プロキシが古いため、プレビューはオリジナルを使用します",
+                                ),
+                            },
+                        );
+                    }
+                    self.reconcile_proxy_records();
+                    terminal = true;
+                }
+                nle_proxy::ProxyEvent::Cancelled => {
+                    self.editor
+                        .set_proxy_media_status(media_id, ProxyMediaStatus::None);
+                    self.hub.status = Some(proxy_text(
+                        self.editor.language,
+                        "Proxy generation cancelled",
+                        "プロキシ生成をキャンセルしました",
+                    ));
+                    terminal = true;
+                }
+                nle_proxy::ProxyEvent::Failed(message) => {
+                    if let Some(record) = self.proxy_records.get_mut(&media_id) {
+                        record.enabled = false;
+                    }
+                    self.editor.set_proxy_media_status(
+                        media_id,
+                        ProxyMediaStatus::Failed {
+                            message: proxy_error_text(
+                                self.editor.language,
+                                "Proxy generation failed",
+                                "プロキシ生成に失敗しました",
+                                &message,
+                            ),
+                        },
+                    );
+                    self.hub.status = Some(match self.editor.language {
+                        Language::English => format!("Proxy generation failed: {message}"),
+                        Language::Japanese => format!("プロキシ生成に失敗しました: {message}"),
+                    });
+                    terminal = true;
+                }
+            }
+        }
+        if terminal {
+            self.proxy_job.take();
+            self.proxy_job_media_id = None;
+            if self.screen == Screen::Editor {
+                self.sync_monitor_decode();
+            }
+        }
+    }
+
+    fn set_proxy_media_enabled(&mut self, media_id: u32, enabled: bool) {
+        let Some(record) = self.proxy_records.get_mut(&media_id) else {
+            self.editor.set_proxy_media_status(
+                media_id,
+                ProxyMediaStatus::Failed {
+                    message: proxy_text(
+                        self.editor.language,
+                        "Proxy is unavailable; preview is using the original",
+                        "プロキシを使用できないため、プレビューはオリジナルを使用します",
+                    ),
+                },
+            );
+            return;
+        };
+        let original = self
+            .editor
+            .media
+            .iter()
+            .find(|media| media.id == media_id)
+            .map(|media| media.path.clone());
+        let usable = original.as_deref().is_some_and(|path| {
+            record.artifact.path.is_file() && record.artifact.source.matches(path)
+        });
+        if enabled && !usable {
+            self.proxy_records.remove(&media_id);
+            self.editor.set_proxy_media_status(
+                media_id,
+                ProxyMediaStatus::Failed {
+                    message: proxy_text(
+                        self.editor.language,
+                        "Proxy is missing or stale; preview is using the original",
+                        "プロキシが見つからないか古いため、プレビューはオリジナルを使用します",
+                    ),
+                },
+            );
+        } else {
+            record.enabled = enabled;
+            self.editor
+                .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled });
+        }
+        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+        if self.screen == Screen::Editor {
+            self.sync_monitor_decode();
+        }
+    }
+
+    fn delete_proxy_media(&mut self, media_id: u32) {
+        if self.proxy_job_media_id == Some(media_id)
+            && let Some(job) = &self.proxy_job
+        {
+            job.cancel();
+        }
+        if self.proxy_delete_job.is_some() {
+            self.editor.set_proxy_media_status(
+                media_id,
+                ProxyMediaStatus::Failed {
+                    message: proxy_text(
+                        self.editor.language,
+                        "Another proxy is already being removed",
+                        "別のプロキシを削除中です",
+                    ),
+                },
+            );
+            return;
+        }
+        let Some(record) = self.proxy_records.get_mut(&media_id) else {
+            self.editor
+                .set_proxy_media_status(media_id, ProxyMediaStatus::None);
+            return;
+        };
+        record.enabled = false;
+        let path = record.artifact.path.clone();
+        let notify = Arc::clone(&self.project_dialog_notify);
+        match nle_proxy::ProxyDeleteJob::start(path, move || notify()) {
+            Ok(job) => {
+                self.proxy_delete_job = Some(job);
+                self.proxy_delete_media_id = Some(media_id);
+                self.editor
+                    .set_proxy_media_status(media_id, ProxyMediaStatus::Deleting);
+            }
+            Err(message) => {
+                self.editor.set_proxy_media_status(
+                    media_id,
+                    ProxyMediaStatus::Failed {
+                        message: proxy_error_text(
+                            self.editor.language,
+                            "Proxy removal could not start",
+                            "プロキシ削除を開始できませんでした",
+                            &message,
+                        ),
+                    },
+                );
+            }
+        }
+        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+        if self.screen == Screen::Editor {
+            self.sync_monitor_decode();
+        }
+    }
+
+    fn poll_proxy_delete(&mut self) {
+        let Some(event) = self
+            .proxy_delete_job
+            .as_ref()
+            .and_then(|job| job.try_recv().ok())
+        else {
+            return;
+        };
+        let Some(media_id) = self.proxy_delete_media_id else {
+            self.proxy_delete_job.take();
+            return;
+        };
+        match event {
+            nle_proxy::ProxyDeleteEvent::Completed => {
+                self.proxy_records.remove(&media_id);
+                self.editor
+                    .set_proxy_media_status(media_id, ProxyMediaStatus::None);
+            }
+            nle_proxy::ProxyDeleteEvent::Failed(message) => {
+                self.editor.set_proxy_media_status(
+                    media_id,
+                    ProxyMediaStatus::Failed {
+                        message: proxy_error_text(
+                            self.editor.language,
+                            "Proxy removal failed",
+                            "プロキシ削除に失敗しました",
+                            &message,
+                        ),
+                    },
+                );
+            }
+        }
+        self.proxy_delete_job.take();
+        self.proxy_delete_media_id = None;
+    }
+
+    fn reset_proxy_session(&mut self) {
+        if let Some(job) = &self.proxy_job {
+            job.cancel();
+        }
+        self.proxy_job.take();
+        self.proxy_job_media_id = None;
+        if let Some(job) = &self.proxy_delete_job {
+            job.cancel();
+        }
+        self.proxy_delete_job.take();
+        self.proxy_delete_media_id = None;
+        self.proxy_records.clear();
+    }
+
+    /// Runs only after background cache mutation, never in monitor submission. If pruning or an
+    /// external cleanup removed a derived file, preview ownership returns to the original source.
+    fn reconcile_proxy_records(&mut self) {
+        let stale = self
+            .proxy_records
+            .iter()
+            .filter_map(|(&media_id, record)| {
+                let original = self
+                    .editor
+                    .media
+                    .iter()
+                    .find(|media| media.id == media_id)
+                    .map(|media| media.path.as_path());
+                (!record.artifact.path.is_file()
+                    || original.is_none_or(|path| !record.artifact.source.matches(path)))
+                .then_some(media_id)
+            })
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return;
+        }
+        for media_id in stale {
+            self.proxy_records.remove(&media_id);
+            self.editor.set_proxy_media_status(
+                media_id,
+                ProxyMediaStatus::Failed {
+                    message: proxy_text(
+                        self.editor.language,
+                        "Proxy is missing or stale; preview is using the original",
+                        "プロキシが見つからないか古いため、プレビューはオリジナルを使用します",
+                    ),
+                },
+            );
+        }
+        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+    }
+
+    /// A derived source that cannot decode must never strand the monitor. Decoder errors are the
+    /// nonblocking boundary where a concurrently deleted/corrupt proxy is retired and retried from
+    /// the original; the hot monitor-submission path remains free of filesystem calls.
+    fn fallback_from_failed_proxy_decode(&mut self, layer: usize) -> bool {
+        let Some(identity) = self.monitor_source_identities[layer].as_ref() else {
+            return false;
+        };
+        let Some(record) = self.proxy_records.get(&identity.media_id) else {
+            return false;
+        };
+        if !record.enabled || identity.path != record.artifact.path {
+            return false;
+        }
+        let media_id = identity.media_id;
+        if let Some(record) = self.proxy_records.get_mut(&media_id) {
+            record.enabled = false;
+        }
+        self.editor.set_proxy_media_status(
+            media_id,
+            ProxyMediaStatus::Failed {
+                message: proxy_text(
+                    self.editor.language,
+                    "Proxy could not be decoded; preview returned to the original",
+                    "プロキシをデコードできないため、プレビューをオリジナルに戻しました",
+                ),
+            },
+        );
+        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+        true
+    }
+
+    fn active_monitor_source_kind(&self, layer: usize, media_id: u32) -> ActivePreviewSourceKind {
+        let uses_proxy = self
+            .monitor_source_identities
+            .get(layer)
+            .and_then(Option::as_ref)
+            .filter(|identity| identity.media_id == media_id)
+            .and_then(|identity| {
+                self.proxy_records
+                    .get(&media_id)
+                    .filter(|record| record.enabled && identity.path == record.artifact.path)
+            })
+            .is_some();
+        if uses_proxy {
+            ActivePreviewSourceKind::UserProxyMedia
+        } else {
+            ActivePreviewSourceKind::OriginalSource
+        }
+    }
+
     fn queue_project_catalog_save(&mut self) {
         let Some(path) = &self.catalog_path else {
             return;
@@ -5178,6 +5652,20 @@ impl App {
             EditorAction::AnalyzeMedia { media_id, path } => {
                 self.request_media_analysis(media_id, path)
             }
+            EditorAction::GenerateProxyMedia { media_id, path } => {
+                self.request_proxy_media(media_id, path)
+            }
+            EditorAction::CancelProxyMedia { media_id } => {
+                if self.proxy_job_media_id == Some(media_id)
+                    && let Some(job) = &self.proxy_job
+                {
+                    job.cancel();
+                }
+            }
+            EditorAction::SetProxyMediaEnabled { media_id, enabled } => {
+                self.set_proxy_media_enabled(media_id, enabled)
+            }
+            EditorAction::DeleteProxyMedia { media_id } => self.delete_proxy_media(media_id),
             EditorAction::StartExport => self.request_video_export(),
             EditorAction::CancelExport => {
                 if let Some(job) = &self.export_job {
@@ -5369,6 +5857,7 @@ impl App {
             let _ = worker.join();
         }
         self.media_analysis_epoch = self.media_analysis_epoch.wrapping_add(1);
+        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
         self.media_analysis_pending.clear();
         self.media_analysis_in_flight.clear();
         self.media_analysis_cancellations.clear();
@@ -5581,6 +6070,8 @@ impl App {
                     .nth(layer)
                     .expect("resolved monitor layer remains stable during one sync")
                     .path;
+                let target_path =
+                    resolved_monitor_media_path(&self.proxy_records, source.media_id, target_path);
                 monitor_source_identity_changed(
                     self.monitor_source_identities[layer].as_ref(),
                     source.media_id,
@@ -5669,11 +6160,13 @@ impl App {
                 .playback_targets()
                 .nth(layer)
                 .expect("resolved monitor layer remains stable during one sync")
-                .path
-                .to_path_buf();
+                .path;
+            let target_path =
+                resolved_monitor_media_path(&self.proxy_records, source.media_id, target_path)
+                    .to_path_buf();
             match self.monitor_decoders[layer].request(nle_decode::DecodeRequest {
                 project_epoch: key.project_epoch,
-                cache_epoch: self.media_analysis_epoch,
+                cache_epoch: self.monitor_cache_epoch,
                 request_id,
                 media_id: key.media_id,
                 path: target_path.clone(),
@@ -6322,11 +6815,12 @@ impl App {
                     .filter(|request| request.media_id == media_id);
                 let decoder_backend = frame.backend.map(active_preview_decoder_backend);
                 let fallback_reason = frame.fallback_reason.map(active_preview_fallback_reason);
+                let source_kind = self.active_monitor_source_kind(layer, media_id);
                 let _ = self.editor.set_active_preview_diagnostic_for_layer(
                     layer,
                     ActivePreviewDiagnostic::new(
                         media_id,
-                        ActivePreviewSourceKind::OriginalSource,
+                        source_kind,
                         decoder_backend,
                         fallback_reason,
                         request
@@ -6360,8 +6854,12 @@ impl App {
                 self.monitor_requests_in_flight[layer] = false;
                 self.monitor_request_deferred[layer] = false;
                 self.monitor_request_started_at[layer] = None;
-                self.adaptive_preview.mark_layer_unavailable(layer);
-                self.editor.set_monitor_error(error.message);
+                if self.fallback_from_failed_proxy_decode(layer) {
+                    self.sync_monitor_decode();
+                } else {
+                    self.adaptive_preview.mark_layer_unavailable(layer);
+                    self.editor.set_monitor_error(error.message);
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -7134,6 +7632,8 @@ impl ApplicationHandler<AppEvent> for App {
                 self.poll_project_dialog();
                 self.poll_video_export();
                 self.poll_kraken_upscale();
+                self.poll_proxy_job();
+                self.poll_proxy_delete();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -7162,6 +7662,8 @@ impl ApplicationHandler<AppEvent> for App {
         self.poll_project_dialog();
         self.poll_video_export();
         self.poll_kraken_upscale();
+        self.poll_proxy_job();
+        self.poll_proxy_delete();
         self.poll_media_dialog();
         self.poll_media_analysis();
         self.poll_monitor_decoder();
@@ -7413,6 +7915,174 @@ fn main() {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn optional_proxy_routing_changes_monitor_video_only() {
+        let original = PathBuf::from("C:/media/original.mp4");
+        let proxy = PathBuf::from("C:/cache/proxy.mp4");
+        let mut records = HashMap::new();
+        assert_eq!(
+            resolved_monitor_media_path(&records, 1, &original),
+            original
+        );
+
+        records.insert(
+            1,
+            ProxyRecord {
+                artifact: nle_proxy::ProxyArtifact {
+                    path: proxy.clone(),
+                    source: nle_proxy::SourceFingerprint {
+                        canonical_path: original.clone(),
+                        bytes: 1,
+                        modified_unix_nanos: 1,
+                    },
+                    output_bytes: 1,
+                    profile_version: nle_proxy::PROXY_PROFILE_VERSION,
+                },
+                enabled: true,
+            },
+        );
+        assert_eq!(resolved_monitor_media_path(&records, 1, &original), proxy);
+        records.get_mut(&1).expect("proxy record").enabled = false;
+        assert_eq!(
+            resolved_monitor_media_path(&records, 1, &original),
+            original
+        );
+
+        let mut editor = EditorState::new(Language::English, "Proxy isolation");
+        editor.add_media_paths([original.clone()]);
+        assert!(editor.insert_media_at(1, nle_timeline::Tick(0)));
+        let audio_targets = editor.audio_playback_targets();
+        assert!(!audio_targets.is_empty());
+        assert!(audio_targets.iter().all(|target| target.path == original));
+        assert_eq!(editor.snapshot().media[0].path, original);
+    }
+
+    #[test]
+    fn proxy_route_changes_advance_cache_namespace_and_decode_error_falls_back() {
+        let catalog = test_catalog_path("proxy-route-epoch");
+        let root = catalog.parent().expect("test root");
+        fs::create_dir_all(root).expect("create proxy test root");
+        let original = root.join("original.mp4");
+        let proxy = root.join("proxy.mp4");
+        fs::write(&original, b"original").expect("write source");
+        fs::write(&proxy, b"proxy").expect("write proxy");
+
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        app.editor.add_media_paths([original.clone()]);
+        app.proxy_records.insert(
+            1,
+            ProxyRecord {
+                artifact: nle_proxy::ProxyArtifact {
+                    path: proxy.clone(),
+                    source: nle_proxy::SourceFingerprint::capture(&original)
+                        .expect("source fingerprint"),
+                    output_bytes: fs::metadata(&proxy).expect("proxy metadata").len(),
+                    profile_version: nle_proxy::PROXY_PROFILE_VERSION,
+                },
+                enabled: false,
+            },
+        );
+        app.editor
+            .set_proxy_media_status(1, ProxyMediaStatus::Ready { enabled: false });
+
+        let initial_epoch = app.monitor_cache_epoch;
+        app.set_proxy_media_enabled(1, true);
+        assert!(app.monitor_cache_epoch > initial_epoch);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            proxy
+        );
+        app.monitor_source_identities[0] = Some(MonitorSourceIdentity {
+            media_id: 1,
+            path: proxy.clone(),
+            acceleration: nle_decode::AccelerationPreference::Auto,
+        });
+        assert_eq!(
+            app.active_monitor_source_kind(0, 1),
+            ActivePreviewSourceKind::UserProxyMedia
+        );
+
+        let enabled_epoch = app.monitor_cache_epoch;
+        fs::remove_file(&proxy).expect("simulate external proxy cleanup");
+        assert!(app.fallback_from_failed_proxy_decode(0));
+        assert!(app.monitor_cache_epoch > enabled_epoch);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        assert!(!app.proxy_records.get(&1).expect("cleanup record").enabled);
+        assert!(!proxy.exists());
+        assert!(matches!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Failed { .. }
+        ));
+
+        drop(app);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_background_proxy_delete_retains_cleanup_handle_for_retry() {
+        let catalog = test_catalog_path("proxy-delete-retry");
+        let root = catalog.parent().expect("test root");
+        fs::create_dir_all(root).expect("create proxy delete test root");
+        let original = root.join("original.mp4");
+        let locked_proxy = root.join("locked-proxy.mp4");
+        fs::write(&original, b"original").expect("write source");
+        fs::create_dir(&locked_proxy).expect("directory cannot be removed as a file");
+
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        app.editor.add_media_paths([original.clone()]);
+        app.proxy_records.insert(
+            1,
+            ProxyRecord {
+                artifact: nle_proxy::ProxyArtifact {
+                    path: locked_proxy.clone(),
+                    source: nle_proxy::SourceFingerprint::capture(&original)
+                        .expect("source fingerprint"),
+                    output_bytes: 0,
+                    profile_version: nle_proxy::PROXY_PROFILE_VERSION,
+                },
+                enabled: false,
+            },
+        );
+        app.editor.set_proxy_media_status(
+            1,
+            ProxyMediaStatus::Failed {
+                message: "retry".into(),
+            },
+        );
+
+        app.delete_proxy_media(1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.proxy_delete_job.is_some() && Instant::now() < deadline {
+            app.poll_proxy_delete();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.proxy_delete_job.is_none());
+        assert!(app.proxy_records.contains_key(&1));
+        assert!(matches!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Failed { .. }
+        ));
+
+        fs::remove_dir(&locked_proxy).expect("release simulated lock");
+        fs::write(&locked_proxy, b"stale proxy").expect("replace with removable stale file");
+        app.delete_proxy_media(1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.proxy_delete_job.is_some() && Instant::now() < deadline {
+            app.poll_proxy_delete();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.proxy_delete_job.is_none());
+        assert!(!app.proxy_records.contains_key(&1));
+        assert!(!locked_proxy.exists());
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::None);
+
+        drop(app);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn phase0_surface_adapter_class_parses_supported_values() {

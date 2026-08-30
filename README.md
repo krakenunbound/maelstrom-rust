@@ -49,6 +49,12 @@ defaults to 1024 MB and can be bounded explicitly:
 & 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat' --cache-mb 512
 ```
 
+Video cards and timeline clips also have a nested **Proxy Media** menu. It can build, cancel,
+enable, disable, retry, or delete an optional 720p editing proxy in the background. Proxies affect
+monitor video only; project files, audio, and Quick Export always retain the original. The default
+is original media, unavailable proxies fall back automatically, and the disposable cache is capped
+at 64 files / 8 GiB. See [`docs/proxy-media.md`](./docs/proxy-media.md).
+
 The v1.1 plan adds the two-machines model (timeline versus picture), explicit
 GPU/RAM targets, stock LGPL shared FFmpeg, and a must-employ checklist. Its
 first performance gate is 50,000 timeline bars at 60 fps without FFmpeg linked;

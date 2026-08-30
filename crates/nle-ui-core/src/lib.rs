@@ -8,10 +8,11 @@ pub use editor::{
     EditorExportStatus, EditorMediaSnapshot, EditorProjectSnapshot, EditorRestoreError,
     EditorState, EditorViewSnapshot, EditorWorkspace, EguiTimelineCanvas, EguiViewerCanvas,
     InvalidProjectFrameRate, MediaId, MediaKind, MediaMetadata, MediaStreamMetadata, MonitorFrame,
-    PREVIEW_VIDEO_LAYER_COUNT, PreviewQuality, ProjectFrameRate, RuntimeDiagnostics,
-    SourceFrameRate, SourceFrameTimeIndex, TimelineCanvas, TimelineFlag, TimelineMarker,
-    TimelineTool, TimelineTrackDensity, TrackHeightSnapshot, VideoStripLayout, ViewerCanvas,
-    classify_path, show_editor, show_editor_with_canvases, show_editor_with_timeline_canvas,
+    PREVIEW_VIDEO_LAYER_COUNT, PreviewQuality, ProjectFrameRate, ProxyMediaStatus,
+    RuntimeDiagnostics, SourceFrameRate, SourceFrameTimeIndex, TimelineCanvas, TimelineFlag,
+    TimelineMarker, TimelineTool, TimelineTrackDensity, TrackHeightSnapshot, VideoStripLayout,
+    ViewerCanvas, classify_path, show_editor, show_editor_with_canvases,
+    show_editor_with_timeline_canvas,
 };
 
 use egui::{

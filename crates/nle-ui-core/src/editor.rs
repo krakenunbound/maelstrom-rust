@@ -666,6 +666,7 @@ pub struct MonitorFrame {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivePreviewSourceKind {
     OriginalSource,
+    UserProxyMedia,
     InternalScrubPreview,
 }
 
@@ -951,6 +952,21 @@ pub enum EditorAction {
         media_id: MediaId,
         path: PathBuf,
     },
+    /// Build an optional low-resolution edit proxy. The original source remains authoritative.
+    GenerateProxyMedia {
+        media_id: MediaId,
+        path: PathBuf,
+    },
+    CancelProxyMedia {
+        media_id: MediaId,
+    },
+    SetProxyMediaEnabled {
+        media_id: MediaId,
+        enabled: bool,
+    },
+    DeleteProxyMedia {
+        media_id: MediaId,
+    },
     StartKrakenUpscale,
     CancelKrakenUpscale,
 }
@@ -961,6 +977,25 @@ pub enum EditorExportStatus {
     Running { progress: f32 },
     Completed(PathBuf),
     Failed(String),
+}
+
+/// Session-only state for optional derived proxy media. This is intentionally never serialized:
+/// the original media path remains the durable project reference and the application may rebuild
+/// or discard a proxy at any time.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ProxyMediaStatus {
+    #[default]
+    None,
+    Generating {
+        progress: f32,
+    },
+    Deleting,
+    Ready {
+        enabled: bool,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1382,6 +1417,8 @@ pub struct EditorState {
     /// Packet timing is rebuildable runtime state and is deliberately never serialized.
     source_frame_time_indexes: HashMap<MediaId, SourceFrameTimeIndex>,
     media_decoder_backends: HashMap<MediaId, String>,
+    /// Runtime-only proxy job/readiness state. It must not dirty or alter project snapshots.
+    proxy_media_statuses: HashMap<MediaId, ProxyMediaStatus>,
     video_strips: HashMap<MediaId, CachedVideoStrip>,
     /// Retained text layouts indexed by media-vector position. The timeline hot loop only clones
     /// an Arc; it never formats or allocates one String per visible clip.
@@ -1516,6 +1553,7 @@ impl EditorState {
             media_metadata: HashMap::new(),
             source_frame_time_indexes: HashMap::new(),
             media_decoder_backends: HashMap::new(),
+            proxy_media_statuses: HashMap::new(),
             video_strips: HashMap::new(),
             timeline_label_galleys: Vec::new(),
             timeline_offline_prefix_galley: None,
@@ -2497,6 +2535,23 @@ impl EditorState {
     /// Records the actual decoder used by the live monitor, not a hardware capability guess.
     pub fn set_media_decoder_backend(&mut self, media_id: MediaId, backend: impl Into<String>) {
         self.media_decoder_backends.insert(media_id, backend.into());
+    }
+
+    /// Returns the current optional-proxy state. Missing entries deliberately mean no proxy.
+    pub fn proxy_media_status(&self, media_id: MediaId) -> ProxyMediaStatus {
+        self.proxy_media_statuses
+            .get(&media_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Updates session-only proxy status without affecting snapshots or autosave generations.
+    pub fn set_proxy_media_status(&mut self, media_id: MediaId, status: ProxyMediaStatus) {
+        if matches!(status, ProxyMediaStatus::None) {
+            self.proxy_media_statuses.remove(&media_id);
+        } else {
+            self.proxy_media_statuses.insert(media_id, status);
+        }
     }
 
     pub fn set_waveform_error(&mut self, media_id: MediaId, error: impl Into<String>) {
@@ -6333,6 +6388,172 @@ fn panel_title(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.separator();
 }
 
+fn proxy_media_status_badge(ui: &mut Ui, language: Language, status: &ProxyMediaStatus) {
+    let (label, color, detail) = match status {
+        ProxyMediaStatus::None => return,
+        ProxyMediaStatus::Generating { progress } => (
+            format!(
+                "{} {:>3}%",
+                t(language, "Proxy", "プロキシ"),
+                (progress.clamp(0.0, 1.0) * 100.0).round() as u8
+            ),
+            Color32::from_rgb(225, 181, 82),
+            t(
+                language,
+                "Generating optional 720p proxy media",
+                "任意の 720p プロキシを生成中",
+            ),
+        ),
+        ProxyMediaStatus::Deleting => (
+            t(language, "Removing proxy", "プロキシを削除中"),
+            Color32::from_rgb(225, 181, 82),
+            t(
+                language,
+                "Removing optional proxy media in the background",
+                "任意のプロキシメディアをバックグラウンドで削除中",
+            ),
+        ),
+        ProxyMediaStatus::Ready { enabled: true } => (
+            t(language, "Proxy", "プロキシ"),
+            Color32::from_rgb(83, 191, 126),
+            t(
+                language,
+                "Using optional proxy media for preview",
+                "プレビューで任意のプロキシを使用中",
+            ),
+        ),
+        ProxyMediaStatus::Ready { enabled: false } => (
+            t(language, "Proxy ready", "プロキシ準備完了"),
+            Color32::from_rgb(114, 165, 205),
+            t(
+                language,
+                "Proxy is ready; preview is using the original",
+                "プロキシは準備済み。プレビューはオリジナルを使用中",
+            ),
+        ),
+        ProxyMediaStatus::Failed { message } => (
+            t(language, "Proxy failed", "プロキシ失敗"),
+            Color32::from_rgb(225, 108, 108),
+            message.clone(),
+        ),
+    };
+    ui.label(RichText::new(label).small().color(color))
+        .on_hover_text(detail);
+}
+
+/// Compact, nested actions shared by Media Pool and timeline video-clip context menus.
+fn proxy_media_menu(ui: &mut Ui, state: &mut EditorState, media_id: MediaId, path: &Path) {
+    ui.menu_button(t(state.language, "Proxy Media", "プロキシメディア"), |ui| {
+        match state.proxy_media_status(media_id) {
+            ProxyMediaStatus::None => {
+                if ui
+                    .button(t(
+                        state.language,
+                        "Generate Proxy Media (720p)",
+                        "720p プロキシを生成",
+                    ))
+                    .on_hover_text(t(
+                        state.language,
+                        "Generate an optional editing proxy in the background. The original stays available.",
+                        "バックグラウンドで任意の編集用プロキシを生成します。オリジナルは引き続き使用できます。",
+                    ))
+                    .clicked()
+                {
+                    state.emit(EditorAction::GenerateProxyMedia {
+                        media_id,
+                        path: path.to_owned(),
+                    });
+                    ui.close();
+                }
+            }
+            ProxyMediaStatus::Generating { progress } => {
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {:>3}%",
+                        t(state.language, "Generating proxy", "プロキシ生成中"),
+                        (progress.clamp(0.0, 1.0) * 100.0).round() as u8
+                    ))
+                    .small()
+                    .color(Color32::from_rgb(225, 181, 82)),
+                );
+                if ui
+                    .button(t(
+                        state.language,
+                        "Cancel Proxy Generation",
+                        "プロキシ生成をキャンセル",
+                    ))
+                    .clicked()
+                {
+                    state.emit(EditorAction::CancelProxyMedia { media_id });
+                    ui.close();
+                }
+            }
+            ProxyMediaStatus::Deleting => {
+                ui.label(
+                    RichText::new(t(
+                        state.language,
+                        "Removing proxy media…",
+                        "プロキシメディアを削除中…",
+                    ))
+                    .small()
+                    .color(Color32::from_rgb(225, 181, 82)),
+                );
+            }
+            ProxyMediaStatus::Ready { enabled } => {
+                let (english, japanese) = if enabled {
+                    ("Use Original Media", "オリジナルを使用")
+                } else {
+                    ("Use Proxy Media", "プロキシを使用")
+                };
+                if ui.button(t(state.language, english, japanese)).clicked() {
+                    state.emit(EditorAction::SetProxyMediaEnabled {
+                        media_id,
+                        enabled: !enabled,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(t(state.language, "Delete Proxy Media", "プロキシを削除"))
+                    .clicked()
+                {
+                    state.emit(EditorAction::DeleteProxyMedia { media_id });
+                    ui.close();
+                }
+            }
+            ProxyMediaStatus::Failed { message } => {
+                ui.label(
+                    RichText::new(t(state.language, "Proxy generation failed", "プロキシ生成に失敗"))
+                        .small()
+                        .color(Color32::from_rgb(225, 108, 108)),
+                )
+                .on_hover_text(message);
+                if ui
+                    .button(t(
+                        state.language,
+                        "Retry Proxy Generation (720p)",
+                        "720p プロキシ生成を再試行",
+                    ))
+                    .clicked()
+                {
+                    state.emit(EditorAction::GenerateProxyMedia {
+                        media_id,
+                        path: path.to_owned(),
+                    });
+                    ui.close();
+                }
+                if ui
+                    .button(t(state.language, "Delete Proxy Media", "プロキシを削除"))
+                    .clicked()
+                {
+                    state.emit(EditorAction::DeleteProxyMedia { media_id });
+                    ui.close();
+                }
+            }
+        }
+    });
+}
+
 fn claim_media_press_from_previous_layout(ui: &Ui, state: &mut EditorState) {
     let pressed_media = ui.input(|input| {
         if !input.pointer.primary_pressed() {
@@ -6438,7 +6659,9 @@ fn media_pool(ui: &mut Ui, state: &mut EditorState) {
                 let item_id = item.id;
                 let kind = item.kind;
                 let label = item.label.clone();
+                let path = item.path.clone();
                 let selected = state.selected_media == Some(item_id);
+                let proxy_status = state.proxy_media_status(item_id);
                 let strip = state.video_strips.get(&item_id).copied();
                 let analysis_ready = strip.is_some()
                     || state.waveforms.contains_key(&item_id)
@@ -6457,23 +6680,26 @@ fn media_pool(ui: &mut Ui, state: &mut EditorState) {
                         }
                         ui.vertical(|ui| {
                             ui.label(label);
-                            ui.label(
-                                RichText::new(t(
-                                    state.language,
-                                    if analysis_ready {
-                                        "Ready"
-                                    } else {
-                                        "Awaiting timeline analysis"
-                                    },
-                                    if analysis_ready {
-                                        "準備完了"
-                                    } else {
-                                        "タイムライン解析待ち"
-                                    },
-                                ))
-                                .small()
-                                .color(Color32::from_rgb(124, 151, 168)),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(t(
+                                        state.language,
+                                        if analysis_ready {
+                                            "Ready"
+                                        } else {
+                                            "Awaiting timeline analysis"
+                                        },
+                                        if analysis_ready {
+                                            "準備完了"
+                                        } else {
+                                            "タイムライン解析待ち"
+                                        },
+                                    ))
+                                    .small()
+                                    .color(Color32::from_rgb(124, 151, 168)),
+                                );
+                                proxy_media_status_badge(ui, state.language, &proxy_status);
+                            });
                         });
                     });
                 });
@@ -6540,6 +6766,10 @@ fn media_pool(ui: &mut Ui, state: &mut EditorState) {
                     {
                         add_to_timeline = Some(item_id);
                         ui.close();
+                    }
+                    if kind == MediaKind::Video {
+                        ui.separator();
+                        proxy_media_menu(ui, state, item_id, &path);
                     }
                 });
             }
@@ -10574,6 +10804,8 @@ fn active_preview_source_label(
     match (language, source) {
         (Language::English, ActivePreviewSourceKind::OriginalSource) => "Original source",
         (Language::Japanese, ActivePreviewSourceKind::OriginalSource) => "元のソース",
+        (Language::English, ActivePreviewSourceKind::UserProxyMedia) => "Proxy media",
+        (Language::Japanese, ActivePreviewSourceKind::UserProxyMedia) => "プロキシメディア",
         (Language::English, ActivePreviewSourceKind::InternalScrubPreview) => {
             "Internal scrub preview"
         }
@@ -12882,9 +13114,16 @@ fn timeline_context_menu(ui: &mut Ui, state: &mut EditorState) {
         let clip = state.timeline.clip(clip_id)?.clone();
         let track = state.timeline.track(clip.track_id)?;
         let media = state.media.iter().find(|item| item.id == clip.media.0)?;
-        Some((clip, track.kind, media.id, media.display_name.clone()))
+        Some((
+            clip,
+            track.kind,
+            media.id,
+            media.display_name.clone(),
+            media.path.clone(),
+            media.kind,
+        ))
     });
-    let Some((clip, kind, media_id, display_name)) = target else {
+    let Some((clip, kind, media_id, display_name, media_path, media_kind)) = target else {
         if ui
             .button(t(state.language, "Add video track", "ビデオトラックを追加"))
             .clicked()
@@ -12925,7 +13164,9 @@ fn timeline_context_menu(ui: &mut Ui, state: &mut EditorState) {
     timeline_context_edit_menu(ui, state, &clip);
     timeline_context_clip_menu(ui, state, &clip);
     match kind {
-        TrackKind::Video => timeline_context_video_menu(ui, state, &clip),
+        TrackKind::Video => {
+            timeline_context_video_menu(ui, state, &clip, media_id, &media_path, media_kind)
+        }
         TrackKind::Audio => timeline_context_audio_menu(ui, state, &clip),
     }
 }
@@ -13034,7 +13275,14 @@ fn timeline_context_clip_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip)
     });
 }
 
-fn timeline_context_video_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip) {
+fn timeline_context_video_menu(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    clip: &Clip,
+    media_id: MediaId,
+    media_path: &Path,
+    media_kind: MediaKind,
+) {
     ui.menu_button(t(state.language, "Video", "ビデオ"), |ui| {
         let can_add_effect = clip.video_effects.len() < MAX_VIDEO_EFFECTS_PER_CLIP
             && next_video_effect_id(&clip.video_effects).is_some();
@@ -13084,6 +13332,10 @@ fn timeline_context_video_menu(ui: &mut Ui, state: &mut EditorState, clip: &Clip
             ui.menu_button(label, |ui| {
                 timeline_context_transition_edge_menu(ui, state, clip.id, edge);
             });
+        }
+        if media_kind == MediaKind::Video {
+            ui.separator();
+            proxy_media_menu(ui, state, media_id, media_path);
         }
     });
 }
@@ -22661,6 +22913,59 @@ mod tests {
     }
 
     #[test]
+    fn proxy_media_status_and_actions_are_runtime_only() {
+        let mut editor = EditorState::new(Language::English, "Proxy runtime");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        let before = editor.snapshot();
+        let generation = editor.durable_generation();
+
+        editor.set_proxy_media_status(1, ProxyMediaStatus::Generating { progress: 0.42 });
+        assert_eq!(
+            editor.proxy_media_status(1),
+            ProxyMediaStatus::Generating { progress: 0.42 }
+        );
+        editor.set_proxy_media_status(1, ProxyMediaStatus::Ready { enabled: true });
+        assert_eq!(editor.snapshot(), before);
+        assert_eq!(editor.durable_generation(), generation);
+
+        editor.emit(EditorAction::SetProxyMediaEnabled {
+            media_id: 1,
+            enabled: false,
+        });
+        assert_eq!(
+            editor.take_action(),
+            Some(EditorAction::SetProxyMediaEnabled {
+                media_id: 1,
+                enabled: false,
+            })
+        );
+        editor.emit(EditorAction::GenerateProxyMedia {
+            media_id: 1,
+            path: PathBuf::from("clip.mp4"),
+        });
+        assert_eq!(
+            editor.take_action(),
+            Some(EditorAction::GenerateProxyMedia {
+                media_id: 1,
+                path: PathBuf::from("clip.mp4"),
+            })
+        );
+        editor.emit(EditorAction::CancelProxyMedia { media_id: 1 });
+        assert_eq!(
+            editor.take_action(),
+            Some(EditorAction::CancelProxyMedia { media_id: 1 })
+        );
+        editor.emit(EditorAction::DeleteProxyMedia { media_id: 1 });
+        assert_eq!(
+            editor.take_action(),
+            Some(EditorAction::DeleteProxyMedia { media_id: 1 })
+        );
+
+        let restored = EditorState::restore(Language::English, "Proxy runtime", before).unwrap();
+        assert_eq!(restored.proxy_media_status(1), ProxyMediaStatus::None);
+    }
+
+    #[test]
     fn active_preview_diagnostics_are_fixed_per_layer_and_clear_with_monitor() {
         let mut editor = EditorState::new(Language::English, "Preview diagnostics");
         let diagnostic = ActivePreviewDiagnostic::new(
@@ -22688,6 +22993,13 @@ mod tests {
 
     #[test]
     fn active_preview_diagnostic_labels_are_localized_without_misnaming_scrub_preview() {
+        assert_eq!(
+            active_preview_source_label(
+                Language::Japanese,
+                ActivePreviewSourceKind::UserProxyMedia
+            ),
+            "プロキシメディア"
+        );
         assert_eq!(
             active_preview_source_label(
                 Language::English,

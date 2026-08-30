@@ -8,6 +8,7 @@ members = [
     "crates/nle-export",
     "crates/nle-render",
     "crates/nle-project-io",
+    "crates/nle-proxy",
     "crates/nle-timeline",
     "crates/nle-title",
     "crates/nle-ui-core",
