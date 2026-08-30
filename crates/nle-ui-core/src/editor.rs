@@ -527,6 +527,24 @@ pub struct AudioPlaybackTarget<'a> {
     pub transition: Option<AudioPlaybackTransitionEnvelope>,
 }
 
+/// Allocation-free source metadata for scheduling snapshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioPlaybackSource {
+    pub track_id: nle_timeline::TrackId,
+    pub clip_id: ClipId,
+    pub media_id: MediaId,
+    pub source_tick: Tick,
+    pub clip_tick: Tick,
+    pub transition: Option<AudioPlaybackTransitionEnvelope>,
+}
+
+struct ResolvedAudioPlaybackSource<'a> {
+    track: &'a Track,
+    clip: &'a Clip,
+    path: &'a Path,
+    source: AudioPlaybackSource,
+}
+
 fn enabled_audio_effects(clip: &Clip, track: &Track) -> Vec<AudioEffect> {
     clip.effects
         .iter()
@@ -2877,13 +2895,15 @@ impl EditorState {
         })
     }
 
-    pub fn audio_playback_targets(&self) -> Vec<AudioPlaybackTarget<'_>> {
+    fn visit_resolved_audio_playback_sources<'a>(
+        &'a self,
+        mut visit: impl FnMut(ResolvedAudioPlaybackSource<'a>),
+    ) {
         let any_solo = self
             .timeline
             .tracks
             .iter()
             .any(|track| matches!(track.kind, TrackKind::Audio) && track.solo);
-        let mut targets = Vec::new();
         for track in self
             .timeline
             .tracks
@@ -2930,33 +2950,27 @@ impl EditorState {
                     else {
                         continue;
                     };
-                    targets.push(AudioPlaybackTarget {
-                        track_id: track.id,
-                        clip_id: clip.id,
-                        media_id: clip.media.0,
+                    visit(ResolvedAudioPlaybackSource {
+                        track,
+                        clip,
                         path: &item.path,
-                        source_tick,
-                        clip_tick,
-                        gain_db: clip.mix_gain_db(track),
-                        gain_left_db: clip.gain_left_db,
-                        gain_right_db: clip.gain_right_db,
-                        pan: track.pan,
-                        effects: enabled_audio_effects(clip, track),
-                        fade_in_ticks: clip.fade_in.duration,
-                        fade_in_curve: clip.fade_in.curve,
-                        fade_out_ticks: clip.fade_out.duration,
-                        fade_out_curve: clip.fade_out.curve,
-                        clip_duration: clip.duration,
-                        transition: Some(AudioPlaybackTransitionEnvelope {
-                            role,
-                            start_clip_tick: match role {
-                                AudioPlaybackTransitionRole::Outgoing => {
-                                    Tick(clip.duration.0 - left_half)
-                                }
-                                AudioPlaybackTransitionRole::Incoming => Tick(-left_half),
-                            },
-                            duration_ticks: duration,
-                        }),
+                        source: AudioPlaybackSource {
+                            track_id: track.id,
+                            clip_id: clip.id,
+                            media_id: clip.media.0,
+                            source_tick,
+                            clip_tick,
+                            transition: Some(AudioPlaybackTransitionEnvelope {
+                                role,
+                                start_clip_tick: match role {
+                                    AudioPlaybackTransitionRole::Outgoing => {
+                                        Tick(clip.duration.0 - left_half)
+                                    }
+                                    AudioPlaybackTransitionRole::Incoming => Tick(-left_half),
+                                },
+                                duration_ticks: duration,
+                            }),
+                        },
                     });
                 }
                 continue;
@@ -2970,30 +2984,56 @@ impl EditorState {
                 })?;
                 let item = self.media.get(clip.media.0.saturating_sub(1) as usize)?;
                 let path = (item.id == clip.media.0).then_some(&item.path)?;
-                Some(AudioPlaybackTarget {
-                    track_id: track.id,
-                    clip_id: clip.id,
-                    media_id: clip.media.0,
+                Some(ResolvedAudioPlaybackSource {
+                    track,
+                    clip,
                     path,
-                    source_tick: Tick(clip.source_in.0 + self.playhead.0 - clip.start.0),
-                    clip_tick: Tick(self.playhead.0 - clip.start.0),
-                    gain_db: clip.mix_gain_db(track),
-                    gain_left_db: clip.gain_left_db,
-                    gain_right_db: clip.gain_right_db,
-                    pan: track.pan,
-                    effects: enabled_audio_effects(clip, track),
-                    fade_in_ticks: clip.fade_in.duration,
-                    fade_in_curve: clip.fade_in.curve,
-                    fade_out_ticks: clip.fade_out.duration,
-                    fade_out_curve: clip.fade_out.curve,
-                    clip_duration: clip.duration,
-                    transition: None,
+                    source: AudioPlaybackSource {
+                        track_id: track.id,
+                        clip_id: clip.id,
+                        media_id: clip.media.0,
+                        source_tick: Tick(clip.source_in.0 + self.playhead.0 - clip.start.0),
+                        clip_tick: Tick(self.playhead.0 - clip.start.0),
+                        transition: None,
+                    },
                 })
             })() else {
                 continue;
             };
-            targets.push(target);
+            visit(target);
         }
+    }
+
+    /// Visits lightweight audible source metadata without allocating effect stacks.
+    pub fn visit_audio_playback_sources(&self, mut visit: impl FnMut(AudioPlaybackSource)) {
+        self.visit_resolved_audio_playback_sources(|resolved| visit(resolved.source));
+    }
+
+    /// Collects audible targets for callers that need to retain them.
+    pub fn audio_playback_targets(&self) -> Vec<AudioPlaybackTarget<'_>> {
+        let mut targets = Vec::new();
+        self.visit_resolved_audio_playback_sources(|resolved| {
+            let source = resolved.source;
+            targets.push(AudioPlaybackTarget {
+                track_id: source.track_id,
+                clip_id: source.clip_id,
+                media_id: source.media_id,
+                path: resolved.path,
+                source_tick: source.source_tick,
+                clip_tick: source.clip_tick,
+                gain_db: resolved.clip.mix_gain_db(resolved.track),
+                gain_left_db: resolved.clip.gain_left_db,
+                gain_right_db: resolved.clip.gain_right_db,
+                pan: resolved.track.pan,
+                effects: enabled_audio_effects(resolved.clip, resolved.track),
+                fade_in_ticks: resolved.clip.fade_in.duration,
+                fade_in_curve: resolved.clip.fade_in.curve,
+                fade_out_ticks: resolved.clip.fade_out.duration,
+                fade_out_curve: resolved.clip.fade_out.curve,
+                clip_duration: resolved.clip.duration,
+                transition: source.transition,
+            });
+        });
         targets
     }
 
@@ -17217,6 +17257,17 @@ mod tests {
         assert_eq!(targets[1].track_id, audio_tracks[1]);
         assert_eq!(targets[0].source_tick, Tick(1_000_000));
         assert_eq!(targets[1].source_tick, Tick(3_000_000));
+        let mut visited = Vec::new();
+        editor.visit_audio_playback_sources(|target| {
+            visited.push((target.track_id, target.source_tick));
+        });
+        assert_eq!(
+            visited,
+            vec![
+                (audio_tracks[0], Tick(1_000_000)),
+                (audio_tracks[1], Tick(3_000_000)),
+            ]
+        );
 
         editor
             .timeline

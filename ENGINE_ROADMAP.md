@@ -116,8 +116,10 @@ Exit gate:
 
 Turn the single topmost-source monitor into a scheduler capable of feeding a compositor.
 
-- [ ] Define immutable `PreviewRequest` data containing sequence generation, playhead tick, output
-      size, preview quality, and ordered visible layer/audio-source descriptions.
+- [x] Define immutable `PreviewRequest` data containing sequence generation, playhead tick, output
+      size, preview quality, and ordered visible layer/audio-source descriptions. The app now
+      captures ordered audible-source metadata in a fixed 64-entry request snapshot, with explicit
+      overflow tracking and no cap on actual audio playback.
 - [ ] Maintain one sticky decoder session per active source within a bounded session pool.
 - [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing.
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.

@@ -51,6 +51,9 @@ const MIN_SPLASH_VISIBLE: Duration = Duration::from_millis(2400);
 const MIN_MONITOR_CACHE_MB: usize = 512;
 const MAX_MONITOR_CACHE_MB: usize = 2 * 1024;
 const MONITOR_LAYER_COUNT: usize = nle_ui_core::PREVIEW_VIDEO_LAYER_COUNT;
+/// Bounded audio metadata captured alongside the video request. This is scheduling state only:
+/// native audio transport still receives every audible target.
+const MAX_PREVIEW_AUDIO_SOURCES: usize = 64;
 /// A bounded source overview used for timeline thumbnails, project artwork, and instant scrub
 /// proxies. Exact monitor decoding still replaces a proxy as soon as it is ready.
 const SCRUB_PREVIEW_TARGET_FPS: f64 = 30.0;
@@ -1045,7 +1048,20 @@ struct PreviewSourceRequest {
     source_frame_rate_millihz: Option<u32>,
 }
 
+/// Lightweight audio scheduling metadata. Paths, effect stacks, and gains remain owned by the
+/// audio transport; the preview scheduler only needs source identity and ordered timing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewAudioSourceRequest {
+    priority: u8,
+    track_id: nle_timeline::TrackId,
+    clip_id: nle_timeline::ClipId,
+    media_id: u32,
+    source_tick: i64,
+    clip_tick: i64,
+    transition_role: Option<nle_ui_core::AudioPlaybackTransitionRole>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct PreviewRequest {
     sequence_generation: u64,
     playhead_tick: i64,
@@ -1054,6 +1070,14 @@ struct PreviewRequest {
     selected_quality: PreviewQuality,
     resolved_quality: PreviewQuality,
     sources: [Option<PreviewSourceRequest>; MONITOR_LAYER_COUNT],
+    audio_sources: [Option<PreviewAudioSourceRequest>; MAX_PREVIEW_AUDIO_SOURCES],
+    audio_source_count: usize,
+}
+
+impl PreviewRequest {
+    fn audio_sources_truncated(&self) -> bool {
+        self.audio_source_count > MAX_PREVIEW_AUDIO_SOURCES
+    }
 }
 
 fn preview_decode_size(editor: &EditorState, scrubbing: bool) -> (u32, u32) {
@@ -1064,7 +1088,7 @@ fn preview_decode_size(editor: &EditorState, scrubbing: bool) -> (u32, u32) {
     }
 }
 
-fn progressive_scrub_frames(preview: PreviewRequest) -> bool {
+fn progressive_scrub_frames(preview: &PreviewRequest) -> bool {
     preview.is_scrubbing
 }
 
@@ -1085,6 +1109,23 @@ fn preview_request(editor: &EditorState) -> PreviewRequest {
             source_frame_rate_millihz: target.source_frame_rate_millihz,
         });
     }
+    let mut audio_sources = [None; MAX_PREVIEW_AUDIO_SOURCES];
+    let mut audio_source_count = 0_usize;
+    editor.visit_audio_playback_sources(|target| {
+        let priority = audio_source_count.saturating_add(1).min(u8::MAX as usize) as u8;
+        if let Some(slot) = audio_sources.get_mut(audio_source_count) {
+            *slot = Some(PreviewAudioSourceRequest {
+                priority,
+                track_id: target.track_id,
+                clip_id: target.clip_id,
+                media_id: target.media_id,
+                source_tick: target.source_tick.0,
+                clip_tick: target.clip_tick.0,
+                transition_role: target.transition.map(|transition| transition.role),
+            });
+        }
+        audio_source_count = audio_source_count.saturating_add(1);
+    });
     PreviewRequest {
         sequence_generation: editor.timeline.generation(),
         playhead_tick: editor.playhead.0,
@@ -1093,6 +1134,8 @@ fn preview_request(editor: &EditorState) -> PreviewRequest {
         selected_quality: editor.preview_quality(),
         resolved_quality: editor.resolved_preview_quality(),
         sources,
+        audio_sources,
+        audio_source_count,
     }
 }
 
@@ -4948,6 +4991,10 @@ impl App {
     /// Applies one immutable preview description. Keeping this transition separate makes the
     /// drag-quality to refinement-quality handoff deterministic and directly testable.
     fn submit_monitor_decode_request(&mut self, preview: PreviewRequest) {
+        debug_assert!(
+            !preview.audio_sources_truncated()
+                || preview.audio_sources[MAX_PREVIEW_AUDIO_SOURCES - 1].is_some()
+        );
         let [width, height] = preview.output_size;
         let acceleration = self.monitor_acceleration();
         let high_quality_scaling = self.editor.high_quality_playback();
@@ -5055,7 +5102,7 @@ impl App {
                 is_scrubbing: preview.is_scrubbing,
                 prewarm_scrub_workers: key.prewarm_scrub_workers,
                 high_quality_scaling,
-                progressive_scrub_frames: progressive_scrub_frames(preview),
+                progressive_scrub_frames: progressive_scrub_frames(&preview),
                 source_frame_duration_tick: monitor_source_frame_duration_tick(
                     source.source_frame_rate_millihz,
                 ),
@@ -8563,6 +8610,233 @@ mod tests {
     }
 
     #[test]
+    fn preview_request_captures_ordered_audible_audio_metadata() {
+        let mut editor = EditorState::new(Language::English, "Audio request");
+        editor.add_media_paths([
+            PathBuf::from("lower-audio-preview.mp4"),
+            PathBuf::from("upper-audio-preview.mp4"),
+        ]);
+        let audio_tracks = editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Audio)
+            .map(|track| track.id)
+            .take(2)
+            .collect::<Vec<_>>();
+        let lower = editor
+            .timeline
+            .insert_clip(
+                audio_tracks[0],
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(100_000),
+            )
+            .unwrap();
+        let upper = editor
+            .timeline
+            .insert_clip(
+                audio_tracks[1],
+                nle_timeline::MediaId(2),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(200_000),
+            )
+            .unwrap();
+        editor.set_playhead(nle_timeline::Tick(500_000));
+
+        let request = preview_request(&editor);
+        assert_eq!(request.audio_source_count, 2);
+        assert!(!request.audio_sources_truncated());
+        let lower_request = request.audio_sources[0].unwrap();
+        let upper_request = request.audio_sources[1].unwrap();
+        assert_eq!(
+            (
+                lower_request.priority,
+                lower_request.track_id,
+                lower_request.clip_id
+            ),
+            (1, audio_tracks[0], lower)
+        );
+        assert_eq!(
+            (
+                lower_request.media_id,
+                lower_request.source_tick,
+                lower_request.clip_tick
+            ),
+            (1, 600_000, 500_000)
+        );
+        assert_eq!(lower_request.transition_role, None);
+        assert_eq!(
+            (
+                upper_request.priority,
+                upper_request.track_id,
+                upper_request.clip_id
+            ),
+            (2, audio_tracks[1], upper)
+        );
+        assert_eq!(
+            (
+                upper_request.media_id,
+                upper_request.source_tick,
+                upper_request.clip_tick
+            ),
+            (2, 700_000, 500_000)
+        );
+        assert_eq!(upper_request.transition_role, None);
+    }
+
+    #[test]
+    fn preview_request_captures_audio_transition_roles_in_playback_order() {
+        let mut editor = EditorState::new(Language::English, "Audio transition request");
+        editor.add_media_paths([
+            PathBuf::from("outgoing-audio-transition.mp4"),
+            PathBuf::from("incoming-audio-transition.mp4"),
+        ]);
+        let track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Audio)
+            .unwrap()
+            .id;
+        let outgoing = editor
+            .timeline
+            .insert_clip(
+                track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(100_000),
+            )
+            .unwrap();
+        let incoming = editor
+            .timeline
+            .insert_clip(
+                track,
+                nle_timeline::MediaId(2),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(200_000),
+            )
+            .unwrap();
+        editor
+            .timeline
+            .add_audio_transition(track, outgoing, incoming, nle_timeline::Tick(1_000_000))
+            .unwrap();
+        editor.set_playhead(nle_timeline::Tick(2_000_000));
+
+        let request = preview_request(&editor);
+        assert_eq!(request.audio_source_count, 2);
+        let outgoing_request = request.audio_sources[0].unwrap();
+        let incoming_request = request.audio_sources[1].unwrap();
+        assert_eq!(
+            (outgoing_request.clip_id, outgoing_request.source_tick),
+            (outgoing, 2_100_000)
+        );
+        assert_eq!(
+            outgoing_request.transition_role,
+            Some(nle_ui_core::AudioPlaybackTransitionRole::Outgoing)
+        );
+        assert_eq!(
+            (incoming_request.clip_id, incoming_request.source_tick),
+            (incoming, 200_000)
+        );
+        assert_eq!(
+            incoming_request.transition_role,
+            Some(nle_ui_core::AudioPlaybackTransitionRole::Incoming)
+        );
+    }
+
+    #[test]
+    fn preview_request_excludes_muted_and_non_solo_audio_tracks() {
+        let mut editor = EditorState::new(Language::English, "Audible tracks request");
+        editor.add_media_paths([PathBuf::from("audible-tracks.mp4")]);
+        let audio_tracks = editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Audio)
+            .map(|track| track.id)
+            .take(2)
+            .collect::<Vec<_>>();
+        for track in &audio_tracks {
+            editor
+                .timeline
+                .insert_clip(
+                    *track,
+                    nle_timeline::MediaId(1),
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(2_000_000),
+                    nle_timeline::Tick(0),
+                )
+                .unwrap();
+        }
+        editor.set_playhead(nle_timeline::Tick(500_000));
+        editor
+            .timeline
+            .set_track_muted(audio_tracks[0], true)
+            .unwrap();
+        let request = preview_request(&editor);
+        assert_eq!(request.audio_source_count, 1);
+        assert_eq!(request.audio_sources[0].unwrap().track_id, audio_tracks[1]);
+
+        editor
+            .timeline
+            .set_track_muted(audio_tracks[0], false)
+            .unwrap();
+        editor
+            .timeline
+            .set_track_solo(audio_tracks[1], true)
+            .unwrap();
+        let request = preview_request(&editor);
+        assert_eq!(request.audio_source_count, 1);
+        assert_eq!(request.audio_sources[0].unwrap().track_id, audio_tracks[1]);
+    }
+
+    #[test]
+    fn preview_request_reports_audio_metadata_truncation_without_capping_playback() {
+        let mut editor = EditorState::new(Language::English, "Audio request capacity");
+        editor.add_media_paths([PathBuf::from("many-audio-tracks.mp4")]);
+        let mut audio_tracks = editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Audio)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        while audio_tracks.len() < MAX_PREVIEW_AUDIO_SOURCES + 1 {
+            audio_tracks.push(editor.timeline.add_track(nle_timeline::TrackKind::Audio));
+        }
+        for track in &audio_tracks {
+            editor
+                .timeline
+                .insert_clip(
+                    *track,
+                    nle_timeline::MediaId(1),
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(2_000_000),
+                    nle_timeline::Tick(0),
+                )
+                .unwrap();
+        }
+        editor.set_playhead(nle_timeline::Tick(500_000));
+
+        let request = preview_request(&editor);
+        assert_eq!(request.audio_source_count, MAX_PREVIEW_AUDIO_SOURCES + 1);
+        assert!(request.audio_sources_truncated());
+        assert_eq!(
+            request.audio_sources.iter().flatten().count(),
+            MAX_PREVIEW_AUDIO_SOURCES
+        );
+        assert_eq!(
+            editor.audio_playback_targets().len(),
+            MAX_PREVIEW_AUDIO_SOURCES + 1
+        );
+    }
+
+    #[test]
     fn preview_request_uses_two_independent_slots_during_a_cross_dissolve() {
         let mut editor = EditorState::new(Language::English, "Transition request");
         editor.add_media_paths([
@@ -8849,15 +9123,15 @@ mod tests {
     fn every_scrub_publishes_timed_progressive_frames() {
         let mut editor = EditorState::new(Language::English, "Scrub policy");
         let mut preview = preview_request(&editor);
-        assert!(!progressive_scrub_frames(preview));
+        assert!(!progressive_scrub_frames(&preview));
         preview.is_scrubbing = true;
         assert_eq!(preview.resolved_quality, PreviewQuality::Full);
-        assert!(progressive_scrub_frames(preview));
+        assert!(progressive_scrub_frames(&preview));
 
         assert!(editor.set_preview_quality(PreviewQuality::Quarter));
         let mut preview = preview_request(&editor);
         preview.is_scrubbing = true;
-        assert!(progressive_scrub_frames(preview));
+        assert!(progressive_scrub_frames(&preview));
     }
 
     #[test]
