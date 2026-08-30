@@ -78,7 +78,62 @@ function Read-ScenarioReport([string]$Path) {
     return $report
 }
 
+function Get-BoundedError([string]$Message) {
+    if ([string]::IsNullOrWhiteSpace($Message)) { return 'Git source capture failed without an error message.' }
+    $normalized = ($Message -replace '\s+', ' ').Trim()
+    if ($normalized.Length -gt 1024) { return $normalized.Substring(0, 1024) }
+    return $normalized
+}
+
+function Resolve-GitExecutable {
+    $command = Get-Command -Name git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $path = [string]$command.Source
+    if (-not (Test-AbsolutePath $path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'Get-Command did not resolve git to an absolute executable path.'
+    }
+    return [IO.Path]::GetFullPath($path)
+}
+
+function Get-GitSourceSnapshot([string]$GitExecutable, [string]$RepositoryRoot) {
+    $snapshot = [ordered]@{ commit = $null; tracked_worktree_dirty = $null; capture_error = $null }
+    try {
+        if ([string]::IsNullOrWhiteSpace($GitExecutable)) { throw 'Git executable is unavailable.' }
+        $topLevel = @(& $GitExecutable -C $RepositoryRoot rev-parse --show-toplevel 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "git rev-parse --show-toplevel failed: $($topLevel -join ' ')" }
+        $resolvedTopLevel = (Resolve-Path -LiteralPath ([string]$topLevel[0])).Path
+        if (-not [string]::Equals($resolvedTopLevel, $RepositoryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "git top-level '$resolvedTopLevel' does not match repository root '$RepositoryRoot'."
+        }
+        $commit = @(& $GitExecutable -C $RepositoryRoot rev-parse --verify HEAD 2>&1)
+        if ($LASTEXITCODE -ne 0 -or [string]$commit[0] -notmatch '^[0-9a-f]{40}$') {
+            throw "git rev-parse --verify HEAD returned an invalid commit: $($commit -join ' ')"
+        }
+        $dirty = @(& $GitExecutable -C $RepositoryRoot status --porcelain=v1 --untracked-files=no --ignore-submodules=untracked 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "git status failed: $($dirty -join ' ')" }
+        $snapshot.commit = [string]$commit[0]
+        $snapshot.tracked_worktree_dirty = ($dirty.Count -gt 0)
+    } catch {
+        $snapshot.capture_error = Get-BoundedError $_.Exception.Message
+    }
+    return [pscustomobject]$snapshot
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$gitExecutable = $null
+$authoritativeProvenanceFailure = 'Authoritative sustained evidence requires stable, clean tracked Git source provenance.'
+$sourceRevision = [ordered]@{
+    git_executable = $null; start_commit = $null; end_commit = $null
+    start_tracked_worktree_dirty = $null; end_tracked_worktree_dirty = $null
+    commit_stable = $false; qualified = $false; capture_error = $null
+}
+try { $gitExecutable = Resolve-GitExecutable } catch { $sourceRevision.capture_error = Get-BoundedError $_.Exception.Message }
+$sourceRevision.git_executable = $gitExecutable
+$sourceStart = Get-GitSourceSnapshot $gitExecutable $repoRoot
+$sourceRevision.start_commit = $sourceStart.commit
+$sourceRevision.start_tracked_worktree_dirty = $sourceStart.tracked_worktree_dirty
+if ($null -ne $sourceStart.capture_error) {
+    $sourceRevision.capture_error = if ($null -eq $sourceRevision.capture_error) { $sourceStart.capture_error } else { Get-BoundedError "$($sourceRevision.capture_error); start capture: $($sourceStart.capture_error)" }
+}
 $runner = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Run-Phase0Scenarios.ps1'))
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-sustained-scenarios'))
 if ([string]::IsNullOrWhiteSpace($ReportPath)) { $ReportPath = Join-Path $artifactRoot 'phase0-sustained-scenarios.json' }
@@ -139,6 +194,8 @@ try {
 
     $phase0Mutex = Enter-Phase0ScenarioMutex
     $childArtifactRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-scenarios'))
+    $startProvenanceReady = ($null -eq $sourceStart.capture_error -and [string]$sourceStart.commit -match '^[0-9a-f]{40}$' -and $sourceStart.tracked_worktree_dirty -eq $false)
+    if ($DurationSeconds -ge 600 -and -not $startProvenanceReady) { throw $authoritativeProvenanceFailure }
     $setupStopwatch.Stop()
     $matrixStartedUtc = [DateTime]::UtcNow
     $matrixStopwatch.Start()
@@ -223,12 +280,23 @@ try {
 } finally {
     if ($setupStopwatch.IsRunning) { $setupStopwatch.Stop() }
     if ($matrixStopwatch.IsRunning) { $matrixStopwatch.Stop() }
+    $sourceEnd = Get-GitSourceSnapshot $gitExecutable $repoRoot
+    $sourceRevision.end_commit = $sourceEnd.commit
+    $sourceRevision.end_tracked_worktree_dirty = $sourceEnd.tracked_worktree_dirty
+    if ($null -ne $sourceEnd.capture_error) {
+        $sourceRevision.capture_error = if ($null -eq $sourceRevision.capture_error) { $sourceEnd.capture_error } else { Get-BoundedError "$($sourceRevision.capture_error); end capture: $($sourceEnd.capture_error)" }
+    }
+    $sourceRevision.commit_stable = ($null -eq $sourceRevision.capture_error -and $null -ne $sourceRevision.start_commit -and $sourceRevision.start_commit -eq $sourceRevision.end_commit)
+    $sourceRevision.qualified = ($sourceRevision.commit_stable -and $sourceRevision.start_tracked_worktree_dirty -eq $false -and $sourceRevision.end_tracked_worktree_dirty -eq $false)
     $endedUtc = [DateTime]::UtcNow
     $totals = @($scenarioTotals.Values | Sort-Object name | ForEach-Object {
         [ordered]@{ name = $_.name; run_count = [int64]$_.run_count; passed_run_count = [int64]$_.passed_run_count; iterations = [int64]$_.iterations; elapsed_ms = [Math]::Round([double]$_.elapsed_ms, 3) }
     })
     if ($null -eq $failure -and ($runs.Count -lt 1 -or $totals.Count -ne 7 -or $matrixStopwatch.Elapsed.TotalSeconds -lt $DurationSeconds)) {
         $failure = "Sustained matrix ended without the required duration, run, or seven-scenario evidence."
+    }
+    if ($DurationSeconds -ge 600 -and -not $sourceRevision.qualified -and $failure -ne $authoritativeProvenanceFailure) {
+        $failure = if ($null -eq $failure) { $authoritativeProvenanceFailure } else { "$failure $authoritativeProvenanceFailure" }
     }
     $passed = $null -eq $failure
     $decoderBackends = @($runs | ForEach-Object { $_.scenarios } | ForEach-Object {
@@ -239,9 +307,9 @@ try {
     } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
     $totalScenarioRuns = [int64](($runs | Measure-Object -Property scenario_count -Sum).Sum)
     $wrapper = [ordered]@{
-        schema_version = 1; status = if ($passed) { 'passed' } else { 'failed' }; failure = $failure
+        schema_version = 2; status = if ($passed) { 'passed' } else { 'failed' }; failure = $failure
         requested_duration_seconds = $DurationSeconds; authoritative_duration_requested = ($DurationSeconds -ge 600)
-        authoritative = ($passed -and $DurationSeconds -ge 600 -and $matrixStopwatch.Elapsed.TotalSeconds -ge $DurationSeconds)
+        authoritative = ($passed -and $DurationSeconds -ge 600 -and $matrixStopwatch.Elapsed.TotalSeconds -ge $DurationSeconds -and $sourceRevision.qualified)
         orchestrator_started_utc = $orchestratorStartedUtc.ToString('O')
         matrix_started_utc = if ($null -ne $matrixStartedUtc) { $matrixStartedUtc.ToString('O') } else { $null }
         ended_utc = $endedUtc.ToString('O')
@@ -249,6 +317,7 @@ try {
         matrix_duration_seconds = [Math]::Round($matrixStopwatch.Elapsed.TotalSeconds, 3)
         actual_duration_seconds = [Math]::Round($matrixStopwatch.Elapsed.TotalSeconds, 3)
         machine = $machineEvidence
+        source_revision = $sourceRevision
         ffmpeg = [ordered]@{ root = $ffmpegRootPath; version = $ffmpegVersion; executable = if ($null -ne $ffmpegRootPath) { Join-Path $ffmpegRootPath 'bin\ffmpeg.exe' } else { $null } }
         scope = [ordered]@{ gui = 'not exercised'; live_audio_device = 'not exercised'; renderer_gpu = 'not exercised'; decoder_backends = $decoderBackends; encoder_backends = $encoderBackends; preview_output = 'scenario-specific; decoded cache pressure uses 160x90 RGBA' }
         run_count = $runs.Count; scenario_count = $totals.Count; total_scenario_runs = $totalScenarioRuns; runs = $runs; scenario_totals = $totals
