@@ -137,8 +137,10 @@ function Assert-Distribution {
 
 function Assert-AppReport {
     param($Report, [string]$RunId, [string]$ConfigPath, [string[]]$Sources, [string]$Adapter, [int]$SourceCount, [int]$ExpectedProcessId)
-    if ($Report.schema_version -ne 1 -or $Report.status -ne 'completed' -or $Report.run_id -ne $RunId -or $Report.process_id -ne $ExpectedProcessId -or
-        $Report.warmup_samples -ne 8 -or $Report.measured_samples -ne 40 -or $Report.cpu_budgets_passed -isnot [bool] -or $Report.cpu_budgets_passed -ne $true -or $null -ne $Report.failure) { throw 'App report identity, completion, or sample count is invalid.' }
+    if ($Report.schema_version -ne 1 -or $Report.run_id -ne $RunId -or $Report.process_id -ne $ExpectedProcessId -or
+        $Report.warmup_samples -ne 8 -or $Report.measured_samples -ne 40) { throw 'App report identity or sample count is invalid.' }
+    if ($Report.status -ne 'completed' -or $null -ne $Report.failure) { throw "App probe did not complete: $($Report.failure)" }
+    if ($Report.cpu_budgets_passed -isnot [bool] -or $Report.cpu_budgets_passed -ne $true) { throw 'App probe did not pass the unchanged CPU budgets (input p95 <= 1 ms; frame p95 < 8 ms).' }
     if ($null -eq $Report.configuration -or $Report.configuration.schema_version -ne 1 -or $Report.configuration.run_id -ne $RunId -or
         $Report.configuration.report_path -ne (Join-Path ([IO.Path]::GetDirectoryName($ConfigPath)) 'app-report.json') -or $Report.configuration.adapter_class -ne $Adapter -or
         @($Report.configuration.source_paths).Count -ne $SourceCount) { throw 'App report configuration identity is invalid.' }
@@ -185,7 +187,10 @@ function Assert-AppReport {
             if (-not (Test-Integer $target.slot) -or -not (Test-Integer $target.media_id) -or -not (Test-Integer $target.clip_id) -or $target.clip_id -lt 1 -or -not (Test-Integer $target.generation) -or -not (Test-Integer $target.request_id) -or $target.request_id -lt 1 -or -not (Test-Integer $target.requested_source_tick) -or
                 $target.output_size[0] -ne 1920 -or $target.output_size[1] -ne 1080) { throw "Sample $($sample.index) has invalid target identity." }
             $layer = @($sample.layers | Where-Object { $_.slot -eq $target.slot -and $_.media_id -eq $target.media_id -and $_.clip_id -eq $target.clip_id -and $_.generation -eq $target.generation -and $_.request_id -eq $target.request_id -and $_.output_size[0] -eq 1920 -and $_.output_size[1] -eq 1080 })
-            if ($layer.Count -ne 1 -or -not (Test-Integer $layer[0].source_tick) -or -not (Test-Integer $layer[0].upload_serial) -or -not (Test-FiniteNonnegativeNumber $layer[0].input_to_upload_ms) -or $layer[0].source_tick -lt $target.requested_source_tick -or ($layer[0].source_tick - $target.requested_source_tick) -gt 33334 -or $layer[0].upload_serial -lt 1) { throw "Sample $($sample.index) lacks exact native generation/request/media/output/tick/upload identity." }
+            # Match the decoder's existing one-microsecond FFmpeg PTS rounding allowance.
+            # Decimal arithmetic preserves exact integer deltas at Int64 endpoints.
+            if ($layer.Count -ne 1 -or -not (Test-Integer $layer[0].source_tick) -or -not (Test-Integer $layer[0].upload_serial) -or -not (Test-FiniteNonnegativeNumber $layer[0].input_to_upload_ms) -or
+                ([decimal]$layer[0].source_tick - [decimal]$target.requested_source_tick) -lt -1 -or ([decimal]$layer[0].source_tick - [decimal]$target.requested_source_tick) -gt 33334 -or $layer[0].upload_serial -lt 1) { throw "Sample $($sample.index) lacks exact native generation/request/media/output/tick/upload identity." }
         }
         if (-not $sample.warmup) { $input.Add([double]$sample.input_to_ui_cpu_ms); $cpu.Add([double]$sample.full_cpu_frame_ms); $ready.Add([double]$sample.matching_layers_to_surface_ms) }
     }

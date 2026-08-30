@@ -304,6 +304,8 @@ required files without opening a window.
 The opt-in [four-source windowed qualification harness](./docs/phase1-ui-qualification.md)
 also defaults to preparation without opening the editor. Its authorized run mode uses the exact
 launcher with `MAELSTROM_LAUNCHER_WAIT=1` to retain process ownership until the editor exits.
+Local Intel UHD 770 and RTX 3090 runs pass its input/frame CPU limits; fresh-frame waiting,
+reference-machine coverage, and sustained playback remain separate qualification work.
 
 Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
 AMD64 directory supplied with

@@ -2790,7 +2790,11 @@ fn latest_same_generation(
     }
 }
 
-fn source_tick_reaches_target(source_tick: i64, target_tick: i64) -> bool {
+/// Returns whether an FFmpeg-rescaled source timestamp reaches a rational project target.
+///
+/// Timestamp rescaling can round a frame one microsecond below its exact project boundary.
+/// This accepts that representational error, but never more than one microsecond of preroll.
+pub fn source_tick_reaches_target(source_tick: i64, target_tick: i64) -> bool {
     source_tick.saturating_add(SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS) >= target_tick
 }
 

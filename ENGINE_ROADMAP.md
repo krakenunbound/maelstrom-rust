@@ -365,9 +365,12 @@ Exit gate:
       `docs/phase1-latency-comparison.md`. An opt-in windowed ruler-input harness now correlates
       exact four-source uploads through native compositor blits, records forty measured inputs
       after eight warmups, and prepares fresh one/four-source cases for both adapter classes.
-      Headless regression/validator checks pass; actual windowed/reference-machine results remain
-      pending. See `docs/phase1-ui-qualification.md`; a prepared package is not GUI-qualified and
-      historical smoke reports do not qualify the new executable.
+      Authorized local windowed runs now pass both CPU limits on Intel UHD 770 and RTX 3090:
+      input p95 0.3178–0.3596 ms and frame CPU p95 0.8291–1.3925 ms. App completion now shares
+      the decoder's one-microsecond timestamp-rounding rule. Fresh four-source image p95 remains
+      431–474 ms with Software decoding; reference-machine, broader backend/media, and sustained
+      playback qualification remain open. See `docs/phase1-ui-qualification.md`; the dedicated
+      workload does not replace the package's general smoke suite.
       A third opt-in headless local gate now repeats the
       same four-source Full-1080p five-second-fixture forward/back scrub workload for a bounded
       duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime

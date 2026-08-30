@@ -33,7 +33,12 @@ function Assert-FixtureReport($Report) {
 }
 
 Assert-FixtureReport (New-ValidReport)
+$roundedReport = New-ValidReport
+$roundedReport.samples[10].layers[3].source_tick = $roundedReport.samples[10].targets[3].requested_source_tick - 1
+Assert-FixtureReport $roundedReport
 $mutations = @(
+    @{name='more than rounding preroll'; change={param($r) $r.samples[10].layers[3].source_tick=$r.samples[10].targets[3].requested_source_tick-2}},
+    @{name='beyond target frame'; change={param($r) $r.samples[10].layers[3].source_tick=$r.samples[10].targets[3].requested_source_tick+33335}},
     @{name='wrong clip'; change={param($r) $r.samples[10].layers[3].clip_id=99}},
     @{name='stale generation'; change={param($r) $r.samples[10].layers[3].generation=1}},
     @{name='stale request'; change={param($r) $r.samples[10].layers[3].request_id=1}},

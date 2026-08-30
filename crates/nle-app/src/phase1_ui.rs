@@ -80,7 +80,7 @@ struct AcceptedLayer {
     input_to_upload_ms: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Sample {
     index: usize,
     warmup: bool,
@@ -102,6 +102,33 @@ struct Pending {
     sample: Sample,
     first_surface_recorded: bool,
     accepted: [Option<AcceptedLayer>; MONITOR_LAYER_COUNT],
+    last_observed: [Option<AcceptedLayer>; MONITOR_LAYER_COUNT],
+}
+
+/// Bounded opt-in evidence retained only in failed Phase 1 reports.
+#[derive(Serialize)]
+struct PendingFailureDiagnostics {
+    pending_sample: Sample,
+    last_observed_layers: [Option<AcceptedLayer>; MONITOR_LAYER_COUNT],
+    accepted_layers: [Option<AcceptedLayer>; MONITOR_LAYER_COUNT],
+    presentation: PresentationDiagnostics,
+}
+
+#[derive(Serialize)]
+struct PresentationDiagnostics {
+    upload_serials: [u64; MONITOR_LAYER_COUNT],
+    painted_upload_serials: [Option<u64>; MONITOR_LAYER_COUNT],
+    paint_serial: u64,
+}
+
+impl From<nle_render::ViewerPresentationEvidence> for PresentationDiagnostics {
+    fn from(evidence: nle_render::ViewerPresentationEvidence) -> Self {
+        Self {
+            upload_serials: evidence.upload_serials,
+            painted_upload_serials: evidence.painted_upload_serials,
+            paint_serial: evidence.paint_serial,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -143,7 +170,7 @@ fn frame_matches(target: &LayerTarget, frame: &AcceptedLayer) -> bool {
         && target.request_id == frame.request_id
         && target.output_size == [1920, 1080]
         && frame.output_size == target.output_size
-        && frame.source_tick >= target.requested_source_tick
+        && nle_decode::source_tick_reaches_target(frame.source_tick, target.requested_source_tick)
         && frame
             .source_tick
             .saturating_sub(target.requested_source_tick)
@@ -163,6 +190,7 @@ pub(super) struct Probe {
     failure: Option<String>,
     report_sent: bool,
     last_paint_serial: u64,
+    last_presentation: nle_render::ViewerPresentationEvidence,
     timeline_generation: Option<u64>,
     tx: Option<mpsc::SyncSender<serde_json::Value>>,
     writer: Option<thread::JoinHandle<()>>,
@@ -233,6 +261,7 @@ impl Probe {
             failure: None,
             report_sent: false,
             last_paint_serial: 0,
+            last_presentation: Default::default(),
             timeline_generation: None,
             tx: Some(tx),
             writer: Some(writer),
@@ -311,6 +340,7 @@ impl Probe {
             },
             first_surface_recorded: false,
             accepted: std::array::from_fn(|_| None),
+            last_observed: std::array::from_fn(|_| None),
         });
         true
     }
@@ -370,6 +400,9 @@ impl Probe {
             upload_serial,
             input_to_upload_ms: pending.started.elapsed().as_secs_f64() * 1000.0,
         };
+        if slot < MONITOR_LAYER_COUNT {
+            pending.last_observed[slot] = Some(frame.clone());
+        }
         if pending
             .sample
             .targets
@@ -386,6 +419,7 @@ impl Probe {
         evidence: nle_render::ViewerPresentationEvidence,
     ) {
         self.last_paint_serial = evidence.paint_serial;
+        self.last_presentation = evidence;
         if self.report_sent {
             return;
         }
@@ -459,12 +493,26 @@ impl Probe {
         let complete =
             self.failure.is_none() && self.samples.len() == TOTAL_SAMPLES && self.released;
         let budgets_passed = complete && input.p95_ms <= 1.0 && cpu.p95_ms < 8.0;
-        let report = serde_json::json!({ "schema_version":1, "run_id":self.config.run_id,
+        let pending_failure_diagnostics = self.failure.as_ref().and_then(|_| {
+            self.pending
+                .as_ref()
+                .map(|pending| PendingFailureDiagnostics {
+                    pending_sample: pending.sample.clone(),
+                    last_observed_layers: pending.last_observed.clone(),
+                    accepted_layers: pending.accepted.clone(),
+                    presentation: self.last_presentation.into(),
+                })
+        });
+        let mut report = serde_json::json!({ "schema_version":1, "run_id":self.config.run_id,
             "process_id":std::process::id(), "status":if complete {"completed"} else {"failed"},
             "failure":self.failure, "configuration":self.config, "warmup_samples":WARMUP_SAMPLES,
             "measured_samples":MEASURED_SAMPLES, "measurement_scope":"synthetic egui ruler input to UI CPU completion and matching native layers to surface submission; not physical input, GPU completion, or scanout",
             "cpu_budgets_passed":budgets_passed, "input_to_ui_cpu":input, "full_cpu_frame":cpu,
             "matching_layers_to_surface":ready, "environment":environment, "samples":self.samples });
+        if let Some(diagnostics) = pending_failure_diagnostics {
+            report["pending_failure_diagnostics"] =
+                serde_json::to_value(diagnostics).expect("failure diagnostics serialize");
+        }
         if let Some(tx) = self.tx.take() {
             let _ = tx.try_send(report);
         }
@@ -636,7 +684,7 @@ impl App {
                     renderer.gpu_submission_completion_timing(),
                 )
             });
-            let environment = serde_json::json!({
+            let mut environment = serde_json::json!({
                 "renderer_name":renderer.map(|r| &r.name), "renderer_device_type":renderer.map(|r| &r.device_type),
                 "renderer_backend":renderer.map(|r| &r.backend), "driver":renderer.map(|r| &r.driver), "driver_info":renderer.map(|r| &r.driver_info),
                 "cpu_identity":self.machine_profile.cpu_identity, "logical_cpu_count":self.machine_profile.logical_cpu_count,
@@ -650,6 +698,29 @@ impl App {
                 "gpu_stage_timings":gpu,
                 "runtime_diagnostics":RuntimeDiagnosticsReport::from(self.runtime_diagnostics())
             });
+            if probe.failure.is_some() {
+                let monitor_requests: Vec<_> = (0..MONITOR_LAYER_COUNT)
+                    .map(|slot| {
+                        let key = self.monitor_last_requests[slot];
+                        serde_json::json!({
+                            "slot":slot,
+                            "latest_request_id":self.monitor_latest_request_ids[slot],
+                            "generation":self.monitor_generations[slot],
+                            "key":key.map(|key| serde_json::json!({
+                                "source_tick":key.source_tick,
+                                "width":key.width,
+                                "height":key.height
+                            })),
+                            "in_flight":self.monitor_requests_in_flight[slot],
+                            "deferred":self.monitor_request_deferred[slot]
+                        })
+                    })
+                    .collect();
+                environment["failure_current_monitor"] = serde_json::json!({
+                    "playhead_tick":self.editor.playhead.0,
+                    "requests":monitor_requests
+                });
+            }
             probe.finish(environment);
         }
         self.phase1_ui_probe = Some(probe);
@@ -834,6 +905,73 @@ mod tests {
     }
 
     #[test]
+    fn phase1_ui_failed_report_preserves_pending_mismatch_without_completing_sample() {
+        let directory = TemporaryDirectory::new();
+        let config = directory.config(1);
+        let mut probe = Probe::new(config.clone()).unwrap();
+        let target = LayerTarget {
+            slot: 0,
+            media_id: 1,
+            clip_id: 2,
+            generation: 3,
+            request_id: 4,
+            requested_source_tick: 5_000,
+            output_size: [1920, 1080],
+        };
+        probe.pending = Some(Pending {
+            started: Instant::now() - Duration::from_secs(6),
+            sample: Sample {
+                index: 0,
+                warmup: true,
+                playhead_tick: 5_000,
+                expected_playhead_tick: 5_000,
+                sequence_generation: 3,
+                input_to_ui_cpu_ms: 1.0,
+                full_cpu_frame_ms: 2.0,
+                input_to_surface_submission_ms: 3.0,
+                matching_layers_to_surface_ms: 0.0,
+                paint_serial: 0,
+                paint_serial_before_input: 0,
+                targets: vec![target],
+                layers: Vec::new(),
+            },
+            first_surface_recorded: true,
+            accepted: std::array::from_fn(|_| None),
+            last_observed: std::array::from_fn(|_| None),
+        });
+        probe.decoded(0, 99, 2, 3, 4, 5_000, [1920, 1080], None, 42);
+        probe.presented(
+            Duration::from_micros(500),
+            nle_render::ViewerPresentationEvidence {
+                upload_serials: [42, 0, 0, 0],
+                painted_upload_serials: [Some(42), None, None, None],
+                paint_serial: 19,
+            },
+        );
+        assert!(
+            probe
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.contains("sample 0 timed out"))
+        );
+        assert!(probe.samples.is_empty());
+        probe.finish(serde_json::json!({}));
+        drop(probe);
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(config.report_path).unwrap()).unwrap();
+        assert_eq!(report["status"], "failed");
+        assert!(report["samples"].as_array().unwrap().is_empty());
+        assert_eq!(report["input_to_ui_cpu"]["samples"], 0);
+        let diagnostics = &report["pending_failure_diagnostics"];
+        assert_eq!(diagnostics["pending_sample"]["targets"][0]["media_id"], 1);
+        assert_eq!(diagnostics["last_observed_layers"][0]["media_id"], 99);
+        assert!(diagnostics["accepted_layers"][0].is_null());
+        assert_eq!(diagnostics["presentation"]["paint_serial"], 19);
+        assert_eq!(diagnostics["presentation"]["painted_upload_serials"][0], 42);
+    }
+
+    #[test]
     fn phase1_ui_layer_evidence_requires_exact_identity_and_full_output() {
         let target = LayerTarget {
             slot: 0,
@@ -872,7 +1010,10 @@ mod tests {
         frame.output_size = [640, 360];
         assert!(!frame_matches(&target, &frame));
         frame.output_size = [1920, 1080];
+        // The decoder rounds FFmpeg PTS while source-frame requests round upward.
         frame.source_tick = 999_999;
+        assert!(frame_matches(&target, &frame));
+        frame.source_tick = 999_998;
         assert!(!frame_matches(&target, &frame));
         frame.source_tick = 1_033_335;
         assert!(!frame_matches(&target, &frame));

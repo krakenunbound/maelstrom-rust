@@ -8053,7 +8053,9 @@ fn monitor_frame_completes_request(
     candidate_source_tick: i64,
 ) -> bool {
     candidate_request_id == latest_request_id
-        && target_source_tick.is_none_or(|target| candidate_source_tick >= target)
+        && target_source_tick.is_none_or(|target| {
+            nle_decode::source_tick_reaches_target(candidate_source_tick, target)
+        })
 }
 
 /// Allows only monitor frames that converge on the latest scrub target.
@@ -10672,9 +10674,122 @@ mod tests {
 
     #[test]
     fn monitor_completion_waits_for_latest_request_to_reach_target() {
-        assert!(!monitor_frame_completes_request(9, Some(1_000), 9, 999));
+        assert!(monitor_frame_completes_request(9, Some(1_000), 9, 999));
+        assert!(!monitor_frame_completes_request(9, Some(1_000), 9, 998));
         assert!(monitor_frame_completes_request(9, Some(1_000), 9, 1_033));
         assert!(!monitor_frame_completes_request(9, Some(1_000), 8, 1_033));
+    }
+
+    #[test]
+    fn rounded_final_monitor_frame_completes_only_the_current_request() {
+        let frame = |project_epoch, request_id, source_tick| {
+            nle_decode::DecodeEvent::Frame(nle_decode::DecodedFrame {
+                project_epoch,
+                request_id,
+                media_id: 1,
+                source_tick,
+                width: 1,
+                height: 1,
+                backend: Some(nle_decode::DecodeBackend::Software),
+                fallback_reason: Some(nle_decode::DecodeFallbackReason::ForcedSoftware),
+                rgba: Arc::from([0, 0, 0, 255]),
+            })
+        };
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        app.editor
+            .add_media_paths([PathBuf::from("rounded-monitor-completion.mp4")]);
+        let video_track = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Video)
+            .expect("default video track")
+            .id;
+        app.editor
+            .timeline
+            .insert_clip(
+                video_track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert monitor clip");
+        app.editor.set_playhead(nle_timeline::Tick(1_433_334));
+
+        let epoch = 7;
+        let request_id = 10;
+        // The live artifact requested 1,433,334 µs but FFmpeg returned the same rational
+        // frame at 1,433,333 µs after rescaling.
+        let target_source_tick = 1_433_334;
+        app.monitor_generations[0] = epoch;
+        app.record_monitor_request_submission(
+            0,
+            MonitorRequestKey {
+                project_epoch: epoch,
+                media_id: 1,
+                source_tick: target_source_tick,
+                width: 1,
+                height: 1,
+                is_scrubbing: false,
+                prewarm_scrub_workers: false,
+                high_quality_scaling: false,
+                selected_quality: PreviewQuality::Full,
+                resolved_quality: PreviewQuality::Full,
+                source_frame_rate: None,
+                source_frame_duration_tick: None,
+            },
+            MonitorSourceIdentity {
+                media_id: 1,
+                path: PathBuf::from("rounded-monitor-completion.mp4"),
+                acceleration: nle_decode::AccelerationPreference::Software,
+            },
+            request_id,
+            true,
+        );
+        let mut adaptive_quality_changed = false;
+
+        assert!(!app.apply_monitor_decode_event(
+            0,
+            frame(epoch - 1, request_id, target_source_tick - 1),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(app.monitor_requests_in_flight[0]);
+        assert!(app.monitor_request_deferred[0]);
+
+        assert!(app.apply_monitor_decode_event(
+            0,
+            frame(epoch, request_id - 1, target_source_tick - 1),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(app.monitor_requests_in_flight[0]);
+        assert!(app.monitor_request_deferred[0]);
+
+        assert!(!app.apply_monitor_decode_event(
+            0,
+            frame(epoch, request_id, target_source_tick - 2),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(app.monitor_requests_in_flight[0]);
+        assert!(app.monitor_request_deferred[0]);
+        assert_eq!(app.runtime_diagnostics().monitor_completed_frames, 0);
+
+        assert!(app.apply_monitor_decode_event(
+            0,
+            frame(epoch, request_id, target_source_tick - 1),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(!app.monitor_requests_in_flight[0]);
+        assert!(!app.monitor_request_deferred[0]);
+        assert_eq!(app.runtime_diagnostics().monitor_completed_frames, 1);
+        assert_eq!(
+            app.editor
+                .monitor_frame_for_layer(0)
+                .and_then(|frame| frame.source_tick)
+                .map(|tick| tick.0),
+            Some(target_source_tick - 1)
+        );
     }
 
     #[test]
