@@ -5505,6 +5505,152 @@ impl App {
             .unwrap_or(nle_decode::AccelerationPreference::Auto)
     }
 
+    /// Applies one decoder event through the same generation, source, and convergence gates used
+    /// by the nonblocking monitor drain. Returns whether a frame reached the retained viewer.
+    fn apply_monitor_decode_event(
+        &mut self,
+        layer: usize,
+        event: nle_decode::DecodeEvent,
+        adaptive_quality_changed: &mut bool,
+    ) -> bool {
+        match event {
+            nle_decode::DecodeEvent::Frame(frame)
+                if frame.project_epoch == self.monitor_generations[layer]
+                    && self
+                        .editor
+                        .playback_targets()
+                        .nth(layer)
+                        .is_some_and(|target| target.media_id == frame.media_id) =>
+            {
+                if !scrub_proxy_allows_monitor_frame(
+                    self.monitor_last_proxy_frames[layer].is_some(),
+                    self.monitor_latest_request_ids[layer],
+                    frame.request_id,
+                ) {
+                    self.monitor_runtime_metrics.record_dropped();
+                    return false;
+                }
+                if let Some(backend) = frame.backend {
+                    let backend_name = backend.display_name();
+                    if !self
+                        .observed_decoder_backends
+                        .iter()
+                        .any(|observed| observed == backend_name)
+                    {
+                        self.observed_decoder_backends.push(backend_name.to_owned());
+                    }
+                    self.editor
+                        .set_media_decoder_backend(frame.media_id, backend_name);
+                }
+                let target_source_tick = self.monitor_last_requests[layer]
+                    .filter(|request| request.media_id == frame.media_id)
+                    .map(|request| request.source_tick);
+                // Progressive frames can carry the latest request ID before they reach
+                // its target. Keep only this layer active until its completed frame lands.
+                let latest_request_completed = monitor_frame_completes_request(
+                    self.monitor_latest_request_ids[layer],
+                    target_source_tick,
+                    frame.request_id,
+                    frame.source_tick,
+                );
+                self.monitor_requests_in_flight[layer] = !latest_request_completed;
+                let turnaround = latest_request_completed
+                    .then(|| {
+                        self.monitor_request_started_at[layer]
+                            .take()
+                            .filter(|(request_id, _)| *request_id == frame.request_id)
+                            .map(|(_, started)| started.elapsed())
+                    })
+                    .flatten();
+                if latest_request_completed {
+                    self.monitor_runtime_metrics.record_completed(
+                        turnaround,
+                        preview_frame_budget_ms(&self.editor),
+                        self.editor.monitor_frame_for_layer(layer).is_some(),
+                    );
+                }
+                // Drag-time requests already use the dedicated scrub cap. Feeding their
+                // deliberately different timings into Auto can downshift again mid-drag,
+                // changing dimensions and forcing an avoidable cancel/reseek.
+                if !*adaptive_quality_changed
+                    && adaptive_preview_can_observe(
+                        self.editor.preview_quality(),
+                        self.editor.is_scrubbing(),
+                    )
+                    && let Some(turnaround) = turnaround
+                    && let Some(resolved) = self.adaptive_preview.observe(
+                        layer,
+                        turnaround,
+                        preview_frame_budget_ms(&self.editor),
+                    )
+                {
+                    *adaptive_quality_changed = self.editor.set_auto_preview_quality(resolved);
+                }
+                let displayed_source_tick =
+                    self.editor
+                        .monitor_frame_for_layer(layer)
+                        .and_then(|monitor| {
+                            (monitor.media_id == Some(frame.media_id))
+                                .then_some(monitor.source_tick)
+                                .flatten()
+                                .map(|tick| tick.0)
+                        });
+                if !target_source_tick.is_none_or(|target_source_tick| {
+                    monitor_frame_converges_to_target(
+                        displayed_source_tick,
+                        target_source_tick,
+                        frame.source_tick,
+                        latest_request_completed,
+                    )
+                }) {
+                    self.monitor_runtime_metrics.record_dropped();
+                    return false;
+                }
+                let media_id = frame.media_id;
+                let native_uploaded = self.present_monitor_rgba(
+                    layer,
+                    media_id,
+                    frame.source_tick,
+                    frame.width,
+                    frame.height,
+                    &frame.rgba,
+                );
+                self.monitor_runtime_metrics
+                    .record_presented(native_uploaded);
+                if let Some(probe) = &mut self.media_acceptance_probe {
+                    probe.record_monitor_frame(media_id, native_uploaded);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                true
+            }
+            nle_decode::DecodeEvent::Error(error)
+                if monitor_event_is_current(
+                    self.monitor_generations[layer],
+                    self.monitor_latest_request_ids[layer],
+                    error.project_epoch,
+                    error.request_id,
+                ) =>
+            {
+                self.monitor_runtime_metrics.record_error();
+                self.monitor_requests_in_flight[layer] = false;
+                self.monitor_request_started_at[layer] = None;
+                self.adaptive_preview.mark_layer_unavailable(layer);
+                self.editor.set_monitor_error(error.message);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                false
+            }
+            nle_decode::DecodeEvent::Frame(_) => {
+                self.monitor_runtime_metrics.record_dropped();
+                false
+            }
+            nle_decode::DecodeEvent::Error(_) => false,
+        }
+    }
+
     /// HOT PATH — nonblocking channel drains and one retained texture update per ready layer.
     fn poll_monitor_decoder(&mut self) {
         let mut adaptive_quality_changed = false;
@@ -5519,140 +5665,8 @@ impl App {
                         break;
                     }
                 };
-                match event {
-                    nle_decode::DecodeEvent::Frame(frame)
-                        if frame.project_epoch == self.monitor_generations[layer]
-                            && self
-                                .editor
-                                .playback_targets()
-                                .nth(layer)
-                                .is_some_and(|target| target.media_id == frame.media_id) =>
-                    {
-                        if !scrub_proxy_allows_monitor_frame(
-                            self.monitor_last_proxy_frames[layer].is_some(),
-                            self.monitor_latest_request_ids[layer],
-                            frame.request_id,
-                        ) {
-                            self.monitor_runtime_metrics.record_dropped();
-                            continue;
-                        }
-                        if let Some(backend) = frame.backend {
-                            let backend_name = backend.display_name();
-                            if !self
-                                .observed_decoder_backends
-                                .iter()
-                                .any(|observed| observed == backend_name)
-                            {
-                                self.observed_decoder_backends.push(backend_name.to_owned());
-                            }
-                            self.editor
-                                .set_media_decoder_backend(frame.media_id, backend_name);
-                        }
-                        let target_source_tick = self.monitor_last_requests[layer]
-                            .filter(|request| request.media_id == frame.media_id)
-                            .map(|request| request.source_tick);
-                        // Progressive frames can carry the latest request ID before they reach
-                        // its target. Keep only this layer active until its completed frame lands.
-                        let latest_request_completed = monitor_frame_completes_request(
-                            self.monitor_latest_request_ids[layer],
-                            target_source_tick,
-                            frame.request_id,
-                            frame.source_tick,
-                        );
-                        self.monitor_requests_in_flight[layer] = !latest_request_completed;
-                        let turnaround = latest_request_completed
-                            .then(|| {
-                                self.monitor_request_started_at[layer]
-                                    .take()
-                                    .filter(|(request_id, _)| *request_id == frame.request_id)
-                                    .map(|(_, started)| started.elapsed())
-                            })
-                            .flatten();
-                        if latest_request_completed {
-                            self.monitor_runtime_metrics.record_completed(
-                                turnaround,
-                                preview_frame_budget_ms(&self.editor),
-                                self.editor.monitor_frame_for_layer(layer).is_some(),
-                            );
-                        }
-                        // Drag-time requests already use the dedicated scrub cap. Feeding their
-                        // deliberately different timings into Auto can downshift again mid-drag,
-                        // changing dimensions and forcing an avoidable cancel/reseek.
-                        if !adaptive_quality_changed
-                            && adaptive_preview_can_observe(
-                                self.editor.preview_quality(),
-                                self.editor.is_scrubbing(),
-                            )
-                            && let Some(turnaround) = turnaround
-                            && let Some(resolved) = self.adaptive_preview.observe(
-                                layer,
-                                turnaround,
-                                preview_frame_budget_ms(&self.editor),
-                            )
-                        {
-                            adaptive_quality_changed =
-                                self.editor.set_auto_preview_quality(resolved);
-                        }
-                        let displayed_source_tick = self
-                            .editor
-                            .monitor_frame_for_layer(layer)
-                            .and_then(|monitor| {
-                                (monitor.media_id == Some(frame.media_id))
-                                    .then_some(monitor.source_tick)
-                                    .flatten()
-                                    .map(|tick| tick.0)
-                            });
-                        if !target_source_tick.is_none_or(|target_source_tick| {
-                            monitor_frame_converges_to_target(
-                                displayed_source_tick,
-                                target_source_tick,
-                                frame.source_tick,
-                                latest_request_completed,
-                            )
-                        }) {
-                            self.monitor_runtime_metrics.record_dropped();
-                            continue;
-                        }
-                        let media_id = frame.media_id;
-                        let native_uploaded = self.present_monitor_rgba(
-                            layer,
-                            media_id,
-                            frame.source_tick,
-                            frame.width,
-                            frame.height,
-                            &frame.rgba,
-                        );
-                        self.monitor_runtime_metrics
-                            .record_presented(native_uploaded);
-                        if let Some(probe) = &mut self.media_acceptance_probe {
-                            probe.record_monitor_frame(media_id, native_uploaded);
-                        }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    nle_decode::DecodeEvent::Error(error)
-                        if monitor_event_is_current(
-                            self.monitor_generations[layer],
-                            self.monitor_latest_request_ids[layer],
-                            error.project_epoch,
-                            error.request_id,
-                        ) =>
-                    {
-                        self.monitor_runtime_metrics.record_error();
-                        self.monitor_requests_in_flight[layer] = false;
-                        self.monitor_request_started_at[layer] = None;
-                        self.adaptive_preview.mark_layer_unavailable(layer);
-                        self.editor.set_monitor_error(error.message);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    nle_decode::DecodeEvent::Frame(_) => {
-                        self.monitor_runtime_metrics.record_dropped();
-                    }
-                    nle_decode::DecodeEvent::Error(_) => {}
-                }
+                let _ =
+                    self.apply_monitor_decode_event(layer, event, &mut adaptive_quality_changed);
             }
         }
     }
@@ -8603,6 +8617,141 @@ mod tests {
             old_generation,
             7,
         ));
+    }
+
+    #[test]
+    fn scrub_disable_reenable_accepts_only_the_newest_layer_request() {
+        let frame = |project_epoch, request_id, media_id, source_tick| {
+            nle_decode::DecodeEvent::Frame(nle_decode::DecodedFrame {
+                project_epoch,
+                request_id,
+                media_id,
+                source_tick,
+                width: 1,
+                height: 1,
+                backend: Some(nle_decode::DecodeBackend::Software),
+                rgba: Arc::from([0, 0, 0, 255]),
+            })
+        };
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths([
+            PathBuf::from("lower-unaffected.mp4"),
+            PathBuf::from("upper-toggle.mp4"),
+        ]);
+        let tracks = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+            .map(|track| track.id)
+            .take(2)
+            .collect::<Vec<_>>();
+        let lower_clip = app
+            .editor
+            .timeline
+            .insert_clip(
+                tracks[0],
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(10_000_000),
+                nle_timeline::Tick(0),
+            )
+            .unwrap();
+        let upper_clip = app
+            .editor
+            .timeline
+            .insert_clip(
+                tracks[1],
+                nle_timeline::MediaId(2),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(10_000_000),
+                nle_timeline::Tick(0),
+            )
+            .unwrap();
+        app.editor.set_playhead(nle_timeline::Tick(1_000_000));
+        let mut forward = preview_request(&app.editor);
+        forward.is_scrubbing = true;
+        app.submit_monitor_decode_request(forward);
+        let forward_epoch = app.monitor_generations[1];
+        let forward_request = app.monitor_latest_request_ids[1];
+
+        app.editor.set_playhead(nle_timeline::Tick(500_000));
+        let mut backward = preview_request(&app.editor);
+        backward.is_scrubbing = true;
+        app.submit_monitor_decode_request(backward);
+        let backward_request = app.monitor_latest_request_ids[1];
+        assert_eq!(app.monitor_generations[1], forward_epoch);
+        assert_ne!(backward_request, forward_request);
+        let mut adaptive_quality_changed = false;
+
+        let lower_request = app.monitor_last_requests[0];
+        let lower_generation = app.monitor_generations[0];
+        let lower_request_id = app.monitor_latest_request_ids[0];
+        app.editor.set_monitor_frame_for_layer(
+            0,
+            egui::TextureId::Managed(900),
+            1,
+            1,
+            Some(1),
+            Some(nle_timeline::Tick(500_000)),
+        );
+        assert!(app.editor.set_timeline_clip_enabled(upper_clip, false));
+        let mut disabled = preview_request(&app.editor);
+        disabled.is_scrubbing = true;
+        assert!(disabled.sources[1].is_none());
+        app.submit_monitor_decode_request(disabled);
+        assert!(app.monitor_last_requests[1].is_none());
+        assert!(!app.monitor_requests_in_flight[1]);
+        assert!(app.editor.monitor_frame_for_layer(1).is_none());
+        assert_ne!(app.monitor_generations[1], forward_epoch);
+        assert!(!app.apply_monitor_decode_event(
+            1,
+            frame(forward_epoch, forward_request, 2, 1_000_000),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(!app.apply_monitor_decode_event(
+            1,
+            frame(forward_epoch, backward_request, 2, 500_000),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(app.editor.monitor_frame_for_layer(1).is_none());
+        assert_eq!(app.monitor_last_requests[0], lower_request);
+        assert_eq!(app.monitor_generations[0], lower_generation);
+        assert_eq!(app.monitor_latest_request_ids[0], lower_request_id);
+        assert_eq!(
+            app.editor.monitor_frame_for_layer(0).unwrap().texture,
+            egui::TextureId::Managed(900)
+        );
+
+        assert!(app.editor.set_timeline_clip_enabled(upper_clip, true));
+        app.editor.set_playhead(nle_timeline::Tick(2_000_000));
+        let mut reenabled = preview_request(&app.editor);
+        reenabled.is_scrubbing = true;
+        app.submit_monitor_decode_request(reenabled);
+        let newest_epoch = app.monitor_generations[1];
+        let newest_request = app.monitor_latest_request_ids[1];
+        let newest_key = app.monitor_last_requests[1].expect("re-enabled layer request");
+        assert_eq!(newest_key.media_id, 2);
+        assert_eq!(newest_key.source_tick, 2_000_000);
+        assert!(!app.apply_monitor_decode_event(
+            1,
+            frame(forward_epoch, backward_request, 2, 500_000),
+            &mut adaptive_quality_changed,
+        ));
+        assert!(app.apply_monitor_decode_event(
+            1,
+            frame(newest_epoch, newest_request, 2, newest_key.source_tick),
+            &mut adaptive_quality_changed,
+        ));
+        assert_eq!(
+            app.editor
+                .monitor_frame_for_layer(1)
+                .expect("newest layer frame is presented")
+                .source_tick,
+            Some(nle_timeline::Tick(2_000_000))
+        );
+        assert!(app.editor.timeline.clip(lower_clip).is_some());
     }
 
     #[test]

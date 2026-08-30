@@ -148,7 +148,14 @@ Exit gate:
       or cross-hardware completion. See `docs/phase1-multisource.md` and
       `docs/phase1-latency-comparison.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
+      A deterministic test-only decoder barrier proves an independently scheduled ready source can
+      complete while another decoder worker is blocked; this is not yet a real-media latency or
+      playback-clock measurement.
 - [ ] Rapid layer enable/disable and backward scrubbing publish only the latest generation.
+      A deterministic app sequence covers forward/backward scrub, disable, re-enable, and newest
+      re-enabled generation/request presentation while an unaffected layer remains retained;
+      real-media stress coverage
+      remains required.
 - [ ] Cache/session memory remains inside its configured hard limit during a ten-minute stress run.
 
 ### Phase 2 — Real-time GPU compositor

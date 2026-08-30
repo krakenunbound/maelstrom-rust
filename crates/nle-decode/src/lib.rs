@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use std::sync::{Condvar, MutexGuard, OnceLock};
+
 use ffmpeg::{
     codec::Id,
     format::Pixel,
@@ -36,6 +39,103 @@ const SCRUB_CACHE_TOLERANCE_TICKS: i64 = 50_000;
 const MAX_SCRUB_CACHE_INDEX_ENTRIES: usize = 1_024;
 const MAX_CACHE_STREAM_STATES: usize = 4_096;
 pub const DEFAULT_FRAME_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+
+// Kept entirely out of production builds. This stops one exact request at the worker boundary
+// without adding a runtime hook or timing dependency to the decoder.
+#[cfg(test)]
+struct TestDecodeBarrier {
+    request_id: u64,
+    path: PathBuf,
+    started: (Mutex<bool>, Condvar),
+    released: (Mutex<bool>, Condvar),
+}
+
+#[cfg(test)]
+struct TestDecodeBarrierGuard {
+    barrier: Arc<TestDecodeBarrier>,
+    _serial: MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestDecodeBarrierGuard {
+    fn drop(&mut self) {
+        *test_decode_barrier_slot()
+            .lock()
+            .expect("test decode barrier slot lock") = None;
+        self.release();
+    }
+}
+
+#[cfg(test)]
+fn test_decode_barrier_slot() -> &'static Mutex<Option<Arc<TestDecodeBarrier>>> {
+    static SLOT: OnceLock<Mutex<Option<Arc<TestDecodeBarrier>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn test_decode_barrier_serial() -> &'static Mutex<()> {
+    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn install_test_decode_barrier(request_id: u64, path: PathBuf) -> TestDecodeBarrierGuard {
+    let serial = test_decode_barrier_serial()
+        .lock()
+        .expect("test decode barrier serial lock");
+    let barrier = Arc::new(TestDecodeBarrier {
+        request_id,
+        path,
+        started: (Mutex::new(false), Condvar::new()),
+        released: (Mutex::new(false), Condvar::new()),
+    });
+    *test_decode_barrier_slot()
+        .lock()
+        .expect("test decode barrier slot lock") = Some(Arc::clone(&barrier));
+    TestDecodeBarrierGuard {
+        barrier,
+        _serial: serial,
+    }
+}
+
+#[cfg(test)]
+impl TestDecodeBarrierGuard {
+    fn wait_until_blocked(&self) {
+        let (started, wake) = &self.barrier.started;
+        let started = started.lock().expect("test decode barrier start lock");
+        let (started, _) = wake
+            .wait_timeout_while(started, Duration::from_secs(2), |started| !*started)
+            .expect("test decode barrier start wait");
+        assert!(*started, "decoder did not reach deterministic test barrier");
+    }
+
+    fn release(&self) {
+        let (released, wake) = &self.barrier.released;
+        *released.lock().expect("test decode barrier release lock") = true;
+        wake.notify_all();
+    }
+}
+
+#[cfg(test)]
+fn block_test_decode_request(request: &DecodeRequest) {
+    let barrier = test_decode_barrier_slot()
+        .lock()
+        .expect("test decode barrier slot lock")
+        .as_ref()
+        .filter(|barrier| barrier.request_id == request.request_id && barrier.path == request.path)
+        .cloned();
+    let Some(barrier) = barrier else {
+        return;
+    };
+    let (started, wake) = &barrier.started;
+    *started.lock().expect("test decode barrier start lock") = true;
+    wake.notify_all();
+    let (released, wake) = &barrier.released;
+    let released = released.lock().expect("test decode barrier release lock");
+    let _released = wake
+        .wait_while(released, |released| !*released)
+        .expect("test decode barrier release wait");
+}
 
 /// A cloneable, hard-capped permit pool for monitor decoder sessions.
 ///
@@ -1113,6 +1213,8 @@ fn monitor_scheduler_loop(
         }
 
         let request = pending.take().expect("pending monitor request");
+        #[cfg(test)]
+        block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&stage_timings.worker_request);
         let progress_events = Arc::clone(&events);
         let progress_backend = sessions
@@ -2420,6 +2522,7 @@ mod tests {
         path::PathBuf,
         process::{Command, Stdio},
         sync::atomic::{AtomicBool, AtomicU64, Ordering},
+        sync::mpsc,
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
@@ -3543,6 +3646,55 @@ mod tests {
             DecodeEvent::Error(error) => panic!("unexpected decode error: {}", error.message),
         }
         drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn blocked_decoder_request_does_not_prevent_another_decoder_from_completing() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let (first_ready_tx, first_ready_rx) = mpsc::channel();
+        let first = MonitorDecoder::new_with_notifier(move || {
+            let _ = first_ready_tx.send(());
+        });
+        let (second_ready_tx, second_ready_rx) = mpsc::channel();
+        let second = MonitorDecoder::new_with_notifier(move || {
+            let _ = second_ready_tx.send(());
+        });
+        let first_request = request(path.clone(), 101);
+        let second_request = request(path.clone(), 102);
+        // The guard is declared after both workers and requests, so every unwind releases the
+        // blocked worker before either decoder's Drop joins its scheduler.
+        let barrier = install_test_decode_barrier(first_request.request_id, path.clone());
+
+        first.request(first_request.clone()).unwrap();
+        barrier.wait_until_blocked();
+        second.request(second_request.clone()).unwrap();
+        second_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("independent decoder did not complete while the first was blocked");
+        match second.try_recv().unwrap().expect("second decoder event") {
+            DecodeEvent::Frame(frame) => assert_frame_reaches_target(&frame, &second_request),
+            DecodeEvent::Error(error) => {
+                panic!("unexpected independent decode error: {}", error.message)
+            }
+        }
+
+        barrier.release();
+        first_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("blocked decoder did not resume after release");
+        match first.try_recv().unwrap().expect("first decoder event") {
+            DecodeEvent::Frame(frame) => assert_frame_reaches_target(&frame, &first_request),
+            DecodeEvent::Error(error) => {
+                panic!("unexpected resumed decode error: {}", error.message)
+            }
+        }
+        drop(first);
+        drop(second);
+        drop(barrier);
         fs::remove_file(path).unwrap();
     }
 
