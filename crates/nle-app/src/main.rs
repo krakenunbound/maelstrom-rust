@@ -9627,6 +9627,67 @@ mod tests {
     }
 
     #[test]
+    fn preview_request_preserves_indexed_vfr_boundaries_after_trim_and_slip() {
+        let mut editor = EditorState::new(Language::English, "Indexed VFR preview request");
+        editor.add_media_paths([PathBuf::from("indexed-vfr-preview.mp4")]);
+        let video_track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Video)
+            .unwrap()
+            .id;
+        let clip_id = editor
+            .timeline
+            .insert_clip(
+                video_track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(1_000_000),
+                nle_timeline::Tick(200_000),
+                nle_timeline::Tick(0),
+            )
+            .unwrap();
+        editor
+            .timeline
+            .trim_start(clip_id, nle_timeline::Tick(50_000), false, false)
+            .unwrap();
+        editor
+            .timeline
+            .slip_clip(clip_id, nle_timeline::Tick(50_000), false)
+            .unwrap();
+        editor.set_media_frame_time_index(
+            1,
+            Some(
+                nle_ui_core::SourceFrameTimeIndex::new(vec![
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(40_000),
+                    nle_timeline::Tick(110_000),
+                    nle_timeline::Tick(150_000),
+                    nle_timeline::Tick(240_000),
+                    nle_timeline::Tick(310_000),
+                ])
+                .unwrap(),
+            ),
+        );
+
+        for (playhead, decode_tick, duration) in [
+            (1_050_000, 40_000, 70_000),
+            (1_060_000, 110_000, 40_000),
+            (1_060_001, 110_000, 40_000),
+            (1_190_000, 240_000, 70_000),
+            (1_200_000, 240_000, 70_000),
+            (1_150_000, 150_000, 90_000),
+            (1_060_001, 110_000, 40_000),
+        ] {
+            editor.set_playhead(nle_timeline::Tick(playhead));
+            let source = preview_request(&editor).sources[0].unwrap();
+            assert_eq!(source.source_tick, decode_tick);
+            assert_eq!(source.source_frame_duration_tick, Some(duration));
+            assert_eq!(source.source_frame_rate, None);
+        }
+    }
+
+    #[test]
     fn preview_request_captures_ordered_audible_audio_metadata() {
         let mut editor = EditorState::new(Language::English, "Audio request");
         editor.add_media_paths([

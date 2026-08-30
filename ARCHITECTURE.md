@@ -182,6 +182,12 @@ Auto observes latest-request decoder turnaround against a frame-rate-derived bud
 breach and longer recovery windows to avoid oscillation, and changes only runtime resolution.
 Manual quality is durable view state; Auto's current resolution is runtime-only. Output-size changes
 cancel and generation-obsolete prior layer requests but retain the last good texture for continuity.
+For indexed VFR video, trim and slip continue to change the canonical `source_in`; playback adds the
+clip-local timeline offset and floors that logical source time to the greatest retained packet PTS.
+At the exact held timeline endpoint, the source out-point remains exclusive: the index resolves from
+the final representable source microtick before it, independent of the project frame grid. Empty
+indexes and CFR media retain rational project/source-rate behavior. Forward and decreasing preview
+requests carry the same resolved boundary and adjacent local span into decoder/cache policy.
 Before decode admission, the app releases every positional slot that no longer contributes. It then
 orders contributing video slots in a fixed four-entry array by declared priority, with the visually
 topmost layer winning ties, while preserving each result's positional compositor slot. This gives a

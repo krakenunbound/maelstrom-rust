@@ -171,9 +171,13 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       runtime-only index, suppress the unsafe average-rate seek grid, hold the greatest source PTS
       at or before the logical playhead, and carry each adjacent local span into request/cache
       policy. The deterministic MPEG-4 fixture proves exact `0/40/110/150/240 ms` irregular PTS
-      through analysis and preview addressing. This remains open: packet PTS is a safe bounded
-      demux index rather than decoded best-effort frame timing for every complex codec, and slip
-      mapping plus reverse-policy proof are still required.
+      through analysis and preview addressing. A media-free combined regression now trims and slips
+      one irregular indexed source, proves exact-boundary and boundary-plus-one mapping through
+      forward and decreasing playheads, carries the same PTS/local span into immutable preview
+      requests, and holds the final indexed frame from the exclusive source out-point at both 30 and
+      30000/1001 project rates. Empty indexes retain CFR fallback. This remains open because packet
+      PTS is a safe bounded demux index rather than decoded best-effort frame timing for every
+      complex codec; broad real-media/cross-backend proof is still required.
 - [ ] Add decode-session eviction that respects the global byte/session cap. Release-first cleanup
       now prevents a noncontributing positional slot from blocking its replacement, but it is not
       global priority/recency eviction and makes no preemption claim for active contributors.

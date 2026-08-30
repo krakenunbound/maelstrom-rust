@@ -2948,9 +2948,20 @@ impl EditorState {
         let item = self.media.get(media_id.saturating_sub(1) as usize)?;
         let path = (item.id == media_id).then_some(&item.path)?;
         let clip_end = clip.end();
+        let source_out = Tick(clip.source_in.0.saturating_add(clip.duration.0));
+        let indexed_source_frames = (item.kind != MediaKind::Image)
+            .then(|| self.source_frame_time_indexes.get(&media_id))
+            .flatten();
         let source_tick = if self.playhead == self.timeline_end() && self.playhead == clip_end {
-            self.frame_rate
-                .frame_before_end(Tick(clip.source_in.0.saturating_add(clip.duration.0)))
+            let last_source_microtick = Tick(source_out.0.saturating_sub(1));
+            if indexed_source_frames
+                .and_then(|index| index.resolve(last_source_microtick))
+                .is_some()
+            {
+                last_source_microtick
+            } else {
+                self.frame_rate.frame_before_end(source_out)
+            }
         } else {
             Tick(
                 clip.source_in
@@ -2958,10 +2969,7 @@ impl EditorState {
                     .saturating_add(self.playhead.0.saturating_sub(clip.start.0)),
             )
         };
-        let indexed_frame = (item.kind != MediaKind::Image)
-            .then(|| self.source_frame_time_indexes.get(&media_id))
-            .flatten()
-            .and_then(|index| index.resolve(source_tick));
+        let indexed_frame = indexed_source_frames.and_then(|index| index.resolve(source_tick));
         let decode_tick = if item.kind == MediaKind::Image {
             Tick(0)
         } else {
@@ -18699,6 +18707,102 @@ mod tests {
         assert_eq!(target.decode_tick, Tick(0));
         assert_eq!(target.source_frame_duration_tick, Some(Tick(100)));
         assert_eq!(target.source_frame_rate, None);
+    }
+
+    #[test]
+    fn indexed_vfr_end_hold_uses_source_microticks_after_trim_and_slip() {
+        for frame_rate in [
+            ProjectFrameRate::new(30, 1).unwrap(),
+            ProjectFrameRate::new(30_000, 1_001).unwrap(),
+        ] {
+            let mut editor =
+                EditorState::new_with_frame_rate(Language::English, "Indexed end hold", frame_rate);
+            editor.add_media_paths([PathBuf::from("indexed-vfr.mp4")]);
+            let video_track = editor
+                .timeline
+                .tracks
+                .iter()
+                .find(|track| track.kind == TrackKind::Video)
+                .unwrap()
+                .id;
+            let clip_id = editor
+                .timeline
+                .insert_clip(
+                    video_track,
+                    TimelineMediaId(1),
+                    Tick(1_000_000),
+                    Tick(200_000),
+                    Tick(0),
+                )
+                .unwrap();
+            editor
+                .timeline
+                .trim_start(clip_id, Tick(50_000), false, false)
+                .unwrap();
+            editor
+                .timeline
+                .slip_clip(clip_id, Tick(50_000), false)
+                .unwrap();
+            editor.set_media_frame_time_index(
+                1,
+                Some(
+                    SourceFrameTimeIndex::new(vec![
+                        Tick(0),
+                        Tick(40_000),
+                        Tick(110_000),
+                        Tick(150_000),
+                        Tick(240_000),
+                        Tick(310_000),
+                    ])
+                    .unwrap(),
+                ),
+            );
+
+            for (playhead, source_tick, decode_tick, duration) in [
+                (1_050_000, 100_000, 40_000, 70_000),
+                (1_060_000, 110_000, 110_000, 40_000),
+                (1_060_001, 110_001, 110_000, 40_000),
+                (1_150_000, 200_000, 150_000, 90_000),
+                (1_190_000, 240_000, 240_000, 70_000),
+                (1_200_000, 249_999, 240_000, 70_000),
+                (1_150_000, 200_000, 150_000, 90_000),
+                (1_060_001, 110_001, 110_000, 40_000),
+            ] {
+                editor.set_playhead(Tick(playhead));
+                let target = editor.playback_target().unwrap();
+                assert_eq!(target.source_tick, Tick(source_tick));
+                assert_eq!(target.decode_tick, Tick(decode_tick));
+                assert_eq!(target.source_frame_duration_tick, Some(Tick(duration)));
+                assert_eq!(target.source_frame_rate, None);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_source_frame_index_preserves_cfr_end_hold() {
+        let frame_rate = ProjectFrameRate::new(30, 1).unwrap();
+        let mut editor =
+            EditorState::new_with_frame_rate(Language::English, "Empty index", frame_rate);
+        editor.add_media_paths([PathBuf::from("empty-index.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        editor.set_media_metadata(
+            1,
+            MediaMetadata {
+                frame_rate_ratio: SourceFrameRate::new(30, 1),
+                ..Default::default()
+            },
+        );
+        editor.set_media_frame_time_index(1, Some(SourceFrameTimeIndex::new(vec![]).unwrap()));
+        editor.set_playhead(editor.timeline_end());
+
+        let target = editor.playback_target().unwrap();
+        assert_eq!(
+            target.source_tick,
+            frame_rate.frame_before_end(editor.timeline_end())
+        );
+        assert_eq!(target.decode_tick, target.source_tick);
+        assert_eq!(target.source_frame_rate, SourceFrameRate::new(30, 1));
+        assert_eq!(target.source_frame_duration_tick, None);
     }
 
     #[test]
