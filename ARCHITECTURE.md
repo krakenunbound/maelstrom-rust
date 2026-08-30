@@ -267,9 +267,10 @@ encode before publishing this evidence.
 The opt-in Phase 0 scenario matrix is a finite integration check, not a steady-state benchmark. It
 uses generated media and the existing public decoder/App/export paths to verify latest-wins reverse
 scrubbing, alternating editor restoration, missing-file detection followed by decode recovery,
-bounded video-strip eviction, and cancellation only after an absolute-path FFmpeg process reports
-its encoder. Reports are atomically replaced inside an ignored workspace artifact directory. The
-ten-minute playback soak and broader memory-pressure proof remain separate roadmap gates.
+bounded video-strip eviction, forced byte-LRU eviction in the shared decoded-frame cache with four
+distinct sources, and cancellation only after an absolute-path FFmpeg process reports its encoder.
+Reports are atomically replaced inside an ignored workspace artifact directory. The ten-minute
+playback soak and sustained cross-hardware memory-pressure proof remain separate roadmap gates.
 
 Shipping uses the pinned FFmpeg 8.1 LGPL shared bundle. Windows DLLs are packaged beside the
 executable. GPL/nonfree codec libraries are rejected. H.264 export prefers available Windows

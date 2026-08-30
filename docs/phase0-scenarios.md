@@ -12,7 +12,7 @@ written atomically to the ignored `artifacts/phase0-scenarios/` directory.
 .\scripts\Run-Phase0Scenarios.ps1 -FfmpegRoot 'H:\Maelstrom Rust\.deps\ffmpeg-project-8.1'
 ```
 
-The report has `schema_version: 1`. Each scenario records its name, finite
+The report has `schema_version: 2`, an explicit scenario count, and six scenarios. Each scenario records its name, finite
 iteration count, elapsed milliseconds, observable decoder backend when one was
 produced, and explicit pass/failure evidence. The matrix covers public monitor
 decoder reverse scrubs, editor-state switching, offline-media recovery,
@@ -24,6 +24,12 @@ strips 3–5 (210 MiB retained). Its evidence records `cumulative_bytes`,
 `retained_bytes`, `cap_bytes`, and `peak_live_bytes`. The peak is modeled live
 RGBA payload, not an operating-system RSS/commit measurement. Allow roughly
 280 MiB plus test-process overhead; this opt-in matrix is intentionally serial.
+
+The `four_source_decoded_frame_cache_pressure` scenario runs one bounded pass using four distinct
+fixture paths; its `iterations: 4` field counts the four exercised sources. It sizes the decoded-frame cache for exactly three 160x90 RGBA frames (57,600 bytes
+each), forces real decoded-frame LRU eviction, and proves four exact foreground source groups/actors,
+current/peak byte bounds, session/source/actor caps, and zero post-release resources. It does not prove idle/session LRU
+eviction and does not replace the 600-second playback soak or cross-hardware gates.
 
 The runner restores altered environment variables. The test removes only its
 own fixture copy and export final/staging/filter files; the successful JSON

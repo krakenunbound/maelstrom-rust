@@ -310,12 +310,14 @@ pub struct MonitorFrameCachePoolDiagnostics {
     pub capacity_bytes: usize,
     pub current_bytes: usize,
     pub peak_bytes: usize,
+    pub eviction_count: u64,
 }
 
 struct FrameCacheDiagnostics {
     capacity_bytes: usize,
     current_bytes: AtomicUsize,
     peak_bytes: AtomicUsize,
+    eviction_count: AtomicU64,
 }
 
 impl FrameCacheDiagnostics {
@@ -324,6 +326,7 @@ impl FrameCacheDiagnostics {
             capacity_bytes,
             current_bytes: AtomicUsize::new(0),
             peak_bytes: AtomicUsize::new(0),
+            eviction_count: AtomicU64::new(0),
         }
     }
 
@@ -333,13 +336,15 @@ impl FrameCacheDiagnostics {
             capacity_bytes: self.capacity_bytes,
             current_bytes,
             peak_bytes: self.peak_bytes.load(Ordering::Acquire).max(current_bytes),
+            eviction_count: self.eviction_count.load(Ordering::Acquire),
         }
     }
 
-    fn publish(&self, used_bytes: usize) {
+    fn publish(&self, used_bytes: usize, eviction_count: u64) {
         debug_assert!(used_bytes <= self.capacity_bytes);
         self.peak_bytes.fetch_max(used_bytes, Ordering::AcqRel);
         self.current_bytes.store(used_bytes, Ordering::Release);
+        self.eviction_count.store(eviction_count, Ordering::Release);
     }
 }
 
@@ -1887,7 +1892,8 @@ impl MonitorFrameCache {
     }
 
     fn publish_frame_cache_bytes(&self) {
-        self.cache_diagnostics.publish(self.frames.used_bytes());
+        self.cache_diagnostics
+            .publish(self.frames.used_bytes(), self.frames.eviction_count());
     }
 }
 
@@ -4960,12 +4966,51 @@ mod tests {
         assert_eq!(snapshot.capacity_bytes, 32);
         assert_eq!(snapshot.current_bytes, 32);
         assert_eq!(snapshot.peak_bytes, 32);
+        assert_eq!(snapshot.eviction_count, 1);
         assert!(snapshot.current_bytes <= snapshot.capacity_bytes);
 
         cache.clear();
         let snapshot = diagnostics.snapshot();
         assert_eq!(snapshot.current_bytes, 0);
         assert_eq!(snapshot.peak_bytes, 32);
+        assert_eq!(snapshot.eviction_count, 1);
+    }
+
+    #[test]
+    fn frame_cache_pool_diagnostics_publish_cumulative_budget_evictions() {
+        let pool = MonitorFrameCachePool::new(32);
+        let key = FrameKey {
+            project_epoch: 1,
+            media_id: 2,
+            source_tick: 0,
+            width: 2,
+            height: 2,
+        };
+        let mut cache = pool.cache.lock().expect("frame cache pool lock");
+        for source_tick in [
+            0,
+            SPARSE_CACHE_INTERVAL_TICKS,
+            SPARSE_CACHE_INTERVAL_TICKS * 2,
+        ] {
+            let frame_key = FrameKey { source_tick, ..key };
+            assert!(cache.insert(
+                frame_key,
+                FrameValue::new(source_tick, 2, 2, vec![source_tick as u8; 16].into()),
+            ));
+        }
+        drop(cache);
+
+        let snapshot = pool.diagnostics();
+        assert_eq!(snapshot.capacity_bytes, 32);
+        assert_eq!(snapshot.current_bytes, 32);
+        assert_eq!(snapshot.peak_bytes, 32);
+        assert_eq!(snapshot.eviction_count, 1);
+
+        pool.cache.lock().expect("frame cache pool lock").clear();
+        let snapshot = pool.diagnostics();
+        assert_eq!(snapshot.current_bytes, 0);
+        assert_eq!(snapshot.peak_bytes, 32);
+        assert_eq!(snapshot.eviction_count, 1);
     }
 
     #[test]
@@ -4996,9 +5041,9 @@ mod tests {
         let writer_publishing = Arc::clone(&publishing);
         let writer = thread::spawn(move || {
             for _ in 0..10_000 {
-                writer_cache_diagnostics.publish(128);
+                writer_cache_diagnostics.publish(128, 1);
                 writer_diagnostics.publish_worker_session(0, true);
-                writer_cache_diagnostics.publish(0);
+                writer_cache_diagnostics.publish(0, 1);
                 writer_diagnostics.publish_worker_session(0, false);
             }
             writer_publishing.store(false, Ordering::Release);

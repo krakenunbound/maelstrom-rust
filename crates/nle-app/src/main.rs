@@ -3168,6 +3168,7 @@ impl App {
             move || catalog_notify(AppEvent::ProjectWriter),
             move || dialog_notify(AppEvent::ProjectDialog),
             move || startup_notify(AppEvent::StartupResources),
+            None,
         )
     }
 
@@ -3182,6 +3183,30 @@ impl App {
             || {},
             || {},
             || {},
+            None,
+        );
+        app.startup_resources_tx = None;
+        app.apply_startup_resources(load_startup_resources(startup_path));
+        app.initialize_audio_engine_after_first_frame();
+        app
+    }
+
+    #[cfg(test)]
+    fn new_with_catalog_and_monitor_cache_bytes(
+        demo_hub: bool,
+        catalog_path: Option<PathBuf>,
+        monitor_cache_bytes: usize,
+    ) -> Self {
+        let startup_path = catalog_path.clone();
+        let mut app = Self::new_with_catalog_and_notifier(
+            demo_hub,
+            catalog_path,
+            || {},
+            || {},
+            || {},
+            || {},
+            || {},
+            Some(monitor_cache_bytes),
         );
         app.startup_resources_tx = None;
         app.apply_startup_resources(load_startup_resources(startup_path));
@@ -3197,6 +3222,7 @@ impl App {
         catalog_writer_notifier: impl Fn() + Send + Sync + 'static,
         project_dialog_notifier: impl Fn() + Send + Sync + 'static,
         startup_resources_notifier: impl Fn() + Send + Sync + 'static,
+        monitor_cache_bytes_override: Option<usize>,
     ) -> Self {
         let started_at = Instant::now();
         let (project_dialog_tx, project_dialog_rx) = mpsc::channel();
@@ -3207,7 +3233,8 @@ impl App {
         let hub = ProjectHubState::new(demo_hub);
         let editor = EditorState::new(Language::English, "Untitled Project");
         let monitor_notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(monitor_notifier);
-        let monitor_cache_bytes = monitor_cache_bytes_from_args(std::env::args());
+        let monitor_cache_bytes = monitor_cache_bytes_override
+            .unwrap_or_else(|| monitor_cache_bytes_from_args(std::env::args()));
         let monitor_frame_cache_pool = nle_decode::MonitorFrameCachePool::new(monitor_cache_bytes);
         let monitor_session_pool = nle_decode::MonitorSessionPool::new(
             MONITOR_FOREGROUND_SESSION_CAP,
@@ -7308,6 +7335,7 @@ mod tests {
                 capacity_bytes: 512,
                 current_bytes: 120,
                 peak_bytes: 225,
+                eviction_count: 0,
             },
             nle_decode::MonitorSessionPoolDiagnostics {
                 active_sticky_sessions: 3,
@@ -10918,6 +10946,7 @@ mod tests {
     struct Phase0Report {
         schema_version: u32,
         status: &'static str,
+        scenario_count: usize,
         scenarios: Vec<Phase0ScenarioReport>,
     }
 
@@ -11555,7 +11584,7 @@ mod tests {
             .join("phase0-cancelled.mp4");
         let _ = fs::remove_file(&output);
 
-        let mut scenarios = Vec::with_capacity(5);
+        let mut scenarios = Vec::new();
         scenarios.push(phase0_run_scenario(
             "reverse_scrub_public_monitor_decoder",
             6,
@@ -11819,6 +11848,178 @@ mod tests {
                 ))
             },
         ));
+        scenarios.push(phase0_run_scenario(
+            "four_source_decoded_frame_cache_pressure",
+            4,
+            || {
+                const SOURCE_COUNT: usize = 4;
+                const FRAME_WIDTH: u32 = 160;
+                const FRAME_HEIGHT: u32 = 90;
+                const FRAME_BYTES: usize = FRAME_WIDTH as usize * FRAME_HEIGHT as usize * 4;
+                const CACHE_CAP_BYTES: usize = FRAME_BYTES * 3;
+                let artifact_root = report_path.parent().expect("validated Phase 0 artifact root");
+                let copy_nonce = format!(
+                    "{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                let copies: [PathBuf; SOURCE_COUNT] = std::array::from_fn(|index| {
+                    artifact_root.join(format!("phase0-cache-pressure-{copy_nonce}-{index}.mp4"))
+                });
+                let result = (|| {
+                    for copy in &copies {
+                        fs::copy(&media, copy).map_err(|error| error.to_string())?;
+                    }
+                    let mut app = App::new_with_catalog_and_monitor_cache_bytes(
+                        false,
+                        None,
+                        CACHE_CAP_BYTES,
+                    );
+                    app.editor.add_media_paths(copies.iter().cloned());
+                    let mut video_tracks = app
+                        .editor
+                        .timeline
+                        .tracks
+                        .iter()
+                        .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+                        .map(|track| track.id)
+                        .collect::<Vec<_>>();
+                    while video_tracks.len() < SOURCE_COUNT {
+                        video_tracks.push(
+                            app.editor
+                                .timeline
+                                .add_track(nle_timeline::TrackKind::Video),
+                        );
+                    }
+                    for (track, media_id) in video_tracks
+                        .into_iter()
+                        .take(SOURCE_COUNT)
+                        .zip(1..=SOURCE_COUNT as u32)
+                    {
+                        app.editor
+                            .timeline
+                            .insert_clip(
+                                track,
+                                nle_timeline::MediaId(media_id),
+                                nle_timeline::Tick(0),
+                                nle_timeline::Tick(2_000_000),
+                                nle_timeline::Tick(0),
+                            )
+                            .map_err(|error| error.to_string())?;
+                    }
+                    app.editor.set_preview_quality(PreviewQuality::Full);
+                    app.editor.set_paused_preview_quality(PreviewQuality::Full);
+                    let mut preview = preview_request(&app.editor);
+                    if preview.sources[..SOURCE_COUNT].iter().any(Option::is_none) {
+                        return Err("four-source cache-pressure preview did not expose four visible layers".to_owned());
+                    }
+                    preview.output_size = [FRAME_WIDTH, FRAME_HEIGHT];
+                    preview.is_scrubbing = true;
+                    app.submit_monitor_decode_request(preview);
+
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline
+                        && (0..SOURCE_COUNT)
+                            .any(|layer| app.editor.monitor_frame_for_layer(layer).is_none())
+                    {
+                        app.poll_monitor_decoder();
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    let frames = (0..SOURCE_COUNT)
+                        .map(|layer| {
+                            app.editor
+                                .monitor_frame_for_layer(layer)
+                                .ok_or_else(|| format!("cache-pressure layer {layer} did not decode before deadline"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (index, frame) in frames.iter().enumerate() {
+                        if frame.media_id != Some(index as u32 + 1)
+                            || (frame.width, frame.height) != (FRAME_WIDTH, FRAME_HEIGHT)
+                        {
+                            return Err(format!(
+                                "cache-pressure layer {index} decoded media {:?} at {}x{}, expected media {} at {}x{}",
+                                frame.media_id,
+                                frame.width,
+                                frame.height,
+                                index + 1,
+                                FRAME_WIDTH,
+                                FRAME_HEIGHT
+                            ));
+                        }
+                    }
+
+                    let cache = app.monitor_frame_cache_pool.diagnostics();
+                    let sessions = app.monitor_session_pool.diagnostics();
+                    let sources = app.monitor_source_coordinator.diagnostics();
+                    if cache.capacity_bytes != CACHE_CAP_BYTES
+                        || cache.current_bytes > CACHE_CAP_BYTES
+                        || cache.peak_bytes > CACHE_CAP_BYTES
+                        || cache.eviction_count < 1
+                    {
+                        return Err(format!("cache-pressure decoded-frame cache diagnostics were {cache:?}, expected exact capacity {CACHE_CAP_BYTES} with at least one eviction"));
+                    }
+                    if sessions.active_sticky_sessions != SOURCE_COUNT
+                        || sessions.active_foreground_sessions != SOURCE_COUNT
+                        || sessions.active_background_sessions != 0
+                        || sessions.peak_sticky_sessions < SOURCE_COUNT
+                        || sessions.active_sticky_sessions > sessions.session_cap
+                        || sessions.peak_sticky_sessions > sessions.session_cap
+                        || sources.live_source_groups != SOURCE_COUNT
+                        || sources.live_lane_actors != SOURCE_COUNT
+                        || sources.retiring_lane_actors != 0
+                    {
+                        return Err(format!("cache-pressure source/session/actor ownership was not exactly four bounded foreground sources: sessions={sessions:?} sources={sources:?}"));
+                    }
+
+                    let mut release_preview = preview_request(&app.editor);
+                    release_preview.sources = [None; MONITOR_LAYER_COUNT];
+                    app.submit_monitor_decode_request(release_preview);
+                    let release_deadline = Instant::now() + Duration::from_secs(5);
+                    let (post_release_sessions, post_release_groups, post_release_actors) = loop {
+                        app.poll_monitor_decoder();
+                        let post_sessions = app.monitor_session_pool.diagnostics();
+                        let post_sources = app.monitor_source_coordinator.diagnostics();
+                        if post_sessions.active_sticky_sessions == 0
+                            && post_sources.live_source_groups == 0
+                            && post_sources.live_lane_actors + post_sources.retiring_lane_actors == 0
+                        {
+                            break (
+                                post_sessions.active_sticky_sessions,
+                                post_sources.live_source_groups,
+                                post_sources.live_lane_actors + post_sources.retiring_lane_actors,
+                            );
+                        }
+                        if Instant::now() >= release_deadline {
+                            return Err(format!("cache-pressure sources did not release before deadline: sessions={post_sessions:?} sources={post_sources:?}"));
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    };
+                    let backend = app.observed_decoder_backends.first().cloned();
+                    Ok((
+                        backend,
+                        format!(
+                            "source_count={SOURCE_COUNT} frame_bytes={FRAME_BYTES} cap_bytes={CACHE_CAP_BYTES} current_bytes={} peak_bytes={} eviction_count={} peak_sessions={} session_cap={} source_groups={} source_group_cap={} lane_actors={} lane_actor_cap={} post_release_sessions={post_release_sessions} post_release_groups={post_release_groups} post_release_actors={post_release_actors}",
+                            cache.current_bytes,
+                            cache.peak_bytes,
+                            cache.eviction_count,
+                            sessions.peak_sticky_sessions,
+                            sessions.session_cap,
+                            sources.live_source_groups,
+                            sources.source_group_cap,
+                            sources.live_lane_actors,
+                            sources.lane_actor_cap,
+                        ),
+                    ))
+                })();
+                for copy in &copies {
+                    let _ = fs::remove_file(copy);
+                }
+                result
+            },
+        ));
         scenarios.push(phase0_run_scenario("ffmpeg_export_cancellation", 1, || {
             for artifact in phase0_export_artifacts(&output) {
                 let _ = fs::remove_file(artifact);
@@ -11911,8 +12112,9 @@ mod tests {
 
         let passed = scenarios.iter().all(|scenario| scenario.passed);
         let report = Phase0Report {
-            schema_version: 1,
+            schema_version: 2,
             status: if passed { "passed" } else { "failed" },
+            scenario_count: scenarios.len(),
             scenarios,
         };
         phase0_write_report(&report_path, &report)

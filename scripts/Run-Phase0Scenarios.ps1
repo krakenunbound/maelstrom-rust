@@ -72,7 +72,7 @@ try {
 
     if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) { throw 'Phase 0 scenario matrix did not write its report.' }
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw | ConvertFrom-Json
-    if ($report.schema_version -ne 1 -or $report.status -ne 'passed' -or @($report.scenarios).Count -ne 5) {
+    if ($report.schema_version -ne 2 -or $report.status -ne 'passed' -or [int]$report.scenario_count -ne 6 -or @($report.scenarios).Count -ne 6) {
         throw 'Phase 0 scenario report has an unexpected schema, status, or scenario count.'
     }
     foreach ($scenario in @($report.scenarios)) {
@@ -94,6 +94,23 @@ try {
     $peakLiveBytes = [int64]$Matches[4]
     if ($cumulativeBytes -ne 367001600 -or $retainedBytes -ne 220200960 -or $capBytes -ne 268435456 -or $peakLiveBytes -ne 293601280 -or $retainedBytes -gt $capBytes -or $peakLiveBytes -le $capBytes) {
         throw "Phase 0 memory-pressure evidence is not the required bounded 70 MiB strip checkpoint: $evidence"
+    }
+    $decodedPressure = @($report.scenarios | Where-Object { $_.name -eq 'four_source_decoded_frame_cache_pressure' })
+    if ($decodedPressure.Count -ne 1 -or [int]$decodedPressure[0].iterations -ne 4) {
+        throw 'Phase 0 decoded-frame cache-pressure scenario is missing or has an unexpected iteration count.'
+    }
+    $decodedEvidence = [string]$decodedPressure[0].evidence
+    $decodedPattern = '(?=.*\bsource_count=(?<source_count>\d+)\b)(?=.*\bframe_bytes=(?<frame_bytes>\d+)\b)(?=.*\bcap_bytes=(?<cap_bytes>\d+)\b)(?=.*\bcurrent_bytes=(?<current_bytes>\d+)\b)(?=.*\bpeak_bytes=(?<peak_bytes>\d+)\b)(?=.*\beviction_count=(?<eviction_count>\d+)\b)(?=.*\bpeak_sessions=(?<peak_sessions>\d+)\b)(?=.*\bsession_cap=(?<session_cap>\d+)\b)(?=.*\bsource_groups=(?<source_groups>\d+)\b)(?=.*\bsource_group_cap=(?<source_group_cap>\d+)\b)(?=.*\blane_actors=(?<lane_actors>\d+)\b)(?=.*\blane_actor_cap=(?<lane_actor_cap>\d+)\b)(?=.*\bpost_release_sessions=(?<post_release_sessions>\d+)\b)(?=.*\bpost_release_groups=(?<post_release_groups>\d+)\b)(?=.*\bpost_release_actors=(?<post_release_actors>\d+)\b)'
+    $decodedMatch = [regex]::Match($decodedEvidence, $decodedPattern)
+    if (-not $decodedMatch.Success) {
+        throw "Phase 0 decoded-frame cache-pressure evidence is missing required fields: $decodedEvidence"
+    }
+    $decodedValues = @{}
+    foreach ($field in @('source_count','frame_bytes','cap_bytes','current_bytes','peak_bytes','eviction_count','peak_sessions','session_cap','source_groups','source_group_cap','lane_actors','lane_actor_cap','post_release_sessions','post_release_groups','post_release_actors')) {
+        $decodedValues[$field] = [int64]$decodedMatch.Groups[$field].Value
+    }
+    if ($decodedValues.source_count -ne 4 -or $decodedValues.frame_bytes -ne 57600 -or $decodedValues.cap_bytes -ne 172800 -or $decodedValues.current_bytes -gt $decodedValues.cap_bytes -or $decodedValues.peak_bytes -gt $decodedValues.cap_bytes -or $decodedValues.eviction_count -lt 1 -or $decodedValues.peak_sessions -lt $decodedValues.source_count -or $decodedValues.peak_sessions -gt $decodedValues.session_cap -or $decodedValues.source_groups -ne $decodedValues.source_count -or $decodedValues.source_groups -gt $decodedValues.source_group_cap -or $decodedValues.lane_actors -ne $decodedValues.source_count -or $decodedValues.lane_actors -gt $decodedValues.lane_actor_cap -or $decodedValues.post_release_sessions -ne 0 -or $decodedValues.post_release_groups -ne 0 -or $decodedValues.post_release_actors -ne 0) {
+        throw "Phase 0 decoded-frame cache-pressure evidence is outside required bounds: $decodedEvidence"
     }
     Write-Host "Phase 0 scenarios: PASS ($resolvedReportPath)"
 }

@@ -91,12 +91,15 @@ Build the evidence harness before adding engine complexity.
       A finite prerequisite matrix covers the listed behavioral scenarios and includes a bounded
       350 MiB cumulative /
       280 MiB live runtime strip-cache checkpoint with per-insertion cap and exact oldest-eviction
-      assertions; broader sustained pressure remains open. The exact packaged executable passed
+      assertions, plus a four-source decoded-frame cache-pressure scenario using distinct fixture
+      paths that forces real LRU eviction at a three-frame 160x90 RGBA cap and proves release and
+      source/session/actor bounds; broader sustained pressure remains open. The exact packaged executable passed
       the 600-second Full/Full real A/V loop soak on 2026-08-28 with 10 loops, zero monitor errors,
       zero fallback uploads, zero audio underruns/lock failures/late discards, and 237,711,360 bytes
       peak GUI working-set growth. Its schema-2 resource evidence reported 268,015,616 peak decoded
       frame-cache bytes below the 1 GiB cap and one peak sticky session below the 16-session app
-      cap. This combined item remains open for broader multi-source memory-pressure coverage. See
+      cap. This combined item remains open for broader multi-source memory-pressure coverage,
+      including idle/session LRU and cross-hardware proof. See
       `docs/phase0-scenarios.md` and `docs/performance-reports.md`.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.

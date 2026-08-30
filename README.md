@@ -55,10 +55,11 @@ The renderer gate executes native shaders on a real adapter, while Windows packa
 measurement does not claim compositor scanout or GPU-completion timing.
 
 The opt-in finite Phase 0 scenario matrix exercises reverse scrubbing, rapid editor-state
-switching, real offline-media detection/recovery, bounded preview-cache eviction, and cancellation
-after an absolute-path FFmpeg encoder has started. It writes local-only JSON evidence without
-launching the GUI; see [`docs/phase0-scenarios.md`](./docs/phase0-scenarios.md). This matrix does not
-replace the roadmap's longer playback soak or memory-pressure gate.
+switching, real offline-media detection/recovery, bounded video-strip eviction, forced shared
+decoded-frame eviction across four sources, and cancellation after an absolute-path FFmpeg encoder
+has started. It writes local-only JSON evidence without launching the GUI; see
+[`docs/phase0-scenarios.md`](./docs/phase0-scenarios.md). This matrix does not replace the roadmap's
+longer playback soak or sustained cross-hardware memory-pressure gate.
 
 The editor has capped inverse-operation undo/redo (`Ctrl+Z`, `Ctrl+Y`, and
 `Ctrl+Shift+Z`), a fuzzy command palette (`Ctrl+P`), pointer/razor/slip/range tools,

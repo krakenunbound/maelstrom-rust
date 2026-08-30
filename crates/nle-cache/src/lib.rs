@@ -51,6 +51,7 @@ struct Entry {
 pub struct FrameCache {
     capacity_bytes: usize,
     used_bytes: usize,
+    eviction_count: u64,
     next_access: u64,
     entries: HashMap<FrameKey, Entry>,
 }
@@ -60,6 +61,7 @@ impl FrameCache {
         Self {
             capacity_bytes,
             used_bytes: 0,
+            eviction_count: 0,
             next_access: 0,
             entries: HashMap::new(),
         }
@@ -71,6 +73,11 @@ impl FrameCache {
 
     pub fn used_bytes(&self) -> usize {
         self.used_bytes
+    }
+
+    /// Returns the total number of entries evicted to enforce the byte budget.
+    pub fn eviction_count(&self) -> u64 {
+        self.eviction_count
     }
 
     pub fn len(&self) -> usize {
@@ -167,6 +174,7 @@ impl FrameCache {
                 .remove(&oldest_key)
                 .expect("oldest key was selected from cache");
             self.used_bytes -= evicted.value.byte_len();
+            self.eviction_count = self.eviction_count.saturating_add(1);
         }
     }
 }
@@ -317,5 +325,23 @@ mod tests {
         assert!(cache.is_empty());
         assert_eq!(cache.used_bytes(), 0);
         assert!(cache.remove(&key(1)).is_none());
+    }
+
+    #[test]
+    fn eviction_count_tracks_only_budget_evictions_and_survives_clear() {
+        let mut cache = FrameCache::new(20);
+        assert!(cache.insert(key(1), value(1, 10)));
+        assert!(cache.insert(key(2), value(2, 10)));
+        assert_eq!(cache.eviction_count(), 0);
+
+        assert!(cache.insert(key(3), value(3, 10)));
+        assert_eq!(cache.eviction_count(), 1);
+
+        assert!(cache.insert(key(3), value(3, 8)));
+        assert_eq!(cache.eviction_count(), 1);
+        assert!(cache.remove(&key(2)).is_some());
+        assert_eq!(cache.eviction_count(), 1);
+        cache.clear();
+        assert_eq!(cache.eviction_count(), 1);
     }
 }
