@@ -269,6 +269,15 @@ it does not log or allocate per frame. The native audio callback only increments
 lock misses and underrun device frames, while late decoded-frame discards are counted on the worker.
 These counters are runtime-only and never enter project persistence.
 
+The same hover contains a compact bilingual live-pipeline table. It reuses the bounded decoder,
+viewer, compositor, GPU-completion, native-audio, and surface-present timing accumulators already
+owned by their responsible layers; it adds no per-frame logging. Decoder and audio stages show
+mean/maximum CPU time, bounded viewer/GPU windows show p95/maximum, and every observed row shows its
+sample count. Active contributing video layers and selected-to-resolved preview quality provide the
+measurement context. Unsupported GPU timestamps and stages without samples remain `unavailable`,
+not zero. Reading compositor callback timing uses `try_lock`; a busy render callback therefore
+skips that HUD sample instead of blocking the UI thread.
+
 The existing 120-frame surface-submission report is schema-versioned and carries the measurement
 environment with its timing window: actual renderer adapter/driver data, every decoder backend that
 produced a monitor frame, the most recently started encoder in the export fallback chain, CPU/RAM,

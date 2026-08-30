@@ -29,9 +29,10 @@ use nle_render::{
 use nle_ui_core::{
     ActivePreviewDecoderBackend, ActivePreviewDiagnostic, ActivePreviewFallbackReason,
     ActivePreviewSourceKind, EditorAction, EditorProjectSnapshot, EditorState, HubAction,
-    HubBackdrops, Language, MediaKind, MonitorFrame, PreviewQuality, ProjectFrameRate,
-    ProjectHubState, ProxyMediaStatus, RuntimeDiagnostics, TimelineCanvas, ViewerCanvas,
-    classify_path, configure_fonts, show_editor_with_canvases, show_with_backdrops,
+    HubBackdrops, Language, LivePipelineTiming, LivePipelineTimingRepresentative,
+    LivePipelineTimingSample, LivePipelineTimingStage, MediaKind, MonitorFrame, PreviewQuality,
+    ProjectFrameRate, ProjectHubState, ProxyMediaStatus, RuntimeDiagnostics, TimelineCanvas,
+    ViewerCanvas, classify_path, configure_fonts, show_editor_with_canvases, show_with_backdrops,
 };
 use winit::{
     application::ApplicationHandler,
@@ -2127,6 +2128,7 @@ impl MonitorRuntimeMetrics {
             audio_underrun_frames,
             audio_callback_lock_failures,
             audio_late_discarded_frames,
+            live_pipeline_timing: LivePipelineTiming::default(),
         }
     }
 }
@@ -2287,6 +2289,42 @@ impl ViewerStageTimingWindow {
                 .unwrap_or_default(),
         }
     }
+}
+
+fn live_mean_stage_sample(timing: DecoderStageTimingReport) -> Option<LivePipelineTimingSample> {
+    (timing.samples > 0).then_some(LivePipelineTimingSample {
+        representative: LivePipelineTimingRepresentative::Mean,
+        representative_ms: timing.mean_ms as f32,
+        max_ms: timing.max_ms as f32,
+        samples: timing.samples,
+    })
+}
+
+fn live_p95_stage_sample(
+    samples: usize,
+    p95_ms: f32,
+    max_ms: f32,
+) -> Option<LivePipelineTimingSample> {
+    (samples > 0).then_some(LivePipelineTimingSample {
+        representative: LivePipelineTimingRepresentative::P95,
+        representative_ms: p95_ms,
+        max_ms,
+        samples: u64::try_from(samples).unwrap_or(u64::MAX),
+    })
+}
+
+fn live_audio_mean_stage_sample(
+    timing: nle_audio::AudioCallbackCpuTiming,
+) -> Option<LivePipelineTimingSample> {
+    if timing.samples == 0 {
+        return None;
+    }
+    Some(LivePipelineTimingSample {
+        representative: LivePipelineTimingRepresentative::Mean,
+        representative_ms: (timing.total_nanos as f64 / timing.samples as f64 / 1_000_000.0) as f32,
+        max_ms: timing.max_nanos as f32 / 1_000_000.0,
+        samples: timing.samples,
+    })
 }
 
 impl ViewerStageTimingsReport {
@@ -3290,6 +3328,7 @@ struct App {
     timeline_texture_scratch: Vec<TexturedRect>,
     frame_metrics: FrameMetrics,
     viewer_upload_timings: ViewerStageTimingWindow,
+    surface_present_timings: ViewerStageTimingWindow,
     monitor_runtime_metrics: MonitorRuntimeMetrics,
     startup_presentation_probe: Option<StartupPresentationProbe>,
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
@@ -3655,6 +3694,7 @@ impl App {
             timeline_texture_scratch: Vec::with_capacity(16 * 1024),
             frame_metrics: FrameMetrics::default(),
             viewer_upload_timings: ViewerStageTimingWindow::default(),
+            surface_present_timings: ViewerStageTimingWindow::default(),
             monitor_runtime_metrics: MonitorRuntimeMetrics::default(),
             startup_presentation_probe: StartupPresentationProbe::from_environment(started_at),
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
@@ -3972,11 +4012,94 @@ impl App {
         &self,
         audio: nle_audio::AudioRuntimeDiagnostics,
     ) -> RuntimeDiagnostics {
-        self.monitor_runtime_metrics.diagnostics(
+        let mut diagnostics = self.monitor_runtime_metrics.diagnostics(
             audio.underrun_device_frames,
             audio.callback_lock_failures,
             audio.late_decoded_frames_discarded,
-        )
+        );
+        diagnostics.live_pipeline_timing = self.live_pipeline_timing(audio);
+        diagnostics
+    }
+
+    fn live_pipeline_timing(
+        &self,
+        audio: nle_audio::AudioRuntimeDiagnostics,
+    ) -> LivePipelineTiming {
+        let decoder = aggregate_monitor_decoder_stage_timings(&self.monitor_decoders);
+        let mut timing = LivePipelineTiming {
+            active_video_layers: self.editor.playback_targets().count(),
+            selected_preview_quality: self.editor.preview_quality(),
+            resolved_preview_quality: self.editor.resolved_preview_quality(),
+            ..Default::default()
+        };
+        for (stage, sample) in [
+            (
+                LivePipelineTimingStage::Demux,
+                live_mean_stage_sample(decoder.demux_packet),
+            ),
+            (
+                LivePipelineTimingStage::Decode,
+                live_mean_stage_sample(decoder.decoder_calls),
+            ),
+            (
+                LivePipelineTimingStage::HardwareTransfer,
+                live_mean_stage_sample(decoder.hardware_transfer),
+            ),
+            (
+                LivePipelineTimingStage::Scale,
+                live_mean_stage_sample(decoder.scaler),
+            ),
+            (
+                LivePipelineTimingStage::RgbaPacking,
+                live_mean_stage_sample(decoder.rgba_copy_letterbox),
+            ),
+        ] {
+            timing.set_sample(stage, sample);
+        }
+
+        let upload = self.viewer_upload_timings.snapshot();
+        timing.set_sample(
+            LivePipelineTimingStage::ViewerUpload,
+            live_p95_stage_sample(upload.samples, upload.p95_ms, upload.max_ms),
+        );
+        if let Some(renderer) = &self.hub_renderer {
+            let compositor_cpu = renderer.try_viewer_compositor_encode_timing();
+            timing.set_sample(
+                LivePipelineTimingStage::CompositorCpuEncode,
+                compositor_cpu.and_then(|sample| {
+                    live_p95_stage_sample(sample.samples, sample.p95_ms, sample.max_ms)
+                }),
+            );
+            let compositor_gpu = renderer.viewer_compositor_gpu_timing();
+            timing.set_sample(
+                LivePipelineTimingStage::CompositorGpu,
+                compositor_gpu
+                    .supported
+                    .then(|| {
+                        live_p95_stage_sample(
+                            compositor_gpu.samples,
+                            compositor_gpu.p95_ms,
+                            compositor_gpu.max_ms,
+                        )
+                    })
+                    .flatten(),
+            );
+            let submission = renderer.gpu_submission_completion_timing();
+            timing.set_sample(
+                LivePipelineTimingStage::GpuSubmitToCompletion,
+                live_p95_stage_sample(submission.samples, submission.p95_ms, submission.max_ms),
+            );
+        }
+        timing.set_sample(
+            LivePipelineTimingStage::AudioMix,
+            live_audio_mean_stage_sample(audio.mix_render_cpu_timing),
+        );
+        let present = self.surface_present_timings.snapshot();
+        timing.set_sample(
+            LivePipelineTimingStage::SurfacePresentCall,
+            live_p95_stage_sample(present.samples, present.p95_ms, present.max_ms),
+        );
+        timing
     }
 
     /// Advances the opt-in, wall-clock soak only from the UI-owned transport path. The native
@@ -4227,6 +4350,7 @@ impl App {
         let present_call_started = Instant::now();
         frame.present();
         let present_call_duration = present_call_started.elapsed();
+        self.surface_present_timings.record(present_call_duration);
         let presented_at = Instant::now();
         if let Some(probe) = &mut self.startup_presentation_probe {
             probe.record_first_present(presented_at);
@@ -8251,6 +8375,7 @@ mod tests {
                 audio_underrun_frames: 480,
                 audio_callback_lock_failures: 2,
                 audio_late_discarded_frames: 24,
+                live_pipeline_timing: LivePipelineTiming::default(),
             }
         );
         assert_eq!(metrics.turnaround_count, 3);
@@ -9017,6 +9142,137 @@ mod tests {
         assert_eq!(timing.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(timing.p95_ms, 115.0);
         assert_eq!(timing.max_ms, 121.0);
+    }
+
+    #[test]
+    fn live_pipeline_stage_samples_keep_mean_and_p95_semantics_distinct() {
+        let decoder = live_mean_stage_sample(
+            nle_decode::MonitorStageTiming {
+                samples: 2,
+                total_nanos: 5_000_000,
+                max_nanos: 3_000_000,
+            }
+            .into(),
+        )
+        .expect("decoder stage sample");
+        assert_eq!(
+            decoder.representative,
+            LivePipelineTimingRepresentative::Mean
+        );
+        assert_eq!(decoder.representative_ms, 2.5);
+        assert_eq!(decoder.max_ms, 3.0);
+        assert_eq!(decoder.samples, 2);
+
+        let viewer = live_p95_stage_sample(24, 1.25, 2.5).expect("viewer stage sample");
+        assert_eq!(viewer.representative, LivePipelineTimingRepresentative::P95);
+        assert_eq!(viewer.representative_ms, 1.25);
+        assert_eq!(viewer.max_ms, 2.5);
+        assert_eq!(viewer.samples, 24);
+
+        let audio = live_audio_mean_stage_sample(nle_audio::AudioCallbackCpuTiming {
+            samples: 4,
+            total_nanos: 2_000_000,
+            max_nanos: 750_000,
+        })
+        .expect("audio stage sample");
+        assert_eq!(audio.representative, LivePipelineTimingRepresentative::Mean);
+        assert_eq!(audio.representative_ms, 0.5);
+        assert_eq!(audio.max_ms, 0.75);
+        assert_eq!(audio.samples, 4);
+
+        assert!(live_p95_stage_sample(0, 0.0, 0.0).is_none());
+        assert!(
+            live_audio_mean_stage_sample(nle_audio::AudioCallbackCpuTiming::default()).is_none()
+        );
+    }
+
+    #[test]
+    fn app_live_pipeline_snapshot_reports_context_without_renderer_or_audio_device() {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        assert!(app.editor.set_preview_quality(PreviewQuality::Auto));
+        assert!(app.editor.set_auto_preview_quality(PreviewQuality::Half));
+        app.surface_present_timings
+            .record(Duration::from_micros(750));
+        let timing = app.live_pipeline_timing(nle_audio::AudioRuntimeDiagnostics {
+            mix_render_cpu_timing: nle_audio::AudioCallbackCpuTiming {
+                samples: 2,
+                total_nanos: 1_000_000,
+                max_nanos: 750_000,
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(timing.active_video_layers, 0);
+        assert_eq!(timing.selected_preview_quality, PreviewQuality::Auto);
+        assert_eq!(timing.resolved_preview_quality, PreviewQuality::Half);
+        assert_eq!(
+            timing
+                .sample(LivePipelineTimingStage::AudioMix)
+                .expect("audio mix stage")
+                .representative,
+            LivePipelineTimingRepresentative::Mean
+        );
+        assert_eq!(
+            timing
+                .sample(LivePipelineTimingStage::SurfacePresentCall)
+                .expect("surface present stage")
+                .representative,
+            LivePipelineTimingRepresentative::P95
+        );
+        assert!(
+            timing
+                .sample(LivePipelineTimingStage::CompositorCpuEncode)
+                .is_none()
+        );
+        assert!(
+            timing
+                .sample(LivePipelineTimingStage::CompositorGpu)
+                .is_none()
+        );
+
+        app.editor.add_media_paths([
+            PathBuf::from("hud-layer-1.mp4"),
+            PathBuf::from("hud-layer-2.mp4"),
+            PathBuf::from("hud-layer-3.mp4"),
+            PathBuf::from("hud-layer-4.mp4"),
+        ]);
+        let mut video_tracks = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        while video_tracks.len() < MONITOR_LAYER_COUNT {
+            video_tracks.push(
+                app.editor
+                    .timeline
+                    .add_track(nle_timeline::TrackKind::Video),
+            );
+        }
+        for (index, track_id) in video_tracks
+            .into_iter()
+            .take(MONITOR_LAYER_COUNT)
+            .enumerate()
+        {
+            app.editor
+                .timeline
+                .insert_clip(
+                    track_id,
+                    nle_timeline::MediaId(u32::try_from(index + 1).expect("media ID")),
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(1_000_000),
+                    nle_timeline::Tick(0),
+                )
+                .expect("insert HUD layer");
+        }
+        app.editor.set_playhead(nle_timeline::Tick(500_000));
+        assert_eq!(
+            app.live_pipeline_timing(nle_audio::AudioRuntimeDiagnostics::default())
+                .active_video_layers,
+            MONITOR_LAYER_COUNT
+        );
     }
 
     #[test]

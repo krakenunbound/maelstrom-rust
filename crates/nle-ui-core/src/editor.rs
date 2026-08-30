@@ -1200,8 +1200,103 @@ struct PerformanceHudMetrics {
     native_textures: usize,
 }
 
-/// Session-only diagnostics supplied by the application. These counters are never persisted and
-/// are displayed in the performance HUD's hover panel instead of widening the window border.
+/// The fixed number of live pipeline stages reported by [`LivePipelineTiming`].
+pub const LIVE_PIPELINE_TIMING_STAGE_COUNT: usize = 11;
+
+/// A stage in the live preview and compositor pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LivePipelineTimingStage {
+    Demux,
+    Decode,
+    HardwareTransfer,
+    Scale,
+    RgbaPacking,
+    ViewerUpload,
+    CompositorCpuEncode,
+    CompositorGpu,
+    GpuSubmitToCompletion,
+    AudioMix,
+    SurfacePresentCall,
+}
+
+impl LivePipelineTimingStage {
+    pub const ALL: [Self; LIVE_PIPELINE_TIMING_STAGE_COUNT] = [
+        Self::Demux,
+        Self::Decode,
+        Self::HardwareTransfer,
+        Self::Scale,
+        Self::RgbaPacking,
+        Self::ViewerUpload,
+        Self::CompositorCpuEncode,
+        Self::CompositorGpu,
+        Self::GpuSubmitToCompletion,
+        Self::AudioMix,
+        Self::SurfacePresentCall,
+    ];
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Demux => 0,
+            Self::Decode => 1,
+            Self::HardwareTransfer => 2,
+            Self::Scale => 3,
+            Self::RgbaPacking => 4,
+            Self::ViewerUpload => 5,
+            Self::CompositorCpuEncode => 6,
+            Self::CompositorGpu => 7,
+            Self::GpuSubmitToCompletion => 8,
+            Self::AudioMix => 9,
+            Self::SurfacePresentCall => 10,
+        }
+    }
+}
+
+/// The representative statistic collected for every populated pipeline stage.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LivePipelineTimingRepresentative {
+    #[default]
+    Mean,
+    P95,
+}
+
+/// Timing values for one pipeline stage, measured in milliseconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LivePipelineTimingSample {
+    pub representative: LivePipelineTimingRepresentative,
+    pub representative_ms: f32,
+    pub max_ms: f32,
+    pub samples: u64,
+}
+
+/// Session-only live-pipeline timing supplied by the application.
+///
+/// A `None` stage is intentionally distinct from zero milliseconds: it means that timing is not
+/// available for that stage (for example, GPU completion timing is not instrumented).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LivePipelineTiming {
+    pub stages: [Option<LivePipelineTimingSample>; LIVE_PIPELINE_TIMING_STAGE_COUNT],
+    pub active_video_layers: usize,
+    pub selected_preview_quality: PreviewQuality,
+    pub resolved_preview_quality: PreviewQuality,
+}
+
+impl LivePipelineTiming {
+    pub fn sample(&self, stage: LivePipelineTimingStage) -> Option<LivePipelineTimingSample> {
+        self.stages[stage.index()]
+    }
+
+    pub fn set_sample(
+        &mut self,
+        stage: LivePipelineTimingStage,
+        sample: Option<LivePipelineTimingSample>,
+    ) {
+        self.stages[stage.index()] = sample.filter(|sample| sample.samples > 0);
+    }
+}
+
+/// Session-only diagnostics supplied by the application. These counters and timing values are
+/// never persisted and are displayed in the performance HUD's hover panel instead of widening
+/// the window border.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RuntimeDiagnostics {
     pub monitor_requests: u64,
@@ -1217,6 +1312,7 @@ pub struct RuntimeDiagnostics {
     pub audio_underrun_frames: u64,
     pub audio_callback_lock_failures: u64,
     pub audio_late_discarded_frames: u64,
+    pub live_pipeline_timing: LivePipelineTiming,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5308,7 +5404,7 @@ fn top_bar(ui: &mut Ui, state: &mut EditorState) {
 
 fn runtime_diagnostics_hover_ui(ui: &mut Ui, state: &EditorState) {
     let diagnostics = state.runtime_diagnostics;
-    ui.set_min_width(290.0);
+    ui.set_min_width(330.0);
     ui.strong(menu_text(
         state.language,
         "Session diagnostics",
@@ -5409,6 +5505,144 @@ fn runtime_diagnostics_hover_ui(ui: &mut Ui, state: &EditorState) {
                 ui.end_row();
             }
         });
+    ui.add_space(7.0);
+    ui.separator();
+    ui.add_space(3.0);
+    live_pipeline_timing_hover_ui(ui, state.language, diagnostics.live_pipeline_timing);
+}
+
+fn live_pipeline_timing_hover_ui(ui: &mut Ui, language: Language, timing: LivePipelineTiming) {
+    ui.strong(menu_text(
+        language,
+        "Live pipeline timing",
+        "ライブパイプライン時間",
+    ));
+    ui.label(
+        RichText::new(match language {
+            Language::English => "Mean/p95 / max, milliseconds".to_owned(),
+            Language::Japanese => "平均/p95 / 最大値、ミリ秒".to_owned(),
+        })
+        .small()
+        .color(Color32::from_rgb(146, 163, 176)),
+    );
+    ui.add_space(3.0);
+    egui::Grid::new("live-pipeline-timing-grid")
+        .num_columns(2)
+        .spacing([18.0, 3.0])
+        .striped(true)
+        .show(ui, |ui| {
+            for stage in LivePipelineTimingStage::ALL {
+                ui.label(RichText::new(live_pipeline_timing_stage_label(language, stage)).small());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format_live_pipeline_timing_sample(
+                            language,
+                            timing.sample(stage),
+                        ))
+                        .monospace()
+                        .small(),
+                    );
+                });
+                ui.end_row();
+            }
+        });
+    ui.add_space(3.0);
+    ui.label(
+        RichText::new(match language {
+            Language::English => format!(
+                "{} active video layer(s)  ·  Preview: {}",
+                timing.active_video_layers,
+                preview_quality_display(
+                    language,
+                    timing.selected_preview_quality,
+                    timing.resolved_preview_quality,
+                )
+            ),
+            Language::Japanese => format!(
+                "アクティブなビデオレイヤー: {}  ·  プレビュー: {}",
+                timing.active_video_layers,
+                preview_quality_display(
+                    language,
+                    timing.selected_preview_quality,
+                    timing.resolved_preview_quality,
+                )
+            ),
+        })
+        .small()
+        .color(Color32::from_rgb(146, 163, 176)),
+    );
+}
+
+fn live_pipeline_timing_representative_label(
+    language: Language,
+    representative: LivePipelineTimingRepresentative,
+) -> &'static str {
+    match (language, representative) {
+        (Language::English, LivePipelineTimingRepresentative::Mean) => "Mean",
+        (Language::Japanese, LivePipelineTimingRepresentative::Mean) => "平均",
+        (_, LivePipelineTimingRepresentative::P95) => "p95",
+    }
+}
+
+fn live_pipeline_timing_stage_label(
+    language: Language,
+    stage: LivePipelineTimingStage,
+) -> &'static str {
+    match (language, stage) {
+        (Language::English, LivePipelineTimingStage::Demux) => "Demux",
+        (Language::Japanese, LivePipelineTimingStage::Demux) => "デマルチプレクス",
+        (Language::English, LivePipelineTimingStage::Decode) => "Decode",
+        (Language::Japanese, LivePipelineTimingStage::Decode) => "デコード",
+        (Language::English, LivePipelineTimingStage::HardwareTransfer) => "Hardware transfer",
+        (Language::Japanese, LivePipelineTimingStage::HardwareTransfer) => "ハードウェア転送",
+        (Language::English, LivePipelineTimingStage::Scale) => "Scale",
+        (Language::Japanese, LivePipelineTimingStage::Scale) => "スケール",
+        (Language::English, LivePipelineTimingStage::RgbaPacking) => "RGBA / packing",
+        (Language::Japanese, LivePipelineTimingStage::RgbaPacking) => "RGBA / パッキング",
+        (Language::English, LivePipelineTimingStage::ViewerUpload) => "Viewer upload",
+        (Language::Japanese, LivePipelineTimingStage::ViewerUpload) => "ビューアーアップロード",
+        (Language::English, LivePipelineTimingStage::CompositorCpuEncode) => {
+            "Compositor CPU encode"
+        }
+        (Language::Japanese, LivePipelineTimingStage::CompositorCpuEncode) => {
+            "コンポジター CPU エンコード"
+        }
+        (Language::English, LivePipelineTimingStage::CompositorGpu) => "Compositor GPU",
+        (Language::Japanese, LivePipelineTimingStage::CompositorGpu) => "コンポジター GPU",
+        (Language::English, LivePipelineTimingStage::GpuSubmitToCompletion) => {
+            "GPU submit → completion"
+        }
+        (Language::Japanese, LivePipelineTimingStage::GpuSubmitToCompletion) => "GPU 送信 → 完了",
+        (Language::English, LivePipelineTimingStage::AudioMix) => "Audio mix",
+        (Language::Japanese, LivePipelineTimingStage::AudioMix) => "オーディオミックス",
+        (Language::English, LivePipelineTimingStage::SurfacePresentCall) => "Surface present call",
+        (Language::Japanese, LivePipelineTimingStage::SurfacePresentCall) => {
+            "サーフェス表示呼び出し"
+        }
+    }
+}
+
+fn format_live_pipeline_timing_sample(
+    language: Language,
+    sample: Option<LivePipelineTimingSample>,
+) -> String {
+    let unavailable = || match language {
+        Language::English => "unavailable".to_owned(),
+        Language::Japanese => "利用不可".to_owned(),
+    };
+    let Some(sample) = sample else {
+        return unavailable();
+    };
+    if sample.samples == 0 || !sample.representative_ms.is_finite() || !sample.max_ms.is_finite() {
+        return unavailable();
+    }
+    format!(
+        "{} {:.2} / {:.2} ms · n={}",
+        live_pipeline_timing_representative_label(language, sample.representative),
+        sample.representative_ms,
+        sample.max_ms,
+        sample.samples,
+    )
 }
 
 fn file_menu(ui: &mut Ui, state: &mut EditorState) {
@@ -19089,17 +19323,89 @@ mod tests {
             monitor_requests: 12,
             monitor_dropped_frames: 3,
             audio_underrun_frames: 48,
+            live_pipeline_timing: LivePipelineTiming {
+                stages: {
+                    let mut stages = [None; LIVE_PIPELINE_TIMING_STAGE_COUNT];
+                    stages[LivePipelineTimingStage::GpuSubmitToCompletion.index()] =
+                        Some(LivePipelineTimingSample {
+                            representative: LivePipelineTimingRepresentative::P95,
+                            representative_ms: 3.5,
+                            max_ms: 5.0,
+                            samples: 12,
+                        });
+                    stages
+                },
+                active_video_layers: 2,
+                selected_preview_quality: PreviewQuality::Auto,
+                resolved_preview_quality: PreviewQuality::Half,
+            },
             ..RuntimeDiagnostics::default()
         };
         editor.set_runtime_diagnostics(diagnostics);
         assert_eq!(editor.runtime_diagnostics, diagnostics);
         assert_eq!(editor.durable_generation(), saved);
+        let snapshot_json = serde_json::to_string(&editor.snapshot()).unwrap();
+        assert!(!snapshot_json.contains("GpuSubmitToCompletion"));
+        assert!(!snapshot_json.contains("3.5"));
+        let restored = EditorState::restore(Language::English, "Durable", editor.snapshot())
+            .expect("runtime diagnostics do not affect restore");
+        assert_eq!(restored.runtime_diagnostics, RuntimeDiagnostics::default());
 
         editor.set_playhead(Tick(1_000_000));
         assert_ne!(editor.durable_generation(), saved);
         let after_playhead = editor.durable_generation();
         editor.set_zoom_handles(0.20, 0.80);
         assert_ne!(editor.durable_generation(), after_playhead);
+    }
+
+    #[test]
+    fn live_pipeline_timing_formats_bilingual_values_and_unavailable_gpu_honestly() {
+        let sample = LivePipelineTimingSample {
+            representative: LivePipelineTimingRepresentative::P95,
+            representative_ms: 1.25,
+            max_ms: 2.5,
+            samples: 24,
+        };
+        assert_eq!(
+            format_live_pipeline_timing_sample(Language::English, Some(sample)),
+            "p95 1.25 / 2.50 ms · n=24"
+        );
+        assert_eq!(
+            format_live_pipeline_timing_sample(Language::Japanese, None),
+            "利用不可"
+        );
+        assert_eq!(
+            live_pipeline_timing_representative_label(
+                Language::English,
+                LivePipelineTimingRepresentative::P95,
+            ),
+            "p95"
+        );
+        assert_eq!(
+            live_pipeline_timing_representative_label(
+                Language::Japanese,
+                LivePipelineTimingRepresentative::Mean,
+            ),
+            "平均"
+        );
+        assert_eq!(
+            live_pipeline_timing_stage_label(
+                Language::Japanese,
+                LivePipelineTimingStage::GpuSubmitToCompletion,
+            ),
+            "GPU 送信 → 完了"
+        );
+
+        let mut timing = LivePipelineTiming::default();
+        timing.set_sample(
+            LivePipelineTimingStage::GpuSubmitToCompletion,
+            Some(LivePipelineTimingSample::default()),
+        );
+        assert!(
+            timing
+                .sample(LivePipelineTimingStage::GpuSubmitToCompletion)
+                .is_none()
+        );
     }
 
     #[test]

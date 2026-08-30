@@ -174,6 +174,11 @@ impl HubRenderer {
         self.viewer_compositor.compositor_encode_timing()
     }
 
+    /// Snapshots compositor CPU timing without waiting for the render callback lock.
+    pub fn try_viewer_compositor_encode_timing(&self) -> Option<ViewerCompositorEncodeTiming> {
+        self.viewer_compositor.try_compositor_encode_timing()
+    }
+
     /// Snapshot isolated GPU execution time for the viewer compositor compose pass.
     ///
     /// This is only populated by [`Self::render_with_gpu_completion_measurement`]

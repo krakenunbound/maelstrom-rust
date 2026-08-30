@@ -60,6 +60,12 @@ GPU/RAM targets, stock LGPL shared FFmpeg, and a must-employ checklist. Its
 first performance gate is 50,000 timeline bars at 60 fps without FFmpeg linked;
 mouse movement must never perform decoding.
 
+Hover the compact title-bar performance readout for bilingual session counters and live pipeline
+timing. It shows demux/decode/transfer/scale/packing, viewer upload, compositor CPU and optional GPU,
+GPU completion, audio mix, and surface-present call measurements with truthful mean/p95 labels,
+maximums, and sample counts. Active video-layer count and selected/resolved preview quality are
+included; unavailable GPU instrumentation is never displayed as a zero measurement.
+
 The editor title bar reports retained CPU UI/submit time, rolling p95, constant-time
 clip count, visible time range, and native timeline primitive counts. A release-only
 50,000-clip CPU layout/culling harness is available with

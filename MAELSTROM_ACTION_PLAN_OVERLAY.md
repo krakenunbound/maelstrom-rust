@@ -172,7 +172,9 @@ Follow `ENGINE_ROADMAP.md`.
   offline media, cache pressure, twelve-source pressure/eager idle release, and export cancel. The
   provenance-qualified schema-2 wrapper over the schema-4 matrix passed 521 complete runs over
   600.673 seconds; broader cross-hardware soak evidence remains open.
-- Per-stage timers and drop/hold/late/underrun counters on the HUD
+- Per-stage timers and drop/hold/late/underrun counters are now available from the compact HUD
+  hover in English/Japanese, with truthful mean-versus-p95 labels, sample counts, active layers,
+  preview scale, and explicit unavailable GPU rows. Physical scanout is still not measured.
 
 Gate update: full schema-7 surface reports now pass on integrated Intel and discrete NVIDIA GPUs on
 the hybrid Windows host. Physical scanout and broader cross-hardware soak proof remain open.

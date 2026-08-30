@@ -78,6 +78,15 @@ both native audio timing boundaries have completed samples, and an encoder proce
 started. Its backend and timing fields are therefore
 evidence rather than hardware guesses. Project files never contain this session-only metadata.
 
+The editor's normal title-bar HUD hover reuses these same runtime-owned aggregates for a compact
+English/Japanese live view. Decoder and audio rows display mean/maximum values; bounded viewer and
+GPU rows display p95/maximum values; every observed row includes its sample count. The table also
+shows active contributing video layers and selected-to-resolved preview quality. A compositor CPU
+snapshot uses a non-blocking lock attempt, so diagnostics never wait for the render callback.
+Unsupported GPU timestamp queries, a busy callback snapshot, and stages with no samples display as
+unavailable rather than a fabricated zero. This live view does not change the schema-7 report or
+its qualification role.
+
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
 `"Unknown"` are not used as hidden unavailable-value sentinels.
 

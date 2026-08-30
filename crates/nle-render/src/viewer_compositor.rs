@@ -392,6 +392,18 @@ impl ViewerCompositorCallbackHandle {
             .compositor_encode_timing()
     }
 
+    /// Returns the latest bounded timing snapshot without ever waiting for the render callback.
+    ///
+    /// The live HUD uses this path so diagnostics cannot introduce a blocking renderer lock on
+    /// the UI thread. Qualification reports may still use [`Self::compositor_encode_timing`]
+    /// after the measured surface work has completed.
+    pub fn try_compositor_encode_timing(&self) -> Option<ViewerCompositorEncodeTiming> {
+        self.state
+            .try_lock()
+            .ok()
+            .map(|state| state.compositor_encode_timing())
+    }
+
     /// Adds the monitor callback at its current painter position.
     pub fn install(&self, painter: &egui::Painter, rect: egui::Rect) {
         painter.add(egui_wgpu::Callback::new_paint_callback(
@@ -2050,6 +2062,17 @@ mod tests {
                 max_ms: 121.0,
             }
         );
+    }
+
+    #[test]
+    fn live_compositor_timing_snapshot_never_waits_for_callback_lock() {
+        let handle = ViewerCompositorCallbackHandle::new();
+        assert_eq!(
+            handle.try_compositor_encode_timing(),
+            Some(ViewerCompositorEncodeTiming::default())
+        );
+        let _callback_guard = handle.state.lock().expect("callback state lock");
+        assert_eq!(handle.try_compositor_encode_timing(), None);
     }
 
     #[test]

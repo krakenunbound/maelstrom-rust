@@ -141,6 +141,14 @@ Build the evidence harness before adding engine complexity.
       ordinary window surface, deterministic A/V import, native viewer uploads, audio callbacks,
       GPU completion/timestamp evidence, and clean cancelled export. The retained schema-1 summary
       SHA-256 is `d1bd17bb3c482de9c7d26c8dc507ff5096961656d0998fa4d9697ccb6541e385`.
+      The ordinary bilingual performance-HUD hover now also exposes the existing bounded live
+      stages: demux, decode, hardware transfer, scale/RGBA packing, viewer upload, compositor CPU
+      encode, optional compositor GPU execution, GPU submit-to-completion, audio mix, and surface
+      present-call CPU time. Decoder/audio cumulative aggregates are labeled mean/max; bounded
+      viewer/GPU windows are labeled p95/max; every observed row includes its sample count, while
+      unsupported or unobserved stages remain explicitly unavailable. It also reports active video
+      layers and selected-to-resolved preview quality. The compositor callback snapshot uses a
+      non-blocking lock attempt, so HUD collection cannot wait on rendering.
       Physical scanout remains unobserved, so this item stays open.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
       A deterministic headless `App::apply_monitor_decode_event` contract now proves the production
@@ -354,7 +362,11 @@ Replace “topmost clip wins” with a generation-aware retained compositor.
 - [ ] Add nearest/bilinear/bicubic preview sampling options where supported.
 - [x] Double-buffer viewer outputs so graph execution never blocks timeline drawing.
 - [x] Reuse compiled pipelines and bind groups; no shader/pipeline compilation during playback.
-- [ ] Report composite time, active layer count, and selected preview scale.
+- [x] Report composite time, active layer count, and selected preview scale. The bilingual live
+      HUD reports separately named compositor CPU-encode and optional isolated GPU-pass p95/max
+      windows, exact sample counts, active contributing video-layer count, and selected-to-resolved
+      preview quality. Missing GPU timestamp support is shown as unavailable rather than zero, and
+      the render-callback timing snapshot never blocks the UI thread.
 
 Exit gate:
 
