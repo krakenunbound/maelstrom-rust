@@ -1295,8 +1295,9 @@ fn build_ffmpeg_job_with_title_assets(
                 args.extend([
                     "-ss".to_owned(),
                     tick_seconds(video.input_source_in),
-                    "-t".to_owned(),
-                    tick_seconds(video.input_duration),
+                    // Preserve decoder keyframe preroll and let the graph apply the exact
+                    // planned range. This keeps VFR frame selection aligned with preview.
+                    "-noaccurate_seek".to_owned(),
                     "-i".to_owned(),
                     video.path.to_string_lossy().into_owned(),
                 ]);
@@ -1539,13 +1540,19 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: f64, label: &str) -> S
     } else {
         String::new()
     };
-    let still_trim = if video.is_still {
-        format!(",trim=duration={}", tick_seconds(video.input_duration))
+    let input_timing = if video.is_still {
+        format!(
+            "setpts=PTS-STARTPTS,{still_prefix}fps={fps:.6},trim=duration={}",
+            tick_seconds(video.input_duration)
+        )
     } else {
-        String::new()
+        format!(
+            "fps={fps:.6}:round=up,trim=start=0:duration={},setpts=PTS-STARTPTS",
+            tick_seconds(video.input_duration)
+        )
     };
     format!(
-        "[{input}:v]setpts=PTS-STARTPTS,{still_prefix}fps={fps:.6}{still_trim},crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},format=rgba{color},colorchannelmixer=aa={:.6}{fades}{transition},rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),setpts=PTS+{}/TB[{label}]",
+        "[{input}:v]{input_timing},crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},format=rgba{color},colorchannelmixer=aa={:.6}{fades}{transition},rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),setpts=PTS+{}/TB[{label}]",
         video.source_size.width as f32 * transform.crop_left,
         video.source_size.height as f32 * transform.crop_top,
         if transform.flip_h { ",hflip" } else { "" },
@@ -2934,13 +2941,19 @@ mod tests {
         let (args, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
         let left_input = args.iter().position(|arg| arg == "left.mp4").unwrap();
         assert_eq!(
-            &args[left_input - 5..left_input],
-            ["-ss", "1.000000", "-t", "2.500000", "-i"]
+            &args[left_input - 4..left_input],
+            ["-ss", "1.000000", "-noaccurate_seek", "-i"]
         );
         let right_input = args.iter().position(|arg| arg == "right.mp4").unwrap();
         assert_eq!(
-            &args[right_input - 5..right_input],
-            ["-ss", "0.500000", "-t", "2.500000", "-i"]
+            &args[right_input - 4..right_input],
+            ["-ss", "0.500000", "-noaccurate_seek", "-i"]
+        );
+        assert!(
+            graph.contains(
+                "fps=30.000000:round=up,trim=start=0:duration=2.500000,setpts=PTS-STARTPTS,crop="
+            ),
+            "{graph}"
         );
         assert!(graph.contains("between(t,0.000000,2.500000)"), "{graph}");
         assert!(graph.contains("between(t,1.500000,4.000000)"), "{graph}");
@@ -2999,7 +3012,12 @@ mod tests {
         assert_eq!(matte.start, Tick(1_500_000));
         assert_eq!(matte.end, Tick(2_500_000));
 
-        let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        let (args, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        let left_input = args.iter().position(|arg| arg == "left.mp4").unwrap();
+        assert_eq!(
+            &args[left_input - 4..left_input],
+            ["-ss", "1.000000", "-noaccurate_seek", "-i"]
+        );
         assert!(
             graph.contains("color=c=black:s=1920x1080:r=30.000000"),
             "{graph}"
@@ -3351,7 +3369,12 @@ mod tests {
             ..request(&editor)
         };
         let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
-        let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        let (args, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        let left_input = args.iter().rposition(|arg| arg == "clip.mp4").unwrap();
+        assert_eq!(
+            &args[left_input - 5..left_input],
+            ["-ss", "0.000000", "-t", "15.000000", "-i"]
+        );
         assert!(graph.contains("pan=stereo|c0="));
         assert!(graph.contains("adelay=96000S:all=1"));
         assert!(graph.contains("volume='if(lt(t\\,0.100000)"));
@@ -4977,6 +5000,238 @@ mod tests {
             (0.97..=1.15).contains(&(middle / after)),
             "equal-power midpoint lost energy: before={before} middle={middle} after={after}"
         );
+    }
+
+    #[test]
+    fn real_ffmpeg_vfr_video_trim_matches_preview_floor_sampling() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
+        let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let ffmpeg = root.join("bin").join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        if !ffmpeg.exists() {
+            return;
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir();
+        let source = temp.join(format!("maelstrom-vfr-source-{nonce}.mp4"));
+        let filter = temp.join(format!("maelstrom-vfr-{nonce}.filter"));
+        let concat = temp.join(format!("maelstrom-vfr-{nonce}.concat"));
+        let frames = ["red", "green", "blue", "yellow", "magenta"]
+            .map(|color| temp.join(format!("maelstrom-vfr-{color}-{nonce}.bmp")));
+        let _cleanup = TempFiles(
+            std::iter::once(source.clone())
+                .chain(std::iter::once(filter.clone()))
+                .chain(std::iter::once(concat.clone()))
+                .chain(frames.iter().cloned())
+                .collect(),
+        );
+        for (path, color) in frames
+            .iter()
+            .zip(["red", "green", "blue", "yellow", "magenta"])
+        {
+            let status = Command::new(&ffmpeg)
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=c={color}:size=160x90:rate=25:d=0.04"),
+                    "-frames:v",
+                    "1",
+                ])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let concat_contents = frames
+            .iter()
+            .zip(["0.040", "0.070", "0.040", "0.090", "0.040"])
+            .map(|(path, duration)| {
+                format!(
+                    "file '{}'\nduration {duration}\n",
+                    path.to_string_lossy().replace('\\', "/")
+                )
+            })
+            .collect::<String>();
+        fs::write(&concat, concat_contents).unwrap();
+        let status = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+            ])
+            .arg(&concat)
+            .args([
+                "-vf",
+                "settb=1/1000,setpts='if(eq(N\\,0)\\,0\\,if(eq(N\\,1)\\,40\\,if(eq(N\\,2)\\,110\\,if(eq(N\\,3)\\,150\\,240))))'",
+                "-fps_mode",
+                "passthrough",
+                "-enc_time_base",
+                "1/1000",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "2",
+                "-video_track_timescale",
+                "1000",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let decode_frames = |path: &Path| -> Vec<Vec<u8>> {
+            let decoded = Command::new(&ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(path)
+                .args([
+                    "-fps_mode",
+                    "passthrough",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "pipe:1",
+                ])
+                .output()
+                .unwrap();
+            assert!(decoded.status.success());
+            const FRAME_BYTES: usize = 160 * 90 * 3;
+            assert_eq!(decoded.stdout.len() % FRAME_BYTES, 0);
+            decoded
+                .stdout
+                .chunks_exact(FRAME_BYTES)
+                .map(ToOwned::to_owned)
+                .collect()
+        };
+        let source_frames = decode_frames(&source);
+        assert_eq!(
+            source_frames.len(),
+            5,
+            "fixture lost irregular source frames"
+        );
+        let ffprobe = root.join("bin").join(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        let pts = Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "frame=best_effort_timestamp_time",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(pts.status.success());
+        let pts_ms = String::from_utf8(pts.stdout)
+            .unwrap()
+            .lines()
+            .map(|value| (value.parse::<f64>().unwrap() * 1_000.0).round() as i64)
+            .collect::<Vec<_>>();
+        assert_eq!(pts_ms, [0, 40, 110, 150, 240]);
+
+        for fps in [[30, 1], [30_000, 1_001]] {
+            let output = temp.join(format!(
+                "maelstrom-vfr-output-{}-{}-{nonce}.mp4",
+                fps[0], fps[1]
+            ));
+            let mut editor = EditorState::new(Language::English, "VFR export");
+            editor.add_media_paths([source.clone()]);
+            editor.media[0].duration = Some(Tick(250_000));
+            let track = editor
+                .timeline
+                .tracks
+                .iter()
+                .find(|track| track.kind == TrackKind::Video)
+                .unwrap()
+                .id;
+            editor
+                .timeline
+                .insert_clip(track, MediaId(1), Tick(0), Tick(140_000), Tick(100_000))
+                .unwrap();
+            let request = ExportRequest {
+                snapshot: editor.snapshot(),
+                settings: ProjectSettings {
+                    fps,
+                    size: [160, 90],
+                },
+                output: output.clone(),
+                ffmpeg: ffmpeg.clone(),
+                encoders: vec![H264Encoder::OpenH264],
+            };
+            let plan = ExportPlan::from_request(&request).unwrap();
+            let (mut args, graph) =
+                build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+            let encoder = args.iter().position(|arg| arg == "-c:v").unwrap();
+            args[encoder + 1] = "mpeg4".to_owned();
+            fs::write(&filter, graph).unwrap();
+            let cancel = AtomicBool::new(false);
+            let (events, _) = mpsc::channel();
+            let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+            let render = run_child(
+                &ffmpeg,
+                &args,
+                &filter,
+                plan.duration,
+                &cancel,
+                &events,
+                &notify,
+            );
+            assert!(render.is_ok(), "{render:?}");
+
+            let output_frames = decode_frames(&output);
+            let identities = output_frames
+                .iter()
+                .map(|frame| {
+                    source_frames
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, reference)| {
+                            frame
+                                .iter()
+                                .zip(reference.iter())
+                                .map(|(a, b)| {
+                                    let delta = i32::from(*a) - i32::from(*b);
+                                    i64::from(delta * delta)
+                                })
+                                .sum::<i64>()
+                        })
+                        .unwrap()
+                        .0
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                identities,
+                [1, 2, 3, 3],
+                "fps={fps:?}, identities={identities:?}"
+            );
+            let _ = fs::remove_file(output);
+        }
     }
 
     #[test]

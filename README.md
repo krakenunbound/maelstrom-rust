@@ -183,7 +183,9 @@ rate metadata keeps its exact nonnegative source timestamp and receives exact-on
 Maelstrom does not invent a fallback frame grid. A bounded, cancellable decoded-frame timestamp
 index supplies exact local VFR spans off the UI thread; irregular and reordered B-frame fixtures
 exercise its addressing contract. The background scan uses one decoder thread to limit contention.
-Broader real-media and cross-backend qualification remains open.
+Export retains decoder preroll and floor-samples the same irregular source frames before converting
+to project rate; a real trim/slip identity gate covers 30 and 30000/1001. Broader real-media and
+cross-backend qualification remains open.
 The decoder keeps
 the same sticky decoder path for playback and paused seeks: nearby forward
 targets decode sequentially, while backward or distant targets seek to a prior

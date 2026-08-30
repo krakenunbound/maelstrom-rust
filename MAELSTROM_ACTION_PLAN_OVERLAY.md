@@ -129,8 +129,9 @@ Finish holes. Do not replace working crates.
 
 1. **Multi-source scheduler.** Immutable multi-source requests, shared source actors, hard caps, and speculative-prewarm-first priority/recency eviction now exist. Visible reverse-scrub work is protected from speculative release. The remaining gate is UI-present/cross-hardware proof that four 1080p sources do not hitch the timeline and a slow source does not stall the clock.
 2. **VFR / rational rates.** Runtime mapping now uses a bounded decoded best-effort timestamp index
-   across trim, slip, reverse, and 30000/1001 project rates. Broad real-media/cross-backend and VFR
-   export-identity proof remain open.
+   across trim, slip, reverse, and 30000/1001 project rates. Export now preserves keyframe preroll
+   and has a real irregular-frame trim/slip identity gate at 30 and 30000/1001. Broad
+   real-media/cross-backend qualification remains open.
 3. **Proxies.** The first optional derived-media slice is complete: cancellable background 720p
    generation, bounded disposable cache, nested EN/JA media/clip menus, monitor-only selection, and
    original fallback. Proxies never replace project, audio, or export source truth. Queues,

@@ -273,8 +273,12 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       requests, and holds the final indexed frame from the exclusive source out-point at both 30 and
       30000/1001 project rates. Empty indexes retain CFR fallback. The probe command contract is
       regression-locked to decoded best-effort timestamps, and a generated reordered B-frame VFR
-      source exercises that scan in decoded presentation order. This remains open pending broad
-      real-media/cross-backend proof and a real VFR trim/slip export identity gate.
+      source exercises that scan in decoded presentation order. Export now retains decoder keyframe
+      preroll, applies floor sampling before resetting clip-local time, and bounds the graph at the
+      planned source range. A real five-color `0/40/110/150/240 ms` source trimmed to `100..240 ms`
+      renders source identities `40/110/150/150 ms` at both 30 and 30000/1001 project rates, proving
+      preview/export trim-slip identity and the exclusive out-point. This remains open pending broad
+      real-media/cross-backend proof across more codecs, reorder patterns, and containers.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for
