@@ -151,7 +151,7 @@ try {
     }
     $actualDurationSeconds = [double]$appReport.actual_duration_seconds
     $decoderBackends = $appReport.PSObject.Properties['observed_decoder_backends'].Value
-    if ($appReport.schema_version -ne 2 -or
+    if ($appReport.schema_version -ne 3 -or
         $appReport.requested_duration_seconds -ne $DurationSeconds -or
         $actualDurationSeconds -lt $DurationSeconds -or
         $actualDurationSeconds -gt ($DurationSeconds + 2) -or
@@ -174,7 +174,9 @@ try {
     $resources = $appReport.monitor_resources
     foreach ($property in @(
         'frame_cache_capacity_bytes', 'current_frame_cache_bytes', 'peak_frame_cache_bytes_upper_bound',
-        'active_sticky_sessions', 'peak_sticky_sessions_upper_bound', 'session_cap'
+        'active_sticky_sessions', 'peak_sticky_sessions', 'session_cap',
+        'active_foreground_sessions', 'foreground_session_cap',
+        'active_background_sessions', 'background_session_cap'
     )) {
         Assert-JsonUnsignedIntegerProperty $resources $property 'Playback soak monitor resources'
     }
@@ -183,12 +185,16 @@ try {
         $resources.current_frame_cache_bytes -gt $resources.peak_frame_cache_bytes_upper_bound -or
         $resources.peak_frame_cache_bytes_upper_bound -gt $resources.frame_cache_capacity_bytes -or
         $resources.active_sticky_sessions -gt $resources.session_cap -or
-        $resources.active_sticky_sessions -gt $resources.peak_sticky_sessions_upper_bound -or
-        $resources.peak_sticky_sessions_upper_bound -gt $resources.session_cap) {
+        $resources.active_sticky_sessions -gt $resources.peak_sticky_sessions -or
+        $resources.peak_sticky_sessions -gt $resources.session_cap -or
+        $resources.active_foreground_sessions -gt $resources.foreground_session_cap -or
+        $resources.active_background_sessions -gt $resources.background_session_cap -or
+        ($resources.active_foreground_sessions + $resources.active_background_sessions) -ne $resources.active_sticky_sessions -or
+        ($resources.foreground_session_cap + $resources.background_session_cap) -ne $resources.session_cap) {
         throw "Playback soak reported monitor resources outside their aggregate bounds: $($resources | ConvertTo-Json -Compress)"
     }
     if ($resources.peak_frame_cache_bytes_upper_bound -lt 1 -or
-        $resources.peak_sticky_sessions_upper_bound -lt 1) {
+        $resources.peak_sticky_sessions -lt 1) {
         throw "Playback soak did not exercise bounded monitor cache/session resources: $($resources | ConvertTo-Json -Compress)"
     }
     $delta = $appReport.runtime_diagnostics_delta

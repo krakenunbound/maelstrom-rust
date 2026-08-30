@@ -120,7 +120,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       size, preview quality, and ordered visible layer/audio-source descriptions. The app now
       captures ordered audible-source metadata in a fixed 64-entry request snapshot, with explicit
       overflow tracking and no cap on actual audio playback.
-- [ ] Maintain one sticky decoder session per active source within a bounded session pool.
+- [ ] Maintain one sticky decoder session per active source within a bounded session pool. A
+      shared hard pool now limits all visible monitor decoders to four foreground and four
+      speculative-background permits, with exact coherent playback-soak diagnostics and RAII
+      release on every exit path. Deduplicating speculative contexts by active source remains.
 - [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing.
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.
 - [x] Add adaptive full/half/quarter/eighth preview resolution based on measured frame budget.

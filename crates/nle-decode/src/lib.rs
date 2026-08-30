@@ -37,6 +37,110 @@ const MAX_SCRUB_CACHE_INDEX_ENTRIES: usize = 1_024;
 const MAX_CACHE_STREAM_STATES: usize = 4_096;
 pub const DEFAULT_FRAME_CACHE_BYTES: usize = 1024 * 1024 * 1024;
 
+/// A cloneable, hard-capped permit pool for monitor decoder sessions.
+///
+/// Foreground permits are reserved for each decoder's sequential lane. Background permits are
+/// used only for paused prewarm and reverse-scrub lanes, so speculative work cannot consume the
+/// foreground budget.
+#[derive(Clone)]
+pub struct MonitorSessionPool {
+    state: Arc<Mutex<MonitorSessionPoolState>>,
+}
+
+#[derive(Debug)]
+struct MonitorSessionPoolState {
+    active_foreground: usize,
+    active_background: usize,
+    peak_sticky_sessions: usize,
+    foreground_cap: usize,
+    background_cap: usize,
+}
+
+/// An exact, coherent snapshot of one shared monitor-session pool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorSessionPoolDiagnostics {
+    pub active_sticky_sessions: usize,
+    pub peak_sticky_sessions: usize,
+    pub session_cap: usize,
+    pub active_foreground_sessions: usize,
+    pub foreground_session_cap: usize,
+    pub active_background_sessions: usize,
+    pub background_session_cap: usize,
+}
+
+#[derive(Clone, Copy)]
+enum MonitorSessionLane {
+    Foreground,
+    Background,
+}
+
+struct MonitorSessionPermit {
+    pool: MonitorSessionPool,
+    lane: MonitorSessionLane,
+}
+
+impl MonitorSessionPool {
+    /// Creates a pool with separate hard caps for foreground and speculative background work.
+    pub fn new(foreground_session_cap: usize, background_session_cap: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(MonitorSessionPoolState {
+                active_foreground: 0,
+                active_background: 0,
+                peak_sticky_sessions: 0,
+                foreground_cap: foreground_session_cap,
+                background_cap: background_session_cap,
+            })),
+        }
+    }
+
+    /// Returns an exact coherent snapshot; no fields are independently sampled.
+    pub fn diagnostics(&self) -> MonitorSessionPoolDiagnostics {
+        let state = self.state.lock().expect("monitor session pool lock");
+        let active_sticky_sessions = state.active_foreground + state.active_background;
+        MonitorSessionPoolDiagnostics {
+            active_sticky_sessions,
+            peak_sticky_sessions: state.peak_sticky_sessions.max(active_sticky_sessions),
+            session_cap: state.foreground_cap + state.background_cap,
+            active_foreground_sessions: state.active_foreground,
+            foreground_session_cap: state.foreground_cap,
+            active_background_sessions: state.active_background,
+            background_session_cap: state.background_cap,
+        }
+    }
+
+    fn try_acquire(&self, lane: MonitorSessionLane) -> Option<MonitorSessionPermit> {
+        let mut state = self.state.lock().expect("monitor session pool lock");
+        match lane {
+            MonitorSessionLane::Foreground if state.active_foreground < state.foreground_cap => {
+                state.active_foreground += 1;
+            }
+            MonitorSessionLane::Background if state.active_background < state.background_cap => {
+                state.active_background += 1;
+            }
+            _ => return None,
+        }
+        state.peak_sticky_sessions = state
+            .peak_sticky_sessions
+            .max(state.active_foreground + state.active_background);
+        Some(MonitorSessionPermit {
+            pool: self.clone(),
+            lane,
+        })
+    }
+}
+
+impl Drop for MonitorSessionPermit {
+    fn drop(&mut self) {
+        let mut state = self.pool.state.lock().expect("monitor session pool lock");
+        let active = match self.lane {
+            MonitorSessionLane::Foreground => &mut state.active_foreground,
+            MonitorSessionLane::Background => &mut state.active_background,
+        };
+        debug_assert!(*active > 0, "monitor session permit released exactly once");
+        *active = active.saturating_sub(1);
+    }
+}
+
 /// A point-in-time view of bounded monitor decoder resource use.
 ///
 /// Counts are runtime diagnostics only: they do not alter cache eviction or sticky-session
@@ -444,6 +548,7 @@ pub struct MonitorDecoder {
     last_scrub_target: Mutex<Option<(u32, i64)>>,
     cache_reset_generation: Arc<AtomicU64>,
     resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+    session_pool: MonitorSessionPool,
 }
 
 struct MonitorWorker {
@@ -467,6 +572,21 @@ impl MonitorDecoder {
         notify: impl Fn() + Send + Sync + 'static,
         frame_cache_bytes: usize,
     ) -> Self {
+        Self::new_with_notifier_and_cache_bytes_and_session_pool(
+            notify,
+            frame_cache_bytes,
+            // Preserve the existing per-decoder ownership budget for callers that do not opt
+            // into an application-wide pool: lane zero plus three speculative lanes.
+            MonitorSessionPool::new(1, MONITOR_WORKER_COUNT - 1),
+        )
+    }
+
+    /// Creates a monitor decoder whose sticky sessions draw permits from a shared pool.
+    pub fn new_with_notifier_and_cache_bytes_and_session_pool(
+        notify: impl Fn() + Send + Sync + 'static,
+        frame_cache_bytes: usize,
+        session_pool: MonitorSessionPool,
+    ) -> Self {
         let events = Arc::new(EventSlot::new(notify));
         let cache_reset_generation = Arc::new(AtomicU64::new(0));
         let resource_diagnostics = Arc::new(DecoderResourceDiagnostics::new(frame_cache_bytes));
@@ -486,6 +606,7 @@ impl MonitorDecoder {
             let scheduler_cache_reset = Arc::clone(&cache_reset_generation);
             let scheduler_frame_cache = Arc::clone(&frame_cache);
             let scheduler_resource_diagnostics = Arc::clone(&resource_diagnostics);
+            let scheduler_session_pool = session_pool.clone();
             let scheduler = thread::Builder::new()
                 .name(format!("maelstrom-monitor-decoder-{index}"))
                 .spawn(move || {
@@ -497,6 +618,7 @@ impl MonitorDecoder {
                         scheduler_cache_reset,
                         scheduler_frame_cache,
                         scheduler_resource_diagnostics,
+                        scheduler_session_pool,
                         index,
                     )
                 })
@@ -515,6 +637,7 @@ impl MonitorDecoder {
             last_scrub_target: Mutex::new(None),
             cache_reset_generation,
             resource_diagnostics,
+            session_pool,
         }
     }
 
@@ -592,6 +715,12 @@ impl MonitorDecoder {
     /// Returns a copyable snapshot of bounded cache and sticky-session resource use.
     pub fn diagnostics(&self) -> MonitorDecoderDiagnostics {
         self.resource_diagnostics.snapshot()
+    }
+
+    /// Returns the shared pool used by this decoder. Diagnostics on the returned clone are
+    /// application-wide when the explicit shared-pool constructor was used.
+    pub fn session_pool(&self) -> MonitorSessionPool {
+        self.session_pool.clone()
     }
 
     fn send_to(&self, index: usize, command: MonitorCommand) -> Result<(), DecoderClosed> {
@@ -943,6 +1072,7 @@ fn monitor_scheduler_loop(
     cache_reset_generation: Arc<AtomicU64>,
     frame_cache: Arc<Mutex<MonitorFrameCache>>,
     resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+    session_pool: MonitorSessionPool,
     worker_index: usize,
 ) {
     if ffmpeg::init().is_err() {
@@ -1003,6 +1133,7 @@ fn monitor_scheduler_loop(
         let mut on_session_state = |active| {
             resource_diagnostics.publish_worker_session(worker_index, active);
         };
+        let mut deferred_for_capacity = false;
         let event = decode_monitor_request(
             &mut sessions,
             &frame_cache,
@@ -1010,7 +1141,10 @@ fn monitor_scheduler_loop(
             &commands,
             &mut on_progress,
             &mut on_session_state,
+            &mut || deferred_for_capacity = true,
             &stage_timings,
+            &session_pool,
+            worker_index,
         );
         // A target arriving during decode wins: do not publish old output.
         match commands.lock().expect("monitor command lock").take() {
@@ -1036,7 +1170,12 @@ fn monitor_scheduler_loop(
                 return;
             }
             None => {
-                if let Some(event) = event {
+                if deferred_for_capacity {
+                    // A saturated speculative lane must retry quietly. Waiting keeps this worker
+                    // from spin-polling the permit pool while another lane remains active.
+                    thread::sleep(POLL_INTERVAL);
+                    pending = Some(request);
+                } else if let Some(event) = event {
                     events.publish(event);
                 }
             }
@@ -1072,7 +1211,10 @@ fn decode_monitor_request(
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
     on_progress: &mut dyn FnMut(&DecodedRgba),
     on_session_state: &mut dyn FnMut(bool),
+    on_deferred_for_capacity: &mut dyn FnMut(),
     stage_timings: &DecoderStageTimingAccumulators,
+    session_pool: &MonitorSessionPool,
+    worker_index: usize,
 ) -> Option<DecodeEvent> {
     let span = tracing::debug_span!(
         "monitor_decode",
@@ -1159,8 +1301,8 @@ fn decode_monitor_request(
         _ => {
             sessions.remove(&request.media_id);
             on_session_state(!sessions.is_empty());
-            match StickyMonitor::open(request) {
-                Ok(mut session) => {
+            match open_sticky_monitor(request, session_pool, worker_index) {
+                Ok(Some(mut session)) => {
                     let result = decode_with_session(
                         &mut session,
                         request,
@@ -1172,6 +1314,13 @@ fn decode_monitor_request(
                     sessions.insert(request.media_id, session);
                     on_session_state(true);
                     result
+                }
+                // A speculative lane must never turn global capacity pressure into a visible
+                // decode error. Its next latest-wins request can retry after another session is
+                // evicted or reset.
+                Ok(None) => {
+                    on_deferred_for_capacity();
+                    return None;
                 }
                 Err(error) => Err(error),
             }
@@ -1186,7 +1335,10 @@ fn decode_monitor_request(
             on_progress,
             &mut on_traversal,
             on_session_state,
+            on_deferred_for_capacity,
             stage_timings,
+            session_pool,
+            worker_index,
         ),
         result => result,
     };
@@ -1269,7 +1421,10 @@ fn recover_hardware_decode_failure(
     on_progress: &mut dyn FnMut(&DecodedRgba),
     on_traversal: &mut dyn FnMut(&DecodedRgba),
     on_session_state: &mut dyn FnMut(bool),
+    on_deferred_for_capacity: &mut dyn FnMut(),
     stage_timings: &DecoderStageTimingAccumulators,
+    session_pool: &MonitorSessionPool,
+    worker_index: usize,
 ) -> Result<Option<DecodedRgba>, String> {
     let fallback = sessions
         .get(&request.media_id)
@@ -1279,8 +1434,8 @@ fn recover_hardware_decode_failure(
     };
     sessions.remove(&request.media_id);
     on_session_state(!sessions.is_empty());
-    match StickyMonitor::open(&open_request) {
-        Ok(mut session) => {
+    match open_sticky_monitor(&open_request, session_pool, worker_index) {
+        Ok(Some(mut session)) => {
             tracing::warn!(
                 target: "maelstrom::decode",
                 media_id = request.media_id,
@@ -1307,10 +1462,38 @@ fn recover_hardware_decode_failure(
             on_session_state(true);
             result
         }
+        Ok(None) => {
+            on_deferred_for_capacity();
+            Ok(None)
+        }
         Err(software_error) => Err(format!(
             "hardware decoder failed ({hardware_error}); software fallback could not open ({software_error})"
         )),
     }
+}
+
+/// Acquires a permit before allocating FFmpeg contexts. Background capacity exhaustion is a
+/// normal defer outcome; foreground exhaustion is an invariant violation visible to the caller.
+fn open_sticky_monitor(
+    request: &DecodeRequest,
+    session_pool: &MonitorSessionPool,
+    worker_index: usize,
+) -> Result<Option<StickyMonitor>, String> {
+    let lane = if worker_index == 0 {
+        MonitorSessionLane::Foreground
+    } else {
+        MonitorSessionLane::Background
+    };
+    let Some(permit) = session_pool.try_acquire(lane) else {
+        return match lane {
+            MonitorSessionLane::Background => Ok(None),
+            MonitorSessionLane::Foreground => Err(
+                "monitor foreground session pool is exhausted; a foreground permit was not released"
+                    .to_owned(),
+            ),
+        };
+    };
+    StickyMonitor::open(request, permit).map(Some)
 }
 
 fn software_fallback_request(
@@ -1349,6 +1532,9 @@ fn latest_same_generation(
 }
 
 struct StickyMonitor {
+    // Held for the full lifetime of the libav contexts. Every erase, reset, failed open, and
+    // hardware-to-software replacement therefore releases capacity through RAII.
+    _session_permit: MonitorSessionPermit,
     path: PathBuf,
     input: ffmpeg::format::context::Input,
     stream_index: usize,
@@ -1375,7 +1561,7 @@ struct DecodedRgba {
 }
 
 impl StickyMonitor {
-    fn open(request: &DecodeRequest) -> Result<Self, String> {
+    fn open(request: &DecodeRequest, session_permit: MonitorSessionPermit) -> Result<Self, String> {
         let input = ffmpeg::format::input(&request.path)
             .map_err(|error| format!("could not open monitor media: {error}"))?;
         let stream = input
@@ -1414,6 +1600,7 @@ impl StickyMonitor {
             ),
         };
         Ok(Self {
+            _session_permit: session_permit,
             path: request.path.clone(),
             input,
             stream_index,
@@ -2472,6 +2659,156 @@ mod tests {
     }
 
     #[test]
+    fn shared_monitor_session_pool_enforces_lane_caps_and_raii_release() {
+        let pool = MonitorSessionPool::new(1, 2);
+        let foreground = pool
+            .try_acquire(MonitorSessionLane::Foreground)
+            .expect("foreground permit");
+        let background_one = pool
+            .try_acquire(MonitorSessionLane::Background)
+            .expect("first background permit");
+        let background_two = pool
+            .try_acquire(MonitorSessionLane::Background)
+            .expect("second background permit");
+        assert!(pool.try_acquire(MonitorSessionLane::Foreground).is_none());
+        assert!(pool.try_acquire(MonitorSessionLane::Background).is_none());
+        assert_eq!(
+            pool.diagnostics(),
+            MonitorSessionPoolDiagnostics {
+                active_sticky_sessions: 3,
+                peak_sticky_sessions: 3,
+                session_cap: 3,
+                active_foreground_sessions: 1,
+                foreground_session_cap: 1,
+                active_background_sessions: 2,
+                background_session_cap: 2,
+            }
+        );
+        drop(background_one);
+        assert_eq!(pool.diagnostics().active_background_sessions, 1);
+        drop(foreground);
+        drop(background_two);
+        let snapshot = pool.diagnostics();
+        assert_eq!(snapshot.active_sticky_sessions, 0);
+        assert_eq!(snapshot.peak_sticky_sessions, 3);
+    }
+
+    #[test]
+    fn shared_monitor_session_pool_snapshots_remain_coherent_under_contention() {
+        let pool = MonitorSessionPool::new(2, 2);
+        let barrier = Arc::new(std::sync::Barrier::new(13));
+        let mut workers = Vec::new();
+        for index in 0..12 {
+            let worker_pool = pool.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                worker_barrier.wait();
+                let lane = if index % 2 == 0 {
+                    MonitorSessionLane::Foreground
+                } else {
+                    MonitorSessionLane::Background
+                };
+                let permit = worker_pool.try_acquire(lane);
+                if permit.is_some() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                permit.is_some()
+            }));
+        }
+        barrier.wait();
+        while workers.iter().any(|worker| !worker.is_finished()) {
+            let snapshot = pool.diagnostics();
+            assert_eq!(
+                snapshot.active_sticky_sessions,
+                snapshot.active_foreground_sessions + snapshot.active_background_sessions
+            );
+            assert!(snapshot.active_foreground_sessions <= snapshot.foreground_session_cap);
+            assert!(snapshot.active_background_sessions <= snapshot.background_session_cap);
+            assert!(snapshot.peak_sticky_sessions <= snapshot.session_cap);
+            thread::yield_now();
+        }
+        let acquired = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().ok())
+            .filter(|acquired| *acquired)
+            .count();
+        assert!(acquired > 0, "at least one contended acquisition succeeds");
+        let snapshot = pool.diagnostics();
+        assert_eq!(snapshot.active_sticky_sessions, 0);
+        assert!(snapshot.peak_sticky_sessions <= snapshot.session_cap);
+    }
+
+    #[test]
+    fn shared_pool_bounds_multiple_decoders_and_releases_every_session_on_reset() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let pool = MonitorSessionPool::new(2, 1);
+        let first = MonitorDecoder::new_with_notifier_and_cache_bytes_and_session_pool(
+            || {},
+            1024 * 1024,
+            pool.clone(),
+        );
+        let second = MonitorDecoder::new_with_notifier_and_cache_bytes_and_session_pool(
+            || {},
+            1024 * 1024,
+            pool.clone(),
+        );
+        let mut prewarmed = request(path.clone(), 101);
+        prewarmed.media_id = 11;
+        prewarmed.prewarm_scrub_workers = true;
+        let mut foreground = request(path.clone(), 202);
+        foreground.media_id = 22;
+
+        first.request(prewarmed.clone()).unwrap();
+        second.request(foreground.clone()).unwrap();
+        match receive_for(&first, &prewarmed) {
+            DecodeEvent::Frame(frame) => {
+                assert_eq!(frame.request_id, prewarmed.request_id);
+                assert_eq!(frame.media_id, prewarmed.media_id);
+                assert!(frame.source_tick >= prewarmed.source_tick);
+            }
+            DecodeEvent::Error(error) => panic!("prewarm decode failed: {}", error.message),
+        }
+        match receive_for(&second, &foreground) {
+            DecodeEvent::Frame(frame) => {
+                assert_eq!(frame.request_id, foreground.request_id);
+                assert_eq!(frame.media_id, foreground.media_id);
+                assert!(frame.source_tick >= foreground.source_tick);
+            }
+            DecodeEvent::Error(error) => panic!("foreground decode failed: {}", error.message),
+        }
+        for _ in 0..100 {
+            if pool.diagnostics().peak_sticky_sessions == 3 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let saturated = pool.diagnostics();
+        assert_eq!(saturated.session_cap, 3);
+        assert_eq!(saturated.peak_sticky_sessions, 3);
+        assert_eq!(saturated.active_foreground_sessions, 2);
+        assert_eq!(saturated.active_background_sessions, 1);
+
+        first.reset_live_cache().unwrap();
+        second.reset_live_cache().unwrap();
+        for _ in 0..100 {
+            if pool.diagnostics().active_sticky_sessions == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let released = pool.diagnostics();
+        assert_eq!(released.active_sticky_sessions, 0);
+        assert_eq!(released.peak_sticky_sessions, 3);
+
+        drop(first);
+        drop(second);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn decoder_stage_timing_snapshot_merges_with_saturation_and_zero_means() {
         let first = AtomicStageTiming::default();
         first.record(Duration::from_nanos(2_000_000));
@@ -2689,7 +3026,12 @@ mod tests {
             output_size.0,
             output_size.1,
         );
+        let session_pool = MonitorSessionPool::new(1, 0);
+        let session_permit = session_pool
+            .try_acquire(MonitorSessionLane::Foreground)
+            .expect("test monitor receives its foreground permit");
         Ok(StickyMonitor {
+            _session_permit: session_permit,
             path,
             input,
             stream_index,
@@ -2768,6 +3110,7 @@ mod tests {
         let mut sessions = HashMap::from([(original.media_id, hardware)]);
         let commands = Arc::new(Mutex::new(Some(MonitorCommand::Request(newest.clone()))));
         let stage_timings = DecoderStageTimingAccumulators::default();
+        let session_pool = MonitorSessionPool::new(1, 0);
 
         let frame = recover_hardware_decode_failure(
             &mut sessions,
@@ -2777,7 +3120,10 @@ mod tests {
             &mut |_| {},
             &mut |_| {},
             &mut |_| {},
+            &mut || {},
             &stage_timings,
+            &session_pool,
+            0,
         )
         .expect("software fallback decodes supplied media")
         .expect("same-generation replacement was not cancelled");
@@ -2816,6 +3162,7 @@ mod tests {
         let commands = Arc::new(Mutex::new(None));
         let stage_timings = DecoderStageTimingAccumulators::default();
         let mut session_states = Vec::new();
+        let session_pool = MonitorSessionPool::new(1, 0);
 
         let event = decode_monitor_request(
             &mut sessions,
@@ -2824,7 +3171,10 @@ mod tests {
             &commands,
             &mut |_| {},
             &mut |active| session_states.push(active),
+            &mut || {},
             &stage_timings,
+            &session_pool,
+            0,
         )
         .expect("cache hit returns a frame");
         let DecodeEvent::Frame(frame) = event else {
@@ -2834,6 +3184,38 @@ mod tests {
         assert_eq!(frame.rgba, rgba);
         assert!(sessions.is_empty());
         assert_eq!(session_states, vec![false]);
+    }
+
+    #[test]
+    fn unavailable_background_session_defers_without_publishing_decode_error() {
+        let desired = request(
+            PathBuf::from("must-not-open-while-background-is-full.mp4"),
+            92,
+        );
+        let mut sessions = HashMap::new();
+        let cache = Arc::new(Mutex::new(MonitorFrameCache::new(0)));
+        let commands = Arc::new(Mutex::new(None));
+        let stage_timings = DecoderStageTimingAccumulators::default();
+        let session_pool = MonitorSessionPool::new(1, 0);
+        let mut deferred = false;
+
+        let event = decode_monitor_request(
+            &mut sessions,
+            &cache,
+            &desired,
+            &commands,
+            &mut |_| {},
+            &mut |_| {},
+            &mut || deferred = true,
+            &stage_timings,
+            &session_pool,
+            1,
+        );
+
+        assert!(event.is_none());
+        assert!(deferred);
+        assert!(sessions.is_empty());
+        assert_eq!(session_pool.diagnostics().active_sticky_sessions, 0);
     }
 
     #[test]
@@ -3192,7 +3574,10 @@ mod tests {
         }
         let path = tiny_media();
         let first = request(path.clone(), 1);
-        let mut monitor = StickyMonitor::open(&first).expect("open sticky monitor");
+        let session_pool = MonitorSessionPool::new(1, 0);
+        let mut monitor = open_sticky_monitor(&first, &session_pool, 0)
+            .expect("open sticky monitor")
+            .expect("foreground permit available");
         let stage_timings = DecoderStageTimingAccumulators::default();
         let first_frame = monitor
             .decode(
@@ -3268,6 +3653,7 @@ mod tests {
         let commands = Arc::new(Mutex::new(None));
         let stage_timings = DecoderStageTimingAccumulators::default();
         let mut current = request(path.clone(), 30);
+        let session_pool = MonitorSessionPool::new(1, 3);
         current.source_tick = 700_000;
         let mut progress = Vec::new();
         for step in 1..=3 {
@@ -3282,7 +3668,10 @@ mod tests {
                 &commands,
                 &mut |_| {},
                 &mut |_| {},
+                &mut || {},
                 &stage_timings,
+                &session_pool,
+                0,
             ) {
                 Some(DecodeEvent::Frame(frame)) => {
                     assert_frame_reaches_target(&frame, &newer);
@@ -3312,6 +3701,7 @@ mod tests {
         let commands = Arc::new(Mutex::new(None));
         let stage_timings = DecoderStageTimingAccumulators::default();
         let mut current = request(path.clone(), 41);
+        let session_pool = MonitorSessionPool::new(1, 3);
         current.source_tick = 700_000;
         let mut backward = current.clone();
         backward.request_id = 42;
@@ -3324,7 +3714,10 @@ mod tests {
             &commands,
             &mut |_| {},
             &mut |_| {},
+            &mut || {},
             &stage_timings,
+            &session_pool,
+            0,
         ) {
             Some(DecodeEvent::Frame(frame)) => assert_frame_reaches_target(&frame, &backward),
             Some(DecodeEvent::Error(error)) => panic!("reverse progress failed: {}", error.message),
@@ -3366,7 +3759,10 @@ mod tests {
         let mut first = request(PathBuf::from(path), 501);
         first.acceleration = AccelerationPreference::PreferHardware;
         first.source_tick = 12_000_000;
-        let mut monitor = StickyMonitor::open(&first).expect("open hardware monitor");
+        let session_pool = MonitorSessionPool::new(1, 0);
+        let mut monitor = open_sticky_monitor(&first, &session_pool, 0)
+            .expect("open hardware monitor")
+            .expect("foreground permit available");
         let stage_timings = DecoderStageTimingAccumulators::default();
         #[cfg(target_os = "macos")]
         assert_eq!(monitor.backend, DecodeBackend::VideoToolbox);
