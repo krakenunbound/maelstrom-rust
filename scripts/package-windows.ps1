@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$FfmpegBundleRoot,
-    [string]$LibClangPath = $env:LIBCLANG_PATH
+    [string]$LibClangPath = $env:LIBCLANG_PATH,
+    [string]$VcRedistCrtDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +23,100 @@ function Test-JsonFiniteNumber {
     if (-not $numeric) { return $false }
     $doubleValue = [double]$Value
     return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
+}
+
+function Resolve-VcRedistCrtDirectory {
+    param(
+        [string]$ExplicitDirectory
+    )
+
+    function Test-VcRedistCrtDirectory {
+        param(
+            [string]$Directory,
+            [string]$SourceDescription
+        )
+        $resolved = [System.IO.Path]::GetFullPath($Directory)
+        $leaf = Split-Path -Leaf $resolved
+        if ($leaf -notlike 'Microsoft.VC*.CRT') {
+            throw "$SourceDescription must name a Microsoft.VC*.CRT directory: $resolved"
+        }
+        $runtime = Join-Path $resolved 'vcruntime140.dll'
+        if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
+            throw "$SourceDescription does not contain vcruntime140.dll: $resolved"
+        }
+        $peBytes = [System.IO.File]::ReadAllBytes($runtime)
+        if ($peBytes.Length -lt 64 -or
+            [System.BitConverter]::ToUInt16($peBytes, 0) -ne 0x5A4D) {
+            throw "$SourceDescription contains an invalid PE runtime: $runtime"
+        }
+        $peHeaderOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
+        if ($peHeaderOffset -lt 0 -or $peHeaderOffset + 6 -gt $peBytes.Length -or
+            [System.BitConverter]::ToUInt32($peBytes, $peHeaderOffset) -ne 0x00004550 -or
+            [System.BitConverter]::ToUInt16($peBytes, $peHeaderOffset + 4) -ne 0x8664) {
+            throw "$SourceDescription must contain an AMD64 vcruntime140.dll: $runtime"
+        }
+        return $resolved
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitDirectory)) {
+        return Test-VcRedistCrtDirectory -Directory $ExplicitDirectory -SourceDescription '-VcRedistCrtDirectory'
+    }
+
+    $installationRoots = New-Object System.Collections.Generic.List[string]
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    $vswherePaths = @(
+        (Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'),
+        'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+    ) | Select-Object -Unique
+    foreach ($vswhere in $vswherePaths) {
+        if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { continue }
+        $reportedRoots = & $vswhere -products * -property installationPath -format value 2>$null
+        foreach ($reportedRoot in $reportedRoots) {
+            if (-not [string]::IsNullOrWhiteSpace($reportedRoot) -and (Test-Path -LiteralPath $reportedRoot -PathType Container)) {
+                $installationRoots.Add([System.IO.Path]::GetFullPath($reportedRoot))
+            }
+        }
+    }
+
+    # Also support standard Visual Studio layouts when vswhere is not installed. These roots are
+    # intentionally limited to Microsoft Visual Studio installation directories, never System32.
+    foreach ($base in @('C:\Program Files\Microsoft Visual Studio', 'C:\Program Files (x86)\Microsoft Visual Studio')) {
+        if (-not (Test-Path -LiteralPath $base -PathType Container)) { continue }
+        Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $installationRoots.Add($_.FullName)
+            }
+        }
+    }
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($installationRoot in ($installationRoots | Select-Object -Unique)) {
+        $redistRoot = Join-Path $installationRoot 'VC\Redist\MSVC'
+        if (-not (Test-Path -LiteralPath $redistRoot -PathType Container)) { continue }
+        foreach ($versionDirectory in (Get-ChildItem -LiteralPath $redistRoot -Directory -ErrorAction SilentlyContinue)) {
+            $crtRoot = Join-Path $versionDirectory.FullName 'x64'
+            if (-not (Test-Path -LiteralPath $crtRoot -PathType Container)) { continue }
+            foreach ($crtDirectory in (Get-ChildItem -LiteralPath $crtRoot -Directory -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue)) {
+                $runtime = Join-Path $crtDirectory.FullName 'vcruntime140.dll'
+                if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { continue }
+                try {
+                    $version = [version]$versionDirectory.Name
+                } catch {
+                    continue
+                }
+                $candidates.Add([pscustomobject]@{
+                    Version = $version
+                    Directory = [System.IO.Path]::GetFullPath($crtDirectory.FullName)
+                })
+            }
+        }
+    }
+
+    $selected = $candidates | Sort-Object -Property @{ Expression = 'Version'; Descending = $true }, @{ Expression = 'Directory'; Descending = $false } | Select-Object -First 1
+    if ($null -eq $selected) {
+        throw 'vcruntime140.dll was not found in an installed Visual Studio x64 Microsoft.VC*.CRT Redist directory. Install the licensed Microsoft VC Redist/Visual Studio component or pass -VcRedistCrtDirectory with a trusted, authorized AMD64 CRT directory.'
+    }
+    return Test-VcRedistCrtDirectory -Directory $selected.Directory -SourceDescription 'Auto-discovered Visual Studio VC Redist directory'
 }
 $savedProcessPath = $env:PATH
 $savedFfmpegDir = $env:FFMPEG_DIR
@@ -95,6 +190,9 @@ $resolvedLibClang = $libClangCandidates | Where-Object {
 if (-not $resolvedLibClang) {
     throw 'libclang.dll is required to generate FFmpeg bindings. Pass -LibClangPath; it is a build tool and is not packaged.'
 }
+$resolvedVcRedistCrt = Resolve-VcRedistCrtDirectory -ExplicitDirectory $VcRedistCrtDirectory
+$vcRuntimeSource = Join-Path $resolvedVcRedistCrt 'vcruntime140.dll'
+Write-Host "Using app-local Microsoft VC runtime from: $resolvedVcRedistCrt"
 
 $env:FFMPEG_DIR = $bundleRoot
 $env:LIBCLANG_PATH = [System.IO.Path]::GetFullPath($resolvedLibClang)
@@ -114,7 +212,10 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\nle-app.exe') -Destination (Join-Path $output 'Maelstrom.exe')
 Copy-Item -LiteralPath $ffmpeg -Destination $output
 Copy-Item -LiteralPath $ffprobe -Destination $output
-Get-ChildItem -LiteralPath $bundleBin -Filter '*.dll' | Copy-Item -Destination $output
+# vcruntime140.dll is intentionally excluded here: its only package source is the authorized
+# Visual Studio CRT directory resolved above, never an FFmpeg bundle or Windows system folder.
+Get-ChildItem -LiteralPath $bundleBin -Filter '*.dll' | Where-Object { $_.Name -ine 'vcruntime140.dll' } | Copy-Item -Destination $output
+Copy-Item -LiteralPath $vcRuntimeSource -Destination (Join-Path $output 'vcruntime140.dll')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') -Destination $output
 Copy-Item -LiteralPath (Join-Path $bundleRoot 'LICENSE.txt') -Destination (Join-Path $output 'FFmpeg-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $bundleRoot 'oneVPL-LICENSE.txt') -Destination $output
@@ -174,6 +275,25 @@ Remove-Item -LiteralPath $surfaceSubmissionReportPath -Force -ErrorAction Silent
 Remove-Item -LiteralPath $mediaAcceptanceReportPath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $smokeMediaPath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $smokeExportPath -Force -ErrorAction SilentlyContinue
+$requiredPackagedRuntimes = @(
+    'avcodec-62.dll',
+    'avdevice-62.dll',
+    'avfilter-11.dll',
+    'avformat-62.dll',
+    'avutil-60.dll',
+    'swresample-6.dll',
+    'swscale-9.dll',
+    'libgcc_s_seh-1.dll',
+    'libstdc++-6.dll',
+    'libvpl.dll',
+    'libwinpthread-1.dll',
+    'vcruntime140.dll'
+)
+foreach ($runtimeName in $requiredPackagedRuntimes) {
+    if (-not (Test-Path -LiteralPath (Join-Path $output $runtimeName) -PathType Leaf)) {
+        throw "Packaged Maelstrom runtime is incomplete: $runtimeName is missing beside Maelstrom.exe."
+    }
+}
 $smokeProcess = $null
 try {
     $env:PATH = 'C:\Windows\System32;C:\Windows'

@@ -25,6 +25,7 @@ for %%D in (
     libstdc++-6.dll
     libvpl.dll
     libwinpthread-1.dll
+    vcruntime140.dll
 ) do if not exist "%MAELSTROM_EDITOR_DIR%\%%D" (
     echo Missing required runtime: %%D
     set "MAELSTROM_RUNTIME_MISSING=1"

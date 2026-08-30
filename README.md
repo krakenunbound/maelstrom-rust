@@ -14,7 +14,9 @@ is polished. macOS is out of scope and is not a supported, tested, or completion
 `crates`, shared assets in `assets`, reproducible tooling in `scripts`, and the one user-facing
 Windows package in `dist\Maelstrom-Windows-x64`. `Launch-Maelstrom-Editor.bat` targets that
 package by its full absolute path. Cargo's `target` tree and `test-build` packages are disposable
-generated output and are intentionally excluded from source control.
+generated output and are intentionally excluded from source control. In particular, executables
+under `target\**` (including Cargo's hash-named dependency executables) are unsupported generated
+artifacts, not editor launch targets.
 
 The current runnable slice includes the native splash, local Project Hub, and
 the first functional editor foundation. Local project documents now persist
@@ -29,7 +31,8 @@ remain resident for the future inference engines.
 ```
 
 This is the supported editor entry point; it resolves the packaged executable by its full path and
-preflights every adjacent FFmpeg/MinGW runtime DLL. Developer `cargo run` and `cargo test` binaries
+preflights every adjacent FFmpeg/MinGW and Microsoft VC runtime DLL. Do not launch a generated
+`target\**` executable directly. Developer `cargo run` and `cargo test` binaries
 are routed by `.cargo\config.toml` through `scripts\cargo-runtime-runner.bat`, which prepends the
 project-local runtime and reports an incomplete bundle in the terminal instead of opening a chain
 of Windows missing-DLL dialogs. Neither path installs DLLs into Windows.
@@ -265,6 +268,11 @@ runtime in WSL2, then package against it:
 .\scripts\build-ffmpeg-lgpl-windows.ps1
 .\scripts\package-windows.ps1 -FfmpegBundleRoot .\.deps\ffmpeg-project-8.1
 ```
+
+Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
+AMD64 directory supplied with
+`-VcRedistCrtDirectory` or the newest auto-discovered installed Visual Studio x64
+`Microsoft.VC*.CRT` Redist directory. It never takes that DLL from `System32` or a download.
 
 The WSL build requires `mingw-w64 make cmake ninja-build nasm pkg-config git ca-certificates llvm-19`.
 It pins FFmpeg, nv-codec-headers, and Intel oneVPL by commit, emits MSVC import libraries,

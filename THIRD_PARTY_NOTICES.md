@@ -22,6 +22,17 @@ under the MIT License.
 Other Rust dependencies retain their respective licenses. The distributable
 must include the generated Cargo license inventory before public release.
 
+## Microsoft Visual C++ runtime
+
+Windows packages include `vcruntime140.dll` app-local beside `Maelstrom.exe`. The packaging
+script copies it only from a trusted, operator-supplied authorized AMD64 `Microsoft.VC*.CRT`
+directory
+or from a locally installed Visual Studio x64 Redist directory; it is not committed to this
+repository. Redistribution and use remain subject to Microsoft's applicable license terms.
+
+- Microsoft Visual C++ Redistributable: https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170
+- Microsoft Visual Studio license terms: https://visualstudio.microsoft.com/license-terms/
+
 ## Optional NVIDIA RTX VSR runtime
 
 NVIDIA Video Effects, NGX, TensorRT, and CUDA runtime binaries are not part of the public
