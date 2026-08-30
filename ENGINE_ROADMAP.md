@@ -104,11 +104,13 @@ Build the evidence harness before adding engine complexity.
       orchestrator now repeatedly executes the full six-scenario native matrix and writes one
       versioned report with all available child evidence, aggregate scenario totals, machine/FFmpeg
       identity, and preserved failure details. Runs below 600 seconds are harness checks only; a
-      warm local 2026-08-30 harness check passed for 15.853 seconds, excluding 1.352 seconds of
-      setup, with 6 complete matrix runs, 36 scenario executions, 150 declared work iterations,
-      a Software decoder, and an `h264_mf`
-      encoder recorded in separate fields. A post-run scan found no child-report/process residue.
-      A retained authoritative 600-second result and cross-hardware proof remain open.
+      retained authoritative local 2026-08-30 run passed for 600.343 seconds, excluding 1.357
+      seconds of setup, with 563 complete matrix runs, 3,378 scenario executions, and 14,075
+      declared work iterations. All child reports were hashed and passed; the Software decoder and
+      `h264_mf` encoder were recorded in separate fields with no mixed-role observations. The
+      retained local report SHA-256 is
+      `92ab2cf8cfe464932e1cd0f65aa334f766129c6df2c5207102c7998a58a2006d`. Cross-hardware proof
+      remains open.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,

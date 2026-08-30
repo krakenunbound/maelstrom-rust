@@ -69,11 +69,12 @@ does not display the UI, exercise a live audio device, measure physical GPU
 scanout, replace the packaged playback soak, or satisfy the integrated/discrete
 cross-hardware exit gate by itself.
 
-The warm local harness checkpoint on 2026-08-30 passed for 15.853 seconds,
-excluding 1.352 seconds of setup, with 6 complete matrix runs: 36 scenario
-executions and 150 declared work iterations. Every scenario passed all 6 runs,
-observed the Software decoder and
-`h264_mf` encoder in their separate fields, and correctly reported
-`authoritative: false`. A post-run process and child-artifact scan found no
-residue. This proves repeated orchestration and report replacement, not the
-still-open authoritative 600-second or cross-hardware gate.
+The retained authoritative local checkpoint on 2026-08-30 passed for 600.343
+seconds, excluding 1.357 seconds of setup, with 563 complete matrix runs: 3,378
+scenario executions and 14,075 declared work iterations. Every scenario passed
+all 563 runs. Every child report had a SHA-256, no run or report-read failure was
+recorded, and the Software decoder and `h264_mf` encoder appeared only in their
+separate fields. The report correctly records `authoritative: true`; its SHA-256
+is `92ab2cf8cfe464932e1cd0f65aa334f766129c6df2c5207102c7998a58a2006d`.
+Post-run scans found no sustained child-report or related process residue.
+Integrated/discrete cross-hardware proof remains open.

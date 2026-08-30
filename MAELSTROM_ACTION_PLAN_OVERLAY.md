@@ -166,8 +166,8 @@ Follow `ENGINE_ROADMAP.md`.
 
 - Versioned fixture manifest (codec, rate, GOP, expected failure)
 - Soak: 10 min play plus a separate repeated native matrix for reverse scrub, project switch,
-  offline media, cache pressure, and export cancel. The timed matrix harness exists; retain an
-  authoritative 600-second result before treating this evidence as complete.
+  offline media, cache pressure, and export cancel. The timed matrix has a retained authoritative
+  600-second local result; integrated/discrete cross-hardware evidence remains open.
 - Per-stage timers and drop/hold/late/underrun counters on the HUD
 
 Gate: one report on integrated Intel and one on discrete GPU. Foundation 50k + package gates stay green.
