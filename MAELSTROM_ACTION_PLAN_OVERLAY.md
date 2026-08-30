@@ -181,9 +181,11 @@ Done-ish: adaptive preview, manual quality, per-source slots. The Inspector now 
 per-layer source kind, decoder backend, selected/resolved scale and dimensions, and structured
 fallback state in EN/JA; cache hits remain explicitly unobserved rather than inheriting unrelated
 session provenance.
-Open: UI-present/cross-hardware multi-source proof, live-audio continuity proof, optional user
-proxies/optimized media, and broad VFR/cross-backend proof. Bounded speculative-prewarm-first
-priority/recency session eviction is implemented; strict priority has no age-based fairness guarantee.
+Open: UI-present/cross-hardware multi-source proof, optional user proxies/optimized media, and broad
+VFR/cross-backend proof. A bounded local headless gate now proves real-default-device audio clock
+and consumed-PCM continuity under four concurrent Full-1080p Software decode sources; cross-hardware
+and UI-present audio proof remain open. Bounded speculative-prewarm-first priority/recency session
+eviction is implemented; strict priority has no age-based fairness guarantee.
 
 Gate: four 1080p sources requested at once; timeline latency unchanged; slow source cannot stall the clock.
 

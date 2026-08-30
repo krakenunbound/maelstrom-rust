@@ -92,6 +92,14 @@ const DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 600;
 const MIN_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 15;
 #[cfg(test)]
 const MAX_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 3_600;
+#[cfg(test)]
+const DEFAULT_PHASE1_LIVE_AUDIO_SECONDS: u64 = 5;
+#[cfg(test)]
+const MIN_PHASE1_LIVE_AUDIO_SECONDS: u64 = 2;
+#[cfg(test)]
+const MAX_PHASE1_LIVE_AUDIO_SECONDS: u64 = 30;
+#[cfg(test)]
+const PHASE1_LIVE_AUDIO_WARMUP_RESERVE_SECONDS: u64 = 10;
 
 fn monitor_cache_bytes_from_args(args: impl IntoIterator<Item = String>) -> usize {
     let mut args = args.into_iter();
@@ -7763,6 +7771,26 @@ mod tests {
     }
 
     #[test]
+    fn phase1_live_audio_duration_parser_defaults_and_bounds_explicit_values() {
+        assert_eq!(
+            phase1_live_audio_duration_seconds(None),
+            DEFAULT_PHASE1_LIVE_AUDIO_SECONDS
+        );
+        assert_eq!(
+            phase1_live_audio_duration_seconds(Some("1")),
+            MIN_PHASE1_LIVE_AUDIO_SECONDS
+        );
+        assert_eq!(
+            phase1_live_audio_duration_seconds(Some("999")),
+            MAX_PHASE1_LIVE_AUDIO_SECONDS
+        );
+        assert_eq!(
+            phase1_live_audio_duration_seconds(Some("invalid")),
+            DEFAULT_PHASE1_LIVE_AUDIO_SECONDS
+        );
+    }
+
+    #[test]
     fn phase1_sustained_dropped_frame_limit_keeps_startup_and_rate_bounds() {
         assert_eq!(phase1_sustained_dropped_frame_limit(0), 4);
         assert_eq!(phase1_sustained_dropped_frame_limit(4_000), 4);
@@ -12174,6 +12202,382 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires four dynamic 1920x1080 fixtures, a real default audio output, and MAELSTROM_PHASE1_LIVE_AUDIO_REPORT"]
+    fn supplied_media_four_video_layers_preserve_live_audio_continuity() {
+        const INPUT_TO_SUBMIT_P95_US_LIMIT: u128 = 1_000;
+        const MAX_DEVICE_CLOCK_STALL: Duration = Duration::from_millis(250);
+        const WARMUP_TIMEOUT: Duration = Duration::from_secs(10);
+        const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+        const VIDEO_SAFE_SPAN_TICKS: i64 = 4_000_000;
+        const VIDEO_SAFE_OFFSET_TICKS: i64 = 500_000;
+        // A five-second default run still needs enough samples for nearest-rank p95 to tolerate
+        // ordinary host preemption without masking a sustained scheduler regression.
+        const MONITOR_SUBMIT_INTERVAL: Duration = Duration::from_millis(50);
+        const CLOCK_DRIFT_LIMIT_US: i64 = 250_000;
+        const MIN_MONITOR_REQUESTS_PER_SECOND: u64 = 8;
+        const MIN_PRESENTATIONS_PER_SOURCE_PER_SECOND: u64 = 4;
+
+        let sources = phase1_multisource_sources().expect("validate four Phase 1 source fixtures");
+        let audio_source = phase1_live_audio_source()
+            .expect("validate MAELSTROM_PHASE1_AUDIO_MEDIA audio fixture");
+        let report_path =
+            phase1_live_audio_report_path().expect("validate MAELSTROM_PHASE1_LIVE_AUDIO_REPORT");
+        let requested_duration_seconds = phase1_live_audio_duration_seconds(
+            std::env::var("MAELSTROM_PHASE1_LIVE_AUDIO_SECONDS")
+                .ok()
+                .as_deref(),
+        );
+        let clip_duration_ticks = requested_duration_seconds
+            .saturating_add(PHASE1_LIVE_AUDIO_WARMUP_RESERVE_SECONDS)
+            .saturating_mul(1_000_000)
+            .min(i64::MAX as u64) as i64;
+
+        let mut app = phase1_multisource_app(&sources, MONITOR_LAYER_COUNT);
+        app.editor.add_media_paths([audio_source.path.clone()]);
+        let audio_media_id = app
+            .editor
+            .media
+            .last()
+            .filter(|media| media.path == audio_source.path)
+            .map(|media| media.id)
+            .expect("audio fixture was imported after the four video sources");
+        let audio_track = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Audio)
+            .expect("default editor timeline has an audio track")
+            .id;
+        app.editor
+            .timeline
+            .insert_clip(
+                audio_track,
+                nle_timeline::MediaId(audio_media_id),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(clip_duration_ticks),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert live-audio gate clip");
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+        assert_eq!(app.editor.audio_playback_targets().len(), 1);
+        assert!(
+            app.audio_engine_error.is_none(),
+            "audio initialization failed: {:?}",
+            app.audio_engine_error
+        );
+        assert!(
+            app.audio_engine.is_some(),
+            "real default audio output was not initialized"
+        );
+
+        app.editor.set_playhead(nle_timeline::Tick(0));
+        app.editor.start_playback();
+        app.sync_audio_transport();
+        let callback_before_warmup = app
+            .audio_engine
+            .as_ref()
+            .expect("validated audio engine")
+            .runtime_diagnostics()
+            .output_callback_cpu_timing
+            .samples;
+        let mix_before_warmup = app
+            .audio_engine
+            .as_ref()
+            .expect("validated audio engine")
+            .runtime_diagnostics()
+            .mix_render_cpu_timing
+            .samples;
+        let warmup_deadline = Instant::now() + WARMUP_TIMEOUT;
+        let (source_tick_start, warmup_max_meter) = loop {
+            app.sync_audio_transport();
+            let audio = app.audio_engine.as_ref().expect("validated audio engine");
+            let diagnostics = audio.runtime_diagnostics();
+            let (left, right) = audio.meter_levels();
+            let meter = left.abs().max(right.abs());
+            if let Some(source_tick) = audio.playback_source_tick()
+                && app.audio_transport.is_some()
+                && diagnostics.output_callback_cpu_timing.samples > callback_before_warmup
+                && diagnostics.mix_render_cpu_timing.samples > mix_before_warmup
+                && meter > 0.000_1
+            {
+                break (source_tick, meter);
+            }
+            assert!(
+                app.audio_engine_error.is_none(),
+                "audio reported an error during live-audio warmup: {:?}",
+                app.audio_engine_error
+            );
+            assert!(
+                Instant::now() < warmup_deadline,
+                "live audio did not establish transport, advancing callback/mix samples, and a nonzero meter within {} ms",
+                WARMUP_TIMEOUT.as_millis()
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        let baseline_runtime_diagnostics =
+            RuntimeDiagnosticsReport::from(app.runtime_diagnostics());
+        let baseline_audio_diagnostics = app
+            .audio_engine
+            .as_ref()
+            .expect("validated audio engine")
+            .runtime_diagnostics();
+        let measured_started_at = Instant::now();
+        let measured_deadline =
+            measured_started_at + Duration::from_secs(requested_duration_seconds);
+        let mut next_monitor_submit = measured_started_at;
+        let mut input_to_submit_us = Vec::new();
+        let mut source_exercise_counts = [0_u64; MONITOR_LAYER_COUNT];
+        let mut last_presented_source_ticks = [None; MONITOR_LAYER_COUNT];
+        let mut max_device_clock_stall = Duration::ZERO;
+        let mut last_clock_tick = source_tick_start;
+        let mut last_clock_advance_at = measured_started_at;
+        let mut max_meter = 0.0_f32;
+        let mut final_meter = 0.0_f32;
+        let mut meter_observation_count = 0_u64;
+        let mut nonzero_meter_observation_count = 0_u64;
+        let mut transport_lost = false;
+
+        while Instant::now() < measured_deadline {
+            app.sync_audio_transport();
+            let now = Instant::now();
+            let audio = app.audio_engine.as_ref().expect("validated audio engine");
+            let (left, right) = audio.meter_levels();
+            final_meter = left.abs().max(right.abs());
+            max_meter = max_meter.max(final_meter);
+            meter_observation_count = meter_observation_count.saturating_add(1);
+            if final_meter > 0.000_1 {
+                nonzero_meter_observation_count = nonzero_meter_observation_count.saturating_add(1);
+            }
+            let source_tick = audio.playback_source_tick();
+            transport_lost |= app.audio_transport.is_none() || app.audio_engine_error.is_some();
+            if let Some(source_tick) = source_tick {
+                if source_tick > last_clock_tick {
+                    // Include the whole wall interval preceding this progress sample. Otherwise a
+                    // long blocking decoder/poll call followed by one advancing device callback
+                    // could reset the clock marker and hide the stall.
+                    max_device_clock_stall =
+                        max_device_clock_stall.max(now.duration_since(last_clock_advance_at));
+                    last_clock_tick = source_tick;
+                    last_clock_advance_at = now;
+                } else {
+                    max_device_clock_stall =
+                        max_device_clock_stall.max(now.duration_since(last_clock_advance_at));
+                }
+                if now >= next_monitor_submit {
+                    let video_tick = VIDEO_SAFE_OFFSET_TICKS
+                        .saturating_add(source_tick.rem_euclid(VIDEO_SAFE_SPAN_TICKS));
+                    let mut request = preview_request(&app.editor);
+                    request.playhead_tick = video_tick;
+                    request.output_size = [1920, 1080];
+                    for source in request.sources.iter_mut().flatten() {
+                        source.source_tick = video_tick;
+                    }
+                    assert_eq!(request.selected_quality, PreviewQuality::Full);
+                    assert_eq!(request.resolved_quality, PreviewQuality::Full);
+                    let submitted_at = Instant::now();
+                    app.submit_monitor_decode_request(request);
+                    input_to_submit_us.push(submitted_at.elapsed().as_micros());
+                    next_monitor_submit = now + MONITOR_SUBMIT_INTERVAL;
+                }
+            } else {
+                transport_lost = true;
+            }
+            app.poll_monitor_decoder();
+            for layer in 0..MONITOR_LAYER_COUNT {
+                if let Some(frame) = app.editor.monitor_frame_for_layer(layer)
+                    && frame.media_id == Some(layer as u32 + 1)
+                    && (frame.width, frame.height) == (1920, 1080)
+                    && last_presented_source_ticks[layer] != frame.source_tick.map(|tick| tick.0)
+                {
+                    last_presented_source_ticks[layer] = frame.source_tick.map(|tick| tick.0);
+                    source_exercise_counts[layer] += 1;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        max_device_clock_stall =
+            max_device_clock_stall.max(Instant::now().duration_since(last_clock_advance_at));
+        // End while the four-source workload is still live. Requiring the final supersedable
+        // monitor request to settle would turn normal end-of-load cancellation into an audio
+        // continuity failure and extend the measured device interval by the teardown timeout.
+        app.sync_audio_transport();
+        app.poll_monitor_decoder();
+        let actual_duration_seconds = measured_started_at.elapsed().as_secs_f64();
+        let final_resources = aggregate_playback_soak_monitor_resources(
+            &app.monitor_frame_cache_pool,
+            app.monitor_session_pool.diagnostics(),
+            app.monitor_source_coordinator.diagnostics(),
+        );
+        let audio = app.audio_engine.as_ref().expect("validated audio engine");
+        let final_audio_diagnostics = audio.runtime_diagnostics();
+        let source_tick_end = audio.playback_source_tick().unwrap_or(last_clock_tick);
+        let source_tick_delta = source_tick_end.saturating_sub(source_tick_start);
+        let expected_source_tick_delta = (actual_duration_seconds * 1_000_000.0).round() as i64;
+        let clock_drift_us = source_tick_delta
+            .saturating_sub(expected_source_tick_delta)
+            .abs();
+        let runtime_diagnostics_delta = RuntimeDiagnosticsReport::from(app.runtime_diagnostics())
+            .delta_since(baseline_runtime_diagnostics);
+        let callback_sample_delta = final_audio_diagnostics
+            .output_callback_cpu_timing
+            .samples
+            .saturating_sub(
+                baseline_audio_diagnostics
+                    .output_callback_cpu_timing
+                    .samples,
+            );
+        let mix_sample_delta = final_audio_diagnostics
+            .mix_render_cpu_timing
+            .samples
+            .saturating_sub(baseline_audio_diagnostics.mix_render_cpu_timing.samples);
+        let audio_counter_delta = Phase1LiveAudioCounterDelta {
+            callback_lock_failures: final_audio_diagnostics
+                .callback_lock_failures
+                .saturating_sub(baseline_audio_diagnostics.callback_lock_failures),
+            underrun_device_frames: final_audio_diagnostics
+                .underrun_device_frames
+                .saturating_sub(baseline_audio_diagnostics.underrun_device_frames),
+            late_decoded_frames_discarded: final_audio_diagnostics
+                .late_decoded_frames_discarded
+                .saturating_sub(baseline_audio_diagnostics.late_decoded_frames_discarded),
+        };
+        let observed_decoder_backends = app.observed_decoder_backends.clone();
+        let submission_distribution =
+            phase1_latency_distribution(input_to_submit_us.iter().copied());
+        let monitor_request_count = input_to_submit_us.len() as u64;
+        let minimum_monitor_request_count =
+            requested_duration_seconds.saturating_mul(MIN_MONITOR_REQUESTS_PER_SECOND);
+        let minimum_presentations_per_source =
+            requested_duration_seconds.saturating_mul(MIN_PRESENTATIONS_PER_SOURCE_PER_SECOND);
+        let submitted_monitor_layer_requests =
+            monitor_request_count.saturating_mul(MONITOR_LAYER_COUNT as u64);
+        let minimum_monitor_layer_requests =
+            minimum_monitor_request_count.saturating_mul(MONITOR_LAYER_COUNT as u64);
+        let minimum_nonzero_meter_observations =
+            meter_observation_count.saturating_mul(9).div_ceil(10);
+        let resources_bounded = phase1_live_audio_resources_are_bounded(&final_resources);
+        let audio_error = app.audio_engine_error.clone();
+        let passed_before_drop = actual_duration_seconds >= requested_duration_seconds as f64
+            && monitor_request_count >= minimum_monitor_request_count
+            && source_exercise_counts
+                .iter()
+                .all(|count| *count >= minimum_presentations_per_source)
+            && source_tick_delta > 0
+            && clock_drift_us <= CLOCK_DRIFT_LIMIT_US
+            && callback_sample_delta > 0
+            && mix_sample_delta > 0
+            && max_meter > 0.000_1
+            && final_meter > 0.000_1
+            && meter_observation_count > 0
+            && nonzero_meter_observation_count >= minimum_nonzero_meter_observations
+            && max_device_clock_stall <= MAX_DEVICE_CLOCK_STALL
+            && submission_distribution.p95 <= INPUT_TO_SUBMIT_P95_US_LIMIT
+            && !transport_lost
+            && audio_error.is_none()
+            && audio_counter_delta.callback_lock_failures == 0
+            && audio_counter_delta.underrun_device_frames == 0
+            && audio_counter_delta.late_decoded_frames_discarded == 0
+            && runtime_diagnostics_delta.monitor_requests >= minimum_monitor_layer_requests
+            && runtime_diagnostics_delta.monitor_requests <= submitted_monitor_layer_requests
+            && runtime_diagnostics_delta
+                .monitor_requests
+                .is_multiple_of(MONITOR_LAYER_COUNT as u64)
+            && runtime_diagnostics_delta.monitor_completed_frames
+                >= minimum_presentations_per_source.saturating_mul(MONITOR_LAYER_COUNT as u64)
+            && runtime_diagnostics_delta.monitor_presented_frames
+                >= minimum_presentations_per_source.saturating_mul(MONITOR_LAYER_COUNT as u64)
+            && runtime_diagnostics_delta.monitor_errors == 0
+            && !observed_decoder_backends.is_empty()
+            && resources_bounded;
+
+        // This is deliberately a pause, not an editor/playhead reset: the release check must not
+        // disguise a transport discontinuity by seeking before decoder workers are torn down.
+        app.editor.playing = false;
+        app.sync_audio_transport();
+        let monitor_session_pool = app.monitor_session_pool.clone();
+        drop(app);
+        let release_deadline = Instant::now() + RELEASE_TIMEOUT;
+        let post_drop_active_sessions = loop {
+            let active = monitor_session_pool.diagnostics().active_sticky_sessions;
+            if active == 0 {
+                break active;
+            }
+            assert!(
+                Instant::now() < release_deadline,
+                "monitor decoder sessions remained active after live-audio App drop: {active}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        let passed = passed_before_drop && post_drop_active_sessions == 0;
+        let report = Phase1LiveAudioReport {
+            schema_version: 1,
+            status: if passed { "passed" } else { "failed" },
+            requested_duration_seconds,
+            actual_duration_seconds,
+            source_count: sources.len(),
+            video_sources: sources,
+            audio_source,
+            clip_duration_ticks,
+            audio_target_count: 1,
+            source_exercise_counts,
+            source_tick_start,
+            source_tick_end,
+            source_tick_delta,
+            expected_source_tick_delta,
+            clock_drift_us,
+            clock_drift_limit_us: CLOCK_DRIFT_LIMIT_US,
+            callback_sample_delta,
+            mix_sample_delta,
+            max_device_clock_stall_ms: max_device_clock_stall.as_millis(),
+            max_device_clock_stall_limit_ms: MAX_DEVICE_CLOCK_STALL.as_millis(),
+            warmup_max_meter,
+            max_meter,
+            final_meter,
+            meter_observation_count,
+            nonzero_meter_observation_count,
+            minimum_nonzero_meter_observations,
+            monitor_request_count,
+            minimum_monitor_request_count,
+            minimum_presentations_per_source,
+            input_to_submit_p95_us_limit: INPUT_TO_SUBMIT_P95_US_LIMIT,
+            input_to_submit_samples_us: input_to_submit_us,
+            input_to_submit_us: submission_distribution,
+            runtime_diagnostics_delta,
+            audio_counter_delta,
+            transport_lost,
+            audio_error,
+            monitor_resources: final_resources,
+            observed_decoder_backends,
+            post_drop_active_sessions,
+        };
+        phase1_multisource_write_report(&report_path, &report)
+            .expect("atomically write Phase 1 live-audio report");
+        assert!(
+            passed,
+            "four-source live-audio gate failed: duration={:.3}s sources={:?} tick_delta={} callback_delta={} mix_delta={} meter={} stall={}ms p95={}us transport_lost={} audio_error={:?} audio_delta={:?} resources={:?} post_drop={}; report written to {}",
+            report.actual_duration_seconds,
+            report.source_exercise_counts,
+            report
+                .source_tick_end
+                .saturating_sub(report.source_tick_start),
+            report.callback_sample_delta,
+            report.mix_sample_delta,
+            report.max_meter,
+            report.max_device_clock_stall_ms,
+            report.input_to_submit_us.p95,
+            report.transport_lost,
+            report.audio_error,
+            report.audio_counter_delta,
+            report.monitor_resources,
+            report.post_drop_active_sessions,
+            report_path.display(),
+        );
+    }
+
+    #[test]
     fn supplied_media_missing_upper_layer_does_not_block_ready_lower_layer() {
         let Some(path) = std::env::var_os("MAELSTROM_TEST_MEDIA") else {
             return;
@@ -12514,7 +12918,7 @@ mod tests {
         scenarios: Vec<Phase0ScenarioReport>,
     }
 
-    #[derive(Serialize)]
+    #[derive(Clone, Serialize)]
     struct Phase1MultisourceSource {
         path: PathBuf,
         size_bytes: u64,
@@ -12628,6 +13032,56 @@ mod tests {
         post_drop_active_sessions: usize,
     }
 
+    #[derive(Clone, Copy, Debug, Serialize)]
+    struct Phase1LiveAudioCounterDelta {
+        callback_lock_failures: u64,
+        underrun_device_frames: u64,
+        late_decoded_frames_discarded: u64,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1LiveAudioReport {
+        schema_version: u32,
+        status: &'static str,
+        requested_duration_seconds: u64,
+        actual_duration_seconds: f64,
+        source_count: usize,
+        video_sources: Vec<Phase1MultisourceSource>,
+        audio_source: Phase1MultisourceSource,
+        clip_duration_ticks: i64,
+        audio_target_count: usize,
+        source_exercise_counts: [u64; MONITOR_LAYER_COUNT],
+        source_tick_start: i64,
+        source_tick_end: i64,
+        source_tick_delta: i64,
+        expected_source_tick_delta: i64,
+        clock_drift_us: i64,
+        clock_drift_limit_us: i64,
+        callback_sample_delta: u64,
+        mix_sample_delta: u64,
+        max_device_clock_stall_ms: u128,
+        max_device_clock_stall_limit_ms: u128,
+        warmup_max_meter: f32,
+        max_meter: f32,
+        final_meter: f32,
+        meter_observation_count: u64,
+        nonzero_meter_observation_count: u64,
+        minimum_nonzero_meter_observations: u64,
+        monitor_request_count: u64,
+        minimum_monitor_request_count: u64,
+        minimum_presentations_per_source: u64,
+        input_to_submit_p95_us_limit: u128,
+        input_to_submit_samples_us: Vec<u128>,
+        input_to_submit_us: Phase1LatencyDistribution,
+        runtime_diagnostics_delta: RuntimeDiagnosticsReport,
+        audio_counter_delta: Phase1LiveAudioCounterDelta,
+        transport_lost: bool,
+        audio_error: Option<String>,
+        monitor_resources: PlaybackSoakMonitorResources,
+        observed_decoder_backends: Vec<String>,
+        post_drop_active_sessions: usize,
+    }
+
     fn phase0_required_absolute_path(name: &str) -> Result<PathBuf, String> {
         let path = std::env::var_os(name)
             .map(PathBuf::from)
@@ -12720,6 +13174,41 @@ mod tests {
         Ok(path)
     }
 
+    fn phase1_live_audio_report_path() -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path("MAELSTROM_PHASE1_LIVE_AUDIO_REPORT")?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE1_LIVE_AUDIO_REPORT must end in .json".to_owned());
+        }
+        let parent = path.parent().ok_or_else(|| {
+            "MAELSTROM_PHASE1_LIVE_AUDIO_REPORT has no parent directory".to_owned()
+        })?;
+        if !parent.is_dir() {
+            return Err(format!(
+                "MAELSTROM_PHASE1_LIVE_AUDIO_REPORT parent does not exist: {}",
+                parent.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    fn phase1_live_audio_source() -> Result<Phase1MultisourceSource, String> {
+        let path = phase0_required_absolute_file("MAELSTROM_PHASE1_AUDIO_MEDIA")?
+            .canonicalize()
+            .map_err(|error| {
+                format!("could not canonicalize MAELSTROM_PHASE1_AUDIO_MEDIA: {error}")
+            })?;
+        let size_bytes = fs::metadata(&path)
+            .map_err(|error| format!("could not stat MAELSTROM_PHASE1_AUDIO_MEDIA: {error}"))?
+            .len();
+        if size_bytes == 0 {
+            return Err(format!(
+                "MAELSTROM_PHASE1_AUDIO_MEDIA names an empty source: {}",
+                path.display()
+            ));
+        }
+        Ok(Phase1MultisourceSource { path, size_bytes })
+    }
+
     fn phase1_sustained_duration_seconds(value: Option<&str>) -> u64 {
         value
             .and_then(|value| value.parse::<u64>().ok())
@@ -12730,8 +13219,31 @@ mod tests {
             )
     }
 
+    fn phase1_live_audio_duration_seconds(value: Option<&str>) -> u64 {
+        value
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PHASE1_LIVE_AUDIO_SECONDS)
+            .clamp(MIN_PHASE1_LIVE_AUDIO_SECONDS, MAX_PHASE1_LIVE_AUDIO_SECONDS)
+    }
+
     fn phase1_sustained_dropped_frame_limit(expected_requests: u64) -> u64 {
         expected_requests.div_ceil(1_000).max(4)
+    }
+
+    fn phase1_live_audio_resources_are_bounded(resources: &PlaybackSoakMonitorResources) -> bool {
+        resources.current_frame_cache_bytes <= resources.frame_cache_capacity_bytes
+            && resources.peak_frame_cache_bytes_upper_bound <= resources.frame_cache_capacity_bytes
+            && resources.active_sticky_sessions
+                == resources.active_foreground_sessions + resources.active_background_sessions
+            && resources.session_cap
+                == resources.foreground_session_cap + resources.background_session_cap
+            && resources.active_sticky_sessions <= resources.session_cap
+            && resources.peak_sticky_sessions <= resources.session_cap
+            && resources.active_foreground_sessions <= resources.foreground_session_cap
+            && resources.active_background_sessions <= resources.background_session_cap
+            && resources.live_source_groups <= resources.source_group_cap
+            && resources.live_lane_actors + resources.retiring_lane_actors
+                <= resources.lane_actor_cap
     }
 
     fn phase1_multisource_app(sources: &[Phase1MultisourceSource], source_count: usize) -> App {

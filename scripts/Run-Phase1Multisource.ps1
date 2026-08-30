@@ -59,8 +59,7 @@ function Assert-JsonIntegerProperty {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction Stop
-$cargoExecutable = [IO.Path]::GetFullPath($cargoCommand.Source)
+$cargoExecutable = 'C:\Users\The Kraken\.cargo\bin\cargo.exe'
 $ffmpegRoot = Join-Path $repoRoot '.deps\ffmpeg-project-8.1'
 $ffmpeg = Join-Path $ffmpegRoot 'bin\ffmpeg.exe'
 $ffprobe = Join-Path $ffmpegRoot 'bin\ffprobe.exe'
@@ -89,6 +88,9 @@ if ([IO.Path]::GetExtension($resolvedReportPath) -ine '.json') {
 }
 if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
     throw "Missing pinned FFmpeg 8.1 binaries below $ffmpegRoot\bin."
+}
+if (-not (Test-Path -LiteralPath $cargoExecutable -PathType Leaf)) {
+    throw "Missing pinned Cargo executable: $cargoExecutable"
 }
 if (-not (Test-Path -LiteralPath $libclang -PathType Leaf)) {
     throw "Missing local libclang required by native FFmpeg bindings: $libclang"

@@ -297,8 +297,16 @@ Exit gate:
       working-set growth. After exact rational source-rate propagation, the bounded four-source
       gate passed again on 2026-08-30 at 125 us submission / 75 ms all-frames-ready, and the
       interleaved 20-trial comparison passed at 140 us scheduler p95 / 82 ms frame-ready p95.
-      The exit remains
-      open for realtime UI-present and cross-hardware proof; see `docs/phase1-sustained-soak.md`.
+      A fourth opt-in headless gate now opens the real default audio output, proves consumed
+      nonzero PCM only after transport warmup, and keeps that native device clock continuous while
+      four independent Full-1080p requests remain active. Its 2026-08-30 local Software-backend run
+      passed for 5.002 seconds with 500 callback/mix samples, 5,000,000 us of device-clock advance,
+      1,813 us wall/device drift, a 22 ms maximum progress interval, 98 submissions / 388 accepted
+      and presented layer frames (97 per source), 153 us scheduler p95, nonzero meter evidence in
+      all 1,632 measured observations including the final sample, zero post-warmup underruns,
+      callback lock failures, late audio discards, or monitor errors, and zero post-drop sessions.
+      The exit remains open for realtime UI-present and cross-hardware proof; see
+      `docs/phase1-sustained-soak.md` and `docs/phase1-live-audio.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
       A deterministic test-only decoder barrier proves an independently scheduled ready source can
       complete while another decoder worker is blocked; this is not yet a real-media latency or
