@@ -212,6 +212,16 @@ Exit gate:
       The same test passed before and after that run. Preserve and diagnose this intermittent
       failure using `artifacts/phase1-multisource/shared-clip-export-stall/`; do not treat the
       serial pass as closure of the export reliability gate.
+      Follow-up reproduced the saved command without Rust: six of twenty runs timed out at
+      the unbounded `apad`/timestamp-trim boundary. Final mixed audio and silence now use finite
+      48 kHz sample padding/trimming plus a sample-derived clock. Twenty corrected saved-command
+      runs and twenty production crossfade tests pass; saved outputs are byte-identical to a
+      successful original run. Deterministic missing/negative-clock and empty-input regressions
+      fail with the old boundary and pass with the fix. Stderr retention is bounded to 64 KiB,
+      and polling errors clean up the exact child/readers. See `docs/audio-export-boundary.md`.
+      Three consecutive parallel release workspace runs passed 720 tests each; strict
+      all-target workspace Clippy and independent review passed.
+      The specific local export failure is repaired; live/cross-hardware/soak gates remain open.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope

@@ -203,6 +203,14 @@ still-image clips, or active unmapped audio effects stay
 disabled in the UI and are also rejected by the worker, so unsupported state cannot silently
 disappear from the output.
 
+The final export mix pads and trims to an explicit 48 kHz sample count, rounded up from the project
+duration, then generates timestamps from emitted samples. Missing or negative end-of-stream
+timestamps cannot turn trailing silence into unlimited output. This boundary also applies to
+generated silence; authored source offsets, delay samples, and crossfade/DSP behavior are unchanged.
+FFmpeg stderr is continuously drained into a bounded 64 KiB tail. Cancellation and OS polling
+errors release the exact child and join its pipe readers. See `docs/audio-export-boundary.md` for
+the reproduced failure, corrected output equivalence, and finite-clock regression evidence.
+
 Every viewer update is first described by immutable, allocation-free preview metadata: sequence
 generation, playhead, selected and resolved quality, output size, and ordered source/priority
 slots. Full uses the quantized physical viewer raster (logical bounds multiplied by display scale),

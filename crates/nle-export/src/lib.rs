@@ -5,7 +5,7 @@
 //! enters this crate.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -1393,13 +1393,15 @@ fn build_ffmpeg_job_with_title_assets(
     }
     if audio_labels.is_empty() {
         filters.push(format!(
-            "anullsrc=r=48000:cl=stereo,atrim=duration={duration}[aout]"
+            "anullsrc=r=48000:cl=stereo,{}[aout]",
+            audio_output_boundary(plan.duration)
         ));
     } else {
         filters.push(format!(
-            "{}amix=inputs={}:normalize=0,apad,atrim=duration={duration}[aout]",
+            "{}amix=inputs={}:normalize=0,{}[aout]",
             audio_labels.join(""),
-            audio_labels.len()
+            audio_labels.len(),
+            audio_output_boundary(plan.duration)
         ));
     }
     args.extend([
@@ -1560,6 +1562,17 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: f64, label: &str) -> S
         video.quad.opacity,
         tick_seconds(video.timeline_start),
     )
+}
+
+/// The mixed stream already contains timeline gaps as samples. Bound padding
+/// and trimming by sample count, then rebuild its clock, so missing/invalid EOF
+/// timestamps cannot turn trailing silence into an unbounded export.
+fn audio_output_boundary(duration: Tick) -> String {
+    // Round up to cover the final partial sample (less than 1/48000 second).
+    // i128 avoids overflowing on long project durations before rescaling.
+    let samples = (i128::from(duration.0.max(0)) * 48_000 + i128::from(PROJECT_TIMEBASE) - 1)
+        / i128::from(PROJECT_TIMEBASE);
+    format!("apad=whole_len={samples},atrim=end_sample={samples},asetpts=N/SR/TB")
 }
 
 fn audio_filter(input: Option<usize>, audio: &AudioClipPlan, label: &str) -> String {
@@ -2150,19 +2163,41 @@ fn run_child_with_encoder(
             let _ = line_tx.send(line);
         }
     });
-    let stderr_join = thread::spawn(move || {
-        let mut text = String::new();
-        let _ = BufReader::new(stderr).read_to_string(&mut text);
-        text
-    });
-    let status = wait_for_child(&mut child, &line_rx, duration, cancel, events, notify)?;
+    let stderr_join = thread::spawn(move || read_stderr_tail(stderr));
+    let status = wait_for_child(&mut child, &line_rx, duration, cancel, events, notify);
+    if status.is_err() {
+        // Even an OS polling error must release the exact child and its pipes.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     let _ = stdout_join.join();
     let stderr = stderr_join.join().unwrap_or_default();
-    if status.success() {
+    if status?.success() {
         Ok(())
     } else {
-        Err(last_error_lines(&stderr))
+        Err(last_error_lines(&String::from_utf8_lossy(&stderr)))
     }
+}
+
+const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// Always drain FFmpeg diagnostics, but retain only a bounded tail. A stream of
+/// repeated timestamp warnings must not grow the application's memory forever.
+fn read_stderr_tail(mut reader: impl Read) -> Vec<u8> {
+    let mut tail = VecDeque::with_capacity(MAX_STDERR_TAIL_BYTES);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let excess = (tail.len() + count).saturating_sub(MAX_STDERR_TAIL_BYTES);
+        tail.drain(..excess);
+        tail.extend(&buffer[..count]);
+    }
+    tail.into_iter().collect()
 }
 
 fn wait_for_child(
@@ -2266,6 +2301,9 @@ fn last_error_lines(stderr: &str) -> String {
 }
 
 #[cfg(test)]
+mod audio_boundary_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nle_compositor::video_fade_opacity;
@@ -2285,10 +2323,39 @@ mod tests {
     // Serialize only these external-process tests; ordinary pure-Rust tests remain parallel.
     static REAL_FFMPEG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn real_ffmpeg_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn real_ffmpeg_test_guard() -> std::sync::MutexGuard<'static, ()> {
         REAL_FFMPEG_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn ffmpeg_error_reader_drains_large_logs_but_retains_only_a_bounded_tail() {
+        let final_errors = b"\nfirst\nsecond\nthird\nfinal error\n";
+        let input = std::io::repeat(b'x')
+            .take((MAX_STDERR_TAIL_BYTES * 256) as u64)
+            .chain(final_errors.as_slice());
+        let tail = read_stderr_tail(input);
+        assert_eq!(tail.len(), MAX_STDERR_TAIL_BYTES);
+        assert!(tail.ends_with(final_errors));
+        assert_eq!(
+            last_error_lines(&String::from_utf8_lossy(&tail)),
+            "first | second | third | final error"
+        );
+    }
+
+    #[test]
+    fn ffmpeg_error_reader_preserves_empty_short_and_non_utf8_diagnostics() {
+        assert_eq!(
+            last_error_lines(&String::from_utf8_lossy(&read_stderr_tail(&b""[..]))),
+            "FFmpeg exited without an error message"
+        );
+        let input = b"codec failed: \xff\npath: \xe6\xb5\xb7\n";
+        assert_eq!(read_stderr_tail(input.as_slice()), input);
+        assert_eq!(
+            last_error_lines(&String::from_utf8_lossy(input)),
+            "codec failed: \u{fffd} | path: 海"
+        );
     }
 
     impl Drop for TempFiles {
