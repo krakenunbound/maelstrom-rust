@@ -8,9 +8,9 @@ pub use editor::{
     EditorState, EditorViewSnapshot, EditorWorkspace, EguiTimelineCanvas, EguiViewerCanvas,
     InvalidProjectFrameRate, MediaId, MediaKind, MediaMetadata, MediaStreamMetadata, MonitorFrame,
     PREVIEW_VIDEO_LAYER_COUNT, PreviewQuality, ProjectFrameRate, RuntimeDiagnostics,
-    TimelineCanvas, TimelineFlag, TimelineMarker, TimelineTool, TimelineTrackDensity,
-    TrackHeightSnapshot, VideoStripLayout, ViewerCanvas, classify_path, show_editor,
-    show_editor_with_canvases, show_editor_with_timeline_canvas,
+    SourceFrameRate, TimelineCanvas, TimelineFlag, TimelineMarker, TimelineTool,
+    TimelineTrackDensity, TrackHeightSnapshot, VideoStripLayout, ViewerCanvas, classify_path,
+    show_editor, show_editor_with_canvases, show_editor_with_timeline_canvas,
 };
 
 use egui::{

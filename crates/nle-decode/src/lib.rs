@@ -35,7 +35,6 @@ const LOW_LATENCY_DECODE_THREADS: usize = 2;
 const MONITOR_WORKER_COUNT: usize = 4;
 const SPARSE_CACHE_INTERVAL_TICKS: i64 = 250_000;
 const SCRUB_CACHE_INTERVAL_TICKS: i64 = 50_000;
-const SCRUB_CACHE_TOLERANCE_TICKS: i64 = 50_000;
 const MAX_SCRUB_CACHE_INDEX_ENTRIES: usize = 1_024;
 const MAX_CACHE_STREAM_STATES: usize = 4_096;
 const MAX_SOURCE_ACTOR_CLIENTS: usize = 64;
@@ -568,8 +567,9 @@ pub struct DecodeRequest {
     /// Publishes timed intermediate frames while a scrub traverses an inter-frame GOP.
     /// Frames between publication intervals remain decode-only and avoid scaling/copying work.
     pub progressive_scrub_frames: bool,
-    /// Probed average source-frame duration. When known, scrub cache lookup never substitutes a
-    /// frame more than one source frame after the requested timestamp.
+    /// Probed source-frame duration. When known, scrub cache lookup may reuse the first frame no
+    /// more than one source frame after the requested timestamp. `None` permits exact matches only;
+    /// it must not invent a constant-rate tolerance for unknown or variable timing.
     pub source_frame_duration_tick: Option<i64>,
     pub acceleration: AccelerationPreference,
 }
@@ -1771,7 +1771,7 @@ impl MonitorFrameCache {
         let tolerance = request
             .source_frame_duration_tick
             .filter(|duration| *duration > 0)
-            .unwrap_or(SCRUB_CACHE_TOLERANCE_TICKS);
+            .unwrap_or_default();
         let upper = target.saturating_add(tolerance);
         let key = self
             .scrub_frames
@@ -5061,14 +5061,20 @@ mod tests {
             },
         );
 
+        assert!(
+            cache.get_scrub_at_or_after(&desired).is_none(),
+            "unknown timing must not substitute a future frame from an invented CFR window"
+        );
+        desired.source_tick = 1_000_000;
         assert_eq!(
             cache
                 .get_scrub_at_or_after(&desired)
-                .expect("nearby future traversal frame")
+                .expect("an exact unknown-timing cache match remains reusable")
                 .source_tick,
             1_000_000
         );
         desired.source_frame_duration_tick = Some(33_334);
+        desired.source_tick = 950_000;
         assert!(
             cache.get_scrub_at_or_after(&desired).is_none(),
             "known-rate cache lookup must not jump more than one source frame"
@@ -5086,7 +5092,7 @@ mod tests {
         assert_eq!(
             cache
                 .get_scrub_at_or_after(&desired)
-                .expect("fallback-rate cache lookup stays within one fallback frame")
+                .expect("known high-rate cache lookup stays within one source frame")
                 .source_tick,
             1_000_000
         );

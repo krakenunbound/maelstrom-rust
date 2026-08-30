@@ -803,9 +803,10 @@ fn should_retain_close_full_monitor_frame(
     media_id: u32,
     target_source_tick: i64,
     full_size: (u32, u32),
-    source_frame_tolerance: i64,
+    source_frame_tolerance: Option<i64>,
 ) -> bool {
     current.is_some_and(|(current_media_id, current_tick, width, height)| {
+        let source_frame_tolerance = source_frame_tolerance.unwrap_or_default();
         current_media_id == media_id
             && (width, height) == full_size
             && current_tick.abs_diff(target_source_tick) <= source_frame_tolerance.max(0) as u64
@@ -1040,7 +1041,7 @@ struct MonitorRequestKey {
     is_scrubbing: bool,
     prewarm_scrub_workers: bool,
     high_quality_scaling: bool,
-    source_frame_rate_millihz: Option<u32>,
+    source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
 }
 
 /// Decoder ownership is keyed separately from output policy.  Changing dimensions, scrub
@@ -1075,7 +1076,7 @@ struct PreviewSourceRequest {
     clip_id: nle_timeline::ClipId,
     media_id: u32,
     source_tick: i64,
-    source_frame_rate_millihz: Option<u32>,
+    source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
 }
 
 /// Lightweight audio scheduling metadata. Paths, effect stacks, and gains remain owned by the
@@ -1136,7 +1137,7 @@ fn preview_request(editor: &EditorState) -> PreviewRequest {
             clip_id: target.clip_id,
             media_id: target.media_id,
             source_tick: target.decode_tick.0,
-            source_frame_rate_millihz: target.source_frame_rate_millihz,
+            source_frame_rate: target.source_frame_rate,
         });
     }
     let mut audio_sources = [None; MAX_PREVIEW_AUDIO_SOURCES];
@@ -1169,34 +1170,37 @@ fn preview_request(editor: &EditorState) -> PreviewRequest {
     }
 }
 
-const FALLBACK_SCRUB_RATE_MILLIHZ: u32 = 120_000;
-
 /// Monitor seeks address source frames rather than arbitrary microseconds. This preserves 60/120
 /// fps media inside a 30 fps project, prevents redundant micro-seeks, and keeps the exact same
 /// frame grid when a scrub gesture is released.
 fn monitor_source_tick_for_preview(
     source_tick: i64,
-    source_frame_rate_millihz: Option<u32>,
+    source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
 ) -> i64 {
     let source_tick = source_tick.max(0);
-    let source_rate = source_frame_rate_millihz
-        .filter(|rate| *rate > 0)
-        .unwrap_or(FALLBACK_SCRUB_RATE_MILLIHZ);
-    let rate = u128::from(source_rate);
+    let Some(source_rate) = source_frame_rate else {
+        return source_tick;
+    };
     let source_tick = source_tick as u128;
-    let ticks_per_second_milli = 1_000_000_000_u128;
-    let frame = source_tick.saturating_mul(rate) / ticks_per_second_milli;
-    (frame.saturating_mul(ticks_per_second_milli) / rate).min(i64::MAX as u128) as i64
+    let numerator = u128::from(source_rate.numerator());
+    let frame_ticks = 1_000_000_u128 * u128::from(source_rate.denominator());
+    let frame = source_tick.saturating_mul(numerator) / frame_ticks;
+    frame
+        .saturating_mul(frame_ticks)
+        .div_ceil(numerator)
+        .min(i64::MAX as u128) as i64
 }
 
-fn monitor_source_frame_duration_tick(source_frame_rate_millihz: Option<u32>) -> Option<i64> {
-    let rate = u128::from(
-        source_frame_rate_millihz
-            .filter(|rate| *rate > 0)
-            .unwrap_or(FALLBACK_SCRUB_RATE_MILLIHZ),
-    );
-    let ticks_per_second_milli = 1_000_000_000_u128;
-    Some(ticks_per_second_milli.div_ceil(rate).min(i64::MAX as u128) as i64)
+fn monitor_source_frame_duration_tick(
+    source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
+) -> Option<i64> {
+    let source_rate = source_frame_rate?;
+    let frame_ticks = 1_000_000_u128 * u128::from(source_rate.denominator());
+    Some(
+        frame_ticks
+            .div_ceil(u128::from(source_rate.numerator()))
+            .min(i64::MAX as u128) as i64,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5134,14 +5138,14 @@ impl App {
                 media_id: source.media_id,
                 source_tick: monitor_source_tick_for_preview(
                     source.source_tick,
-                    source.source_frame_rate_millihz,
+                    source.source_frame_rate,
                 ),
                 width,
                 height,
                 is_scrubbing: preview.is_scrubbing,
                 prewarm_scrub_workers: prewarm_layer == Some(layer),
                 high_quality_scaling,
-                source_frame_rate_millihz: source.source_frame_rate_millihz,
+                source_frame_rate: source.source_frame_rate,
             };
             if preview.is_scrubbing && preview.resolved_quality != PreviewQuality::Full {
                 let current = self
@@ -5155,9 +5159,7 @@ impl App {
                             frame.height,
                         ))
                     });
-                let tolerance =
-                    monitor_source_frame_duration_tick(source.source_frame_rate_millihz)
-                        .unwrap_or_default();
+                let tolerance = monitor_source_frame_duration_tick(source.source_frame_rate);
                 if !should_retain_close_full_monitor_frame(
                     current,
                     source.media_id,
@@ -5196,7 +5198,7 @@ impl App {
                 high_quality_scaling,
                 progressive_scrub_frames: progressive_scrub_frames(&preview),
                 source_frame_duration_tick: monitor_source_frame_duration_tick(
-                    source.source_frame_rate_millihz,
+                    source.source_frame_rate,
                 ),
                 acceleration,
             }) {
@@ -5942,6 +5944,9 @@ impl App {
                         width: metadata.width,
                         height: metadata.height,
                         frame_rate: metadata.frame_rate,
+                        frame_rate_ratio: metadata.frame_rate_ratio.and_then(|rate| {
+                            nle_ui_core::SourceFrameRate::new(rate.numerator(), rate.denominator())
+                        }),
                         video_bit_rate: metadata.video_bit_rate,
                         audio_codec: metadata.audio_codec,
                         sample_rate: metadata.sample_rate,
@@ -5961,6 +5966,12 @@ impl App {
                                 width: stream.width,
                                 height: stream.height,
                                 frame_rate: stream.frame_rate,
+                                frame_rate_ratio: stream.frame_rate_ratio.and_then(|rate| {
+                                    nle_ui_core::SourceFrameRate::new(
+                                        rate.numerator(),
+                                        rate.denominator(),
+                                    )
+                                }),
                                 sample_rate: stream.sample_rate,
                                 channels: stream.channels,
                             })
@@ -7707,7 +7718,7 @@ mod tests {
             is_scrubbing: false,
             prewarm_scrub_workers: false,
             high_quality_scaling: true,
-            source_frame_rate_millihz: Some(30_000),
+            source_frame_rate: nle_ui_core::SourceFrameRate::new(30, 1),
         };
         let identity = MonitorSourceIdentity {
             media_id: 42,
@@ -7949,7 +7960,7 @@ mod tests {
             clip_id: nle_timeline::ClipId(media_id),
             media_id,
             source_tick: 0,
-            source_frame_rate_millihz: None,
+            source_frame_rate: None,
         }
     }
 
@@ -8724,21 +8735,28 @@ mod tests {
             7,
             1_033_334,
             (640, 360),
-            33_334,
+            Some(33_334),
         ));
         assert!(!should_retain_close_full_monitor_frame(
             Some((7, 1_000_000, 160, 90)),
             7,
             1_033_334,
             (640, 360),
-            33_334,
+            Some(33_334),
         ));
         assert!(!should_retain_close_full_monitor_frame(
             Some((7, 1_000_000, 640, 360)),
             7,
             1_066_669,
             (640, 360),
-            33_334,
+            Some(33_334),
+        ));
+        assert!(should_retain_close_full_monitor_frame(
+            Some((7, 1_000_000, 640, 360)),
+            7,
+            1_000_000,
+            (640, 360),
+            None,
         ));
         assert!(!scrub_proxy_allows_monitor_frame(true, 11, 10));
         assert!(scrub_proxy_allows_monitor_frame(true, 11, 11));
@@ -9551,8 +9569,8 @@ mod tests {
         assert_eq!(first.media_id, second.media_id);
         assert_eq!(first.source_tick, 0);
         assert_eq!(second.source_tick, 0);
-        assert_eq!(first.source_frame_rate_millihz, None);
-        assert_eq!(second.source_frame_rate_millihz, None);
+        assert_eq!(first.source_frame_rate, None);
+        assert_eq!(second.source_frame_rate, None);
     }
 
     #[test]
@@ -9571,8 +9589,9 @@ mod tests {
             second < editor.frame_duration_tick().0.saturating_mul(11),
             "both samples must remain inside one project-frame interval"
         );
-        let first_source_frame = monitor_source_tick_for_preview(first, Some(60_000));
-        let second_source_frame = monitor_source_tick_for_preview(second, Some(60_000));
+        let source_rate = nle_ui_core::SourceFrameRate::new(60, 1).unwrap();
+        let first_source_frame = monitor_source_tick_for_preview(first, Some(source_rate));
+        let second_source_frame = monitor_source_tick_for_preview(second, Some(source_rate));
         assert!(first_source_frame <= first && first - first_source_frame < 16_667);
         assert!(second_source_frame <= second && second - second_source_frame < 16_667);
         assert_ne!(
@@ -9580,29 +9599,85 @@ mod tests {
             "distinct 60 fps frames must not collapse to one 30 fps project frame"
         );
         assert_eq!(
-            monitor_source_tick_for_preview(second, Some(60_000)),
-            monitor_source_tick_for_preview(second + 1_000, Some(60_000)),
+            monitor_source_tick_for_preview(second, Some(source_rate)),
+            monitor_source_tick_for_preview(second + 1_000, Some(source_rate)),
             "pointer samples inside one source frame must coalesce"
         );
 
         assert_eq!(
-            monitor_source_tick_for_preview(first, Some(60_000)),
+            monitor_source_tick_for_preview(first, Some(source_rate)),
             first_source_frame,
             "release refinement must retain the same source frame"
         );
         assert_eq!(
-            monitor_source_tick_for_preview(second, Some(60_000)),
+            monitor_source_tick_for_preview(second, Some(source_rate)),
             second_source_frame,
             "release refinement must not jump to a project-frame timestamp"
         );
 
-        let fallback_drag_frame = monitor_source_tick_for_preview(second, None);
         assert_eq!(
-            fallback_drag_frame,
             monitor_source_tick_for_preview(second, None),
-            "missing metadata must use the same fallback frame grid after release"
+            second,
+            "missing timing must not invent a fallback frame grid"
         );
-        assert_eq!(monitor_source_frame_duration_tick(None), Some(8_334));
+        assert_eq!(
+            monitor_source_tick_for_preview(-1, None),
+            0,
+            "missing timing must retain the nonnegative source tick"
+        );
+        assert_eq!(monitor_source_frame_duration_tick(None), None);
+    }
+
+    #[test]
+    fn monitor_source_ticks_use_exact_ntsc_ratios_without_large_tick_drift() {
+        let ntsc_30 = nle_ui_core::SourceFrameRate::new(30_000, 1_001).unwrap();
+        let ntsc_60 = nle_ui_core::SourceFrameRate::new(60_000, 1_001).unwrap();
+        assert_eq!(
+            nle_ui_core::SourceFrameRate::new(60_000, 2_002),
+            Some(ntsc_30),
+            "equivalent rates must use one canonical request key"
+        );
+        assert_eq!(
+            monitor_source_frame_duration_tick(Some(ntsc_30)),
+            Some(33_367)
+        );
+        assert_eq!(
+            monitor_source_frame_duration_tick(Some(ntsc_60)),
+            Some(16_684)
+        );
+        assert_eq!(monitor_source_tick_for_preview(33_366, Some(ntsc_30)), 0);
+        assert_eq!(
+            monitor_source_tick_for_preview(33_367, Some(ntsc_30)),
+            33_367,
+            "a fractional NTSC boundary starts at its first representable microsecond"
+        );
+        assert_eq!(
+            monitor_source_tick_for_preview(66_733, Some(ntsc_30)),
+            33_367
+        );
+        assert_eq!(
+            monitor_source_tick_for_preview(66_734, Some(ntsc_30)),
+            66_734
+        );
+
+        let frame = 1_000_000_000_u128;
+        let expected = (frame * 1_000_000 * 1_001).div_ceil(30_000) as i64;
+        assert_eq!(
+            monitor_source_tick_for_preview(expected, Some(ntsc_30)),
+            expected
+        );
+        assert_eq!(
+            monitor_source_tick_for_preview(expected.saturating_add(33_366), Some(ntsc_30)),
+            expected,
+            "large source ticks must retain the exact rational frame boundary"
+        );
+
+        let sixty_frame = 1_000_000_000_u128;
+        let sixty_expected = (sixty_frame * 1_000_000 * 1_001).div_ceil(60_000) as i64;
+        assert_eq!(
+            monitor_source_tick_for_preview(sixty_expected, Some(ntsc_60)),
+            sixty_expected
+        );
     }
 
     #[test]

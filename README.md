@@ -150,6 +150,12 @@ supports continuous timeline scrubbing with a draggable ruler handle, centered t
 project-rate frame stepping and timecode (including rational rates such as 30000/1001),
 spacebar play/pause, and a video-decoder-independent playback clock. During audible playback the
 native device callback is the A/V master; late PCM is skipped to its consumed-sample position. Playback uses
+the exact reduced `avg_frame_rate` ratio reported by FFprobe when coalescing constant-rate monitor
+requests, so NTSC-style rates do not drift through a rounded decimal rate. Media without trustworthy
+rate metadata keeps its exact nonnegative source timestamp and receives exact-only scrub-cache reuse;
+Maelstrom does not invent a fallback frame grid. This is constant-rate groundwork, not a claim of
+VFR correctness: a bounded per-frame PTS index and irregular-timestamp fixture remain required.
+The decoder keeps
 the same sticky decoder path for playback and paused seeks: nearby forward
 targets decode sequentially, while backward or distant targets seek to a prior
 keyframe, flush, and preroll. Latest-target coalescing drops superseded queued

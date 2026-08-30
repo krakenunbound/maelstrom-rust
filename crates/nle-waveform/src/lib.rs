@@ -89,12 +89,42 @@ pub struct MediaMetadata {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub frame_rate: Option<f64>,
+    /// The exact positive `avg_frame_rate` reported by FFprobe, reduced to lowest terms.
+    pub frame_rate_ratio: Option<FrameRate>,
     pub video_bit_rate: Option<u64>,
     pub audio_codec: Option<String>,
     pub sample_rate: Option<u32>,
     pub channels: Option<usize>,
     pub audio_bit_rate: Option<u64>,
     pub streams: Vec<MediaStreamMetadata>,
+}
+
+/// An exact positive frame rate reported by FFprobe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameRate {
+    numerator: u64,
+    denominator: u64,
+}
+
+impl FrameRate {
+    pub fn new(numerator: u64, denominator: u64) -> Option<Self> {
+        if numerator == 0 || denominator == 0 {
+            return None;
+        }
+        let divisor = gcd(numerator, denominator);
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    }
+
+    pub const fn numerator(self) -> u64 {
+        self.numerator
+    }
+
+    pub const fn denominator(self) -> u64 {
+        self.denominator
+    }
 }
 
 /// One FFmpeg stream as shown by the inspector. Keeping every stream avoids hiding alternate
@@ -111,6 +141,7 @@ pub struct MediaStreamMetadata {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub frame_rate: Option<f64>,
+    pub frame_rate_ratio: Option<FrameRate>,
     pub sample_rate: Option<u32>,
     pub channels: Option<usize>,
 }
@@ -834,6 +865,7 @@ fn media_metadata_from_probe(probe: FfprobeDocument) -> MediaMetadata {
             width: stream.width,
             height: stream.height,
             frame_rate: parse_frame_rate(stream.avg_frame_rate.as_deref()),
+            frame_rate_ratio: parse_frame_rate_ratio(stream.avg_frame_rate.as_deref()),
             sample_rate: parse_positive_u64(stream.sample_rate.as_deref())
                 .and_then(|value| value.try_into().ok()),
             channels: stream.channels,
@@ -848,6 +880,8 @@ fn media_metadata_from_probe(probe: FfprobeDocument) -> MediaMetadata {
         width: video.and_then(|stream| stream.width),
         height: video.and_then(|stream| stream.height),
         frame_rate: video.and_then(|stream| parse_frame_rate(stream.avg_frame_rate.as_deref())),
+        frame_rate_ratio: video
+            .and_then(|stream| parse_frame_rate_ratio(stream.avg_frame_rate.as_deref())),
         video_bit_rate: video.and_then(|stream| parse_positive_u64(stream.bit_rate.as_deref())),
         audio_codec: audio.and_then(|stream| stream.codec_name.clone()),
         sample_rate: audio.and_then(|stream| {
@@ -879,13 +913,35 @@ fn parse_nonnegative_f64(value: Option<&str>) -> Option<f64> {
 }
 
 fn parse_frame_rate(value: Option<&str>) -> Option<f64> {
-    let value = value?;
-    let (numerator, denominator) = value.split_once('/')?;
-    let numerator = numerator.parse::<f64>().ok()?;
-    let denominator = denominator.parse::<f64>().ok()?;
-    (denominator > 0.0)
-        .then_some(numerator / denominator)
-        .filter(|rate| rate.is_finite() && *rate > 0.0)
+    let ratio = parse_frame_rate_ratio(value)?;
+    let rate = ratio.numerator as f64 / ratio.denominator as f64;
+    (rate.is_finite() && rate > 0.0).then_some(rate)
+}
+
+fn parse_frame_rate_ratio(value: Option<&str>) -> Option<FrameRate> {
+    let (numerator, denominator) = value?.split_once('/')?;
+    if numerator.is_empty()
+        || denominator.is_empty()
+        || !numerator.bytes().all(|byte| byte.is_ascii_digit())
+        || !denominator.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let numerator = numerator.parse::<u64>().ok()?;
+    let denominator = denominator.parse::<u64>().ok()?;
+    if numerator == 0 || denominator == 0 {
+        return None;
+    }
+    FrameRate::new(numerator, denominator)
+}
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
 }
 
 #[derive(Debug)]
@@ -1254,6 +1310,7 @@ mod tests {
         assert_eq!(metadata.video_codec.as_deref(), Some("h264"));
         assert_eq!((metadata.width, metadata.height), (Some(1920), Some(1088)));
         assert_eq!(metadata.frame_rate, Some(24.0));
+        assert_eq!(metadata.frame_rate_ratio, FrameRate::new(24, 1));
         assert_eq!(metadata.audio_codec.as_deref(), Some("aac"));
         assert_eq!(metadata.sample_rate, Some(48_000));
         assert_eq!(metadata.channels, Some(2));
@@ -1262,6 +1319,33 @@ mod tests {
         assert_eq!(metadata.streams[0].index, 0);
         assert_eq!(metadata.streams[0].time_base.as_deref(), Some("1/12288"));
         assert_eq!(metadata.streams[1].sample_rate, Some(48_000));
+    }
+
+    #[test]
+    fn frame_rate_ratio_reduces_ntsc_rates_and_rejects_invalid_values() {
+        assert_eq!(
+            parse_frame_rate_ratio(Some("30000/1001")),
+            FrameRate::new(30_000, 1_001)
+        );
+        assert_eq!(
+            parse_frame_rate_ratio(Some("60000/2002")),
+            FrameRate::new(30_000, 1_001)
+        );
+        assert_eq!(
+            parse_frame_rate_ratio(Some("60000/1001")),
+            FrameRate::new(60_000, 1_001)
+        );
+        for value in [
+            None,
+            Some(""),
+            Some("0/1"),
+            Some("1/0"),
+            Some("1/-1"),
+            Some("1/2/3"),
+            Some("18446744073709551616/1"),
+        ] {
+            assert_eq!(parse_frame_rate_ratio(value), None, "{value:?}");
+        }
     }
 
     #[test]

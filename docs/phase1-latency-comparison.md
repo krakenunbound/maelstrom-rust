@@ -34,6 +34,9 @@ no established cross-machine baseline. The report is atomically written with a
 survive. The runner validates report shape, exact sample counts and sequence,
 summary math, finite comparison values, output/tick/backend and release evidence
 before printing `PASS` or reporting the preserved report path.
+The validator accepts the finite JSON numeric forms produced by both Windows PowerShell 5.1
+(`System.Decimal`) and modern PowerShell (`System.Double`); this changes report portability, not
+the 1 ms absolute scheduler threshold.
 
 This is local Software-backend evidence, not sustained playback, a visible UI
 responsiveness measurement, GPU-compositor proof, or cross-hardware completion.
@@ -48,3 +51,8 @@ After source-owned actor/session deduplication, the same gate passed on
 2026-08-29 with a four-source input-to-submit p95 of 144 us and coarse
 frame-ready p95 of 78 ms. The current ignored report remains
 `artifacts/phase1-latency/phase1-latency-comparison.json`.
+
+After exact rational source-rate propagation and unknown-timing exact-cache semantics, the gate
+passed on 2026-08-30 with a four-source input-to-submit p95 of 140 us and coarse frame-ready p95 of
+82 ms. The same run recorded a one-source scheduler p95 of 59 us and five peak source-owned
+sessions under the hard cap of eight.

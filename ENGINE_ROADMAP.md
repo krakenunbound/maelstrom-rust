@@ -139,7 +139,13 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
 - [x] Add manual preview-quality override and an honest Auto mode.
 - [ ] Add background proxy generation as optional derived media, never a prerequisite to edit/play.
 - [ ] Preserve exact source-time mapping for VFR, rational project rates, trims, slips, and reverse
-      seeks.
+      seeks. Exact reduced FFprobe `avg_frame_rate` ratios now flow through media analysis, playback
+      targets, immutable preview requests, request keys, and decoder cache tolerance without
+      millihertz rounding. Fractional frame boundaries use the first representable microsecond, and
+      unknown timing is neither snapped to an invented 120 fps grid nor allowed to substitute a
+      later cached frame. This remains open: `avg_frame_rate` is not a VFR timestamp index, and a
+      bounded/cancellable PTS index, deterministic irregular-timestamp fixture, slip mapping, and
+      reverse-policy proof are still required.
 - [ ] Add decode-session eviction that respects the global byte/session cap.
 - [ ] Expose active source backend, preview scale, proxy/original choice, and fallback reason.
 
@@ -174,7 +180,9 @@ Exit gate:
       44 us scheduler p95 (416 us max), 45 ms frame-ready p95 (64 ms max), seven bounded stale
       events, zero errors, five peak sessions/actors under the cap of eight, four live source
       groups, zero final retiring actors, zero post-drop sessions, and 40,943,616 bytes of
-      working-set growth.
+      working-set growth. After exact rational source-rate propagation, the bounded four-source
+      gate passed again on 2026-08-30 at 125 us submission / 75 ms all-frames-ready, and the
+      interleaved 20-trial comparison passed at 140 us scheduler p95 / 82 ms frame-ready p95.
       The exit remains
       open for realtime UI-present and cross-hardware proof; see `docs/phase1-sustained-soak.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.

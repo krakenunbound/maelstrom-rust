@@ -456,10 +456,9 @@ pub struct PlaybackTarget<'a> {
     /// The source address to decode. Still images keep this fixed while their
     /// logical `source_tick` continues advancing for animated effects.
     pub decode_tick: Tick,
-    /// Rounded source frame rate in thousandths of a frame per second. Monitor requests use this
-    /// to collapse pointer samples that address the same source frame without losing high-FPS
-    /// media precision.
-    pub source_frame_rate_millihz: Option<u32>,
+    /// Exact positive source frame rate used to coalesce monitor requests on source-frame
+    /// boundaries without rounding NTSC-style rates.
+    pub source_frame_rate: Option<SourceFrameRate>,
     /// Clip-local video opacity after applying the default fade-to-black envelope.
     pub opacity: f32,
     /// Opaque project-black matte inserted immediately before this decoded layer.
@@ -480,6 +479,43 @@ pub struct PlaybackTarget<'a> {
     pub transform: nle_timeline::ClipTransform,
     /// Source-time evaluated color stack. It is composition state, not a decode key.
     pub video_effects: EvaluatedVideoEffectStack,
+}
+
+/// An exact positive source frame rate supplied by media probing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceFrameRate {
+    numerator: u64,
+    denominator: u64,
+}
+
+impl SourceFrameRate {
+    pub fn new(numerator: u64, denominator: u64) -> Option<Self> {
+        if numerator == 0 || denominator == 0 {
+            return None;
+        }
+        let divisor = gcd_u64(numerator, denominator);
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    }
+
+    pub const fn numerator(self) -> u64 {
+        self.numerator
+    }
+
+    pub const fn denominator(self) -> u64 {
+        self.denominator
+    }
+}
+
+fn gcd_u64(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
 }
 
 /// The direction an incoming transition layer is revealed in monitor space.
@@ -827,6 +863,7 @@ pub struct MediaMetadata {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub frame_rate: Option<f64>,
+    pub frame_rate_ratio: Option<SourceFrameRate>,
     pub video_bit_rate: Option<u64>,
     pub audio_codec: Option<String>,
     pub sample_rate: Option<u32>,
@@ -847,6 +884,7 @@ pub struct MediaStreamMetadata {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub frame_rate: Option<f64>,
+    pub frame_rate_ratio: Option<SourceFrameRate>,
     pub sample_rate: Option<u32>,
     pub channels: Option<usize>,
 }
@@ -2869,13 +2907,10 @@ impl EditorState {
             path,
             source_tick,
             decode_tick,
-            source_frame_rate_millihz: self
+            source_frame_rate: self
                 .media_metadata
                 .get(&media_id)
-                .and_then(|metadata| metadata.frame_rate)
-                .filter(|rate| rate.is_finite() && (1.0..=1_000.0).contains(rate))
-                .map(|rate| (rate * 1_000.0).round() as u32)
-                .filter(|rate| *rate > 0)
+                .and_then(|metadata| metadata.frame_rate_ratio)
                 .filter(|_| item.kind != MediaKind::Image),
             opacity: video_opacity_at(clip, envelope_tick) * transition_opacity.clamp(0.0, 1.0),
             black_matte_before: black_matte_before.clamp(0.0, 1.0),
@@ -20241,12 +20276,16 @@ mod tests {
                 width: Some(3840),
                 height: Some(2160),
                 frame_rate: Some(59.94),
+                frame_rate_ratio: SourceFrameRate::new(60_000, 1_001),
                 ..Default::default()
             },
         );
         let target = editor.playback_target().unwrap();
         assert_eq!(target.source_size, Some((3840, 2160)));
-        assert_eq!(target.source_frame_rate_millihz, Some(59_940));
+        assert_eq!(
+            target.source_frame_rate,
+            SourceFrameRate::new(60_000, 1_001)
+        );
         editor.set_media_metadata(
             1,
             MediaMetadata {
@@ -20258,7 +20297,7 @@ mod tests {
         );
         let target = editor.playback_target().unwrap();
         assert_eq!(target.source_size, None);
-        assert_eq!(target.source_frame_rate_millihz, None);
+        assert_eq!(target.source_frame_rate, None);
     }
 
     #[test]
@@ -20860,7 +20899,7 @@ mod tests {
         let middle = editor.playback_target().unwrap();
         assert_eq!(start_decode_tick, Tick(0));
         assert_eq!(middle.decode_tick, Tick(0));
-        assert_eq!(middle.source_frame_rate_millihz, None);
+        assert_eq!(middle.source_frame_rate, None);
         assert_eq!(middle.source_tick, Tick(2_500_000));
         let nle_timeline::EvaluatedVideoEffect::BrightnessContrast(correction) =
             middle.video_effects.active()[0]

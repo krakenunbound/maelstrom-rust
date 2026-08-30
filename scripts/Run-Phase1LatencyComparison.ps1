@@ -11,7 +11,15 @@ function Restore-EnvironmentValue {
 
 function Test-Integer($Value) {
     $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or
-    $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Test-FiniteNumber($Value) {
+    if (Test-Integer $Value) { return $true }
+    if ($Value -is [decimal]) { return $true }
+    if ($Value -isnot [single] -and $Value -isnot [double]) { return $false }
+    $doubleValue = [double]$Value
+    return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
 }
 
 function Normalize-ExtendedPath([string]$Path) {
@@ -112,12 +120,12 @@ try {
     $allSequenceIndices = @($report.one_source.samples + $report.four_source.samples | ForEach-Object { $_.sequence_index } | Sort-Object)
     if ($allSequenceIndices.Count -ne 40 -or ($allSequenceIndices -join ',') -ne ((0..39) -join ',')) { throw 'Latency report did not preserve all forty interleaved sequence indices.' }
     foreach ($name in @('input_to_submit_p95_delta_us', 'frame_ready_p95_delta_ms')) { if ($null -eq $report.comparison.PSObject.Properties[$name] -or -not (Test-Integer $report.comparison.$name)) { throw "Latency comparison has invalid $name." } }
-    foreach ($name in @('input_to_submit_p95_ratio', 'frame_ready_p95_ratio')) { $value = $report.comparison.$name; if ($null -ne $value -and (($value -isnot [double]) -or [double]::IsNaN($value) -or [double]::IsInfinity($value))) { throw "Latency comparison has non-finite $name." } }
+    foreach ($name in @('input_to_submit_p95_ratio', 'frame_ready_p95_ratio')) { $value = $report.comparison.$name; if ($null -ne $value -and -not (Test-FiniteNumber $value)) { throw "Latency comparison has non-finite $name." } }
     if ($report.comparison.input_to_submit_p95_delta_us -ne ($report.four_source.input_to_submit_us.p95 - $report.one_source.input_to_submit_us.p95) -or
         $report.comparison.frame_ready_p95_delta_ms -ne ($report.four_source.frame_ready_ms.p95 - $report.one_source.frame_ready_ms.p95)) { throw 'Latency comparison deltas do not match scenario summaries.' }
     foreach ($ratio in @(@('input_to_submit_p95_ratio', $report.four_source.input_to_submit_us.p95, $report.one_source.input_to_submit_us.p95), @('frame_ready_p95_ratio', $report.four_source.frame_ready_ms.p95, $report.one_source.frame_ready_ms.p95))) {
         $actual = $report.comparison.($ratio[0]); $expected = if ($ratio[2] -eq 0) { $null } else { [double]$ratio[1] / [double]$ratio[2] }
-        if (($null -eq $actual) -ne ($null -eq $expected) -or ($null -ne $expected -and [Math]::Abs($actual - $expected) -gt 0.0000001)) { throw "Latency comparison $($ratio[0]) does not match scenario summaries." }
+        if (($null -eq $actual) -ne ($null -eq $expected) -or ($null -ne $expected -and [Math]::Abs([double]$actual - $expected) -gt 0.0000001)) { throw "Latency comparison $($ratio[0]) does not match scenario summaries." }
     }
     if ($testExitCode -ne 0) { throw "Phase 1 latency comparison test failed; preserved report: $resolvedReportPath" }
     if ($report.status -ne 'passed' -or $report.four_source.input_to_submit_us.p95 -gt $report.input_to_submit_p95_us_limit) { throw "Four-source scheduler p95 exceeded the documented 1 ms headless threshold; preserved report: $resolvedReportPath" }
