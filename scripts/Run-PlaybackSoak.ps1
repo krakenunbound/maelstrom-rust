@@ -9,9 +9,23 @@ $ErrorActionPreference = 'Stop'
 
 function Write-AtomicUtf8File {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Contents)
-    $temporary = "$Path.tmp"
-    [System.IO.File]::WriteAllText($temporary, $Contents, [System.Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    $temporary = "$Path.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($temporary, $Contents, [System.Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-FileWithRetries {
+    param([Parameter(Mandatory = $true)][string]$Path, [int]$Attempts = 3)
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $true }
+        if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds 250 }
+    }
+    return $false
 }
 
 function Restore-EnvironmentValue {
@@ -52,31 +66,21 @@ function Test-JsonFiniteNumber {
     return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
 }
 
-if (-not [System.IO.Path]::IsPathRooted($ExecutablePath)) {
-    throw 'ExecutablePath must be an absolute path to the packaged Maelstrom.exe.'
-}
-$resolvedExecutable = [System.IO.Path]::GetFullPath($ExecutablePath)
-if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
-    throw "Packaged executable does not exist: $resolvedExecutable"
-}
-if ([System.IO.Path]::GetExtension($resolvedExecutable) -ine '.exe') {
-    throw "ExecutablePath must name an .exe file: $resolvedExecutable"
-}
-$packageDirectory = [System.IO.Path]::GetDirectoryName($resolvedExecutable)
-$ffmpeg = Join-Path $packageDirectory 'ffmpeg.exe'
-$ffprobe = Join-Path $packageDirectory 'ffprobe.exe'
-if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
-    throw 'The packaged executable directory must contain sibling ffmpeg.exe and ffprobe.exe.'
-}
-
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $artifactDirectory = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-playback-soak'))
 New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
 $mediaPath = Join-Path $artifactDirectory 'deterministic-av-60s.mp4'
 $appReportPath = Join-Path $artifactDirectory 'playback-soak-app-report.json'
 $finalReportPath = Join-Path $artifactDirectory 'playback-soak-report.json'
-Remove-Item -LiteralPath $appReportPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $finalReportPath -Force -ErrorAction SilentlyContinue
+$appReportTemporaryPath = "$appReportPath.tmp"
+$finalReportTemporaryPath = "$finalReportPath.tmp"
+foreach ($staleArtifact in @(
+    $appReportPath, $finalReportPath, $appReportTemporaryPath, $finalReportTemporaryPath
+)) {
+    if (-not (Remove-FileWithRetries -Path $staleArtifact)) {
+        throw "Playback soak cannot remove stale report artifact before launch: $staleArtifact"
+    }
+}
 
 $savedPath = $env:PATH
 $savedSmokeEditor = $env:MAELSTROM_SMOKE_EDITOR
@@ -86,15 +90,98 @@ $savedSoakSeconds = $env:MAELSTROM_PLAYBACK_SOAK_SECONDS
 $process = $null
 $workingSetSamples = [System.Collections.Generic.List[UInt64]]::new()
 $maximumWorkingSetGrowthBytes = 1536MB
+$stage = 'path_validation'
+$resolvedExecutable = $null
+$packageDirectory = $null
+$ffmpeg = $null
+$ffprobe = $null
+$executableSha256 = $null
+$appReport = $null
+
+function Get-WorkingSetEvidence {
+    $sampleCount = $workingSetSamples.Count
+    $warmBaselineBytes = $null
+    $peakWorkingSetBytes = $null
+    $finalWorkingSetBytes = $null
+    $peakGrowthBytes = $null
+    if ($sampleCount -gt 0) {
+        $warmBaselineBytes = $workingSetSamples[[Math]::Min(2, $sampleCount - 1)]
+        $peakWorkingSetBytes = ($workingSetSamples | Measure-Object -Maximum).Maximum
+        $finalWorkingSetBytes = $workingSetSamples[$sampleCount - 1]
+        $peakGrowthBytes = [Math]::Max([int64]0, [int64]$peakWorkingSetBytes - [int64]$warmBaselineBytes)
+    }
+    return [ordered]@{
+        sample_interval_seconds = 1
+        sample_count = $sampleCount
+        warm_baseline_bytes = $warmBaselineBytes
+        peak_bytes = $peakWorkingSetBytes
+        final_bytes = $finalWorkingSetBytes
+        peak_growth_bytes = $peakGrowthBytes
+        generous_peak_growth_bound_bytes = $maximumWorkingSetGrowthBytes
+        scope = 'WorkingSet64 of the exact launched Maelstrom GUI process only; not total system, GPU, or child-process memory.'
+    }
+}
+
+function Write-FailedPlaybackSoakReport {
+    param([Parameter(Mandatory = $true)]$Failure)
+    try {
+        if ($null -eq $appReport -and (Test-Path -LiteralPath $appReportPath -PathType Leaf)) {
+            try { $script:appReport = Get-Content -LiteralPath $appReportPath -Raw | ConvertFrom-Json } catch {}
+        }
+        $failedReport = [ordered]@{
+            schema_version = 2
+            status = 'failed'
+            failure = [ordered]@{
+                stage = $stage
+                error_type = $Failure.Exception.GetType().FullName
+                message = $Failure.Exception.Message
+            }
+            executable_path = $resolvedExecutable
+            executable_sha256 = $executableSha256
+            duration_seconds_requested = $DurationSeconds
+            app_report = $appReport
+            working_set = Get-WorkingSetEvidence
+        }
+        Write-AtomicUtf8File -Path $finalReportPath -Contents ($failedReport | ConvertTo-Json -Depth 12)
+    } catch {
+        Write-Warning "Could not publish failed playback-soak report: $($_.Exception.Message)"
+    }
+}
 
 try {
+    if (-not [System.IO.Path]::IsPathRooted($ExecutablePath)) {
+        throw 'ExecutablePath must be an absolute path to the packaged Maelstrom.exe.'
+    }
+    $resolvedExecutable = [System.IO.Path]::GetFullPath($ExecutablePath)
+    if ([System.IO.Path]::GetFileName($resolvedExecutable) -ine 'Maelstrom.exe') {
+        throw "ExecutablePath must name the packaged Maelstrom.exe: $resolvedExecutable"
+    }
+    if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
+        throw "Packaged executable does not exist: $resolvedExecutable"
+    }
+    $executableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedExecutable).Hash
+    $stage = 'packaged_runtime'
+    $packageDirectory = [System.IO.Path]::GetDirectoryName($resolvedExecutable)
+    $ffmpeg = Join-Path $packageDirectory 'ffmpeg.exe'
+    $ffprobe = Join-Path $packageDirectory 'ffprobe.exe'
+    $requiredRuntimes = @(
+        'avcodec-62.dll', 'avdevice-62.dll', 'avfilter-11.dll', 'avformat-62.dll',
+        'avutil-60.dll', 'swresample-6.dll', 'swscale-9.dll', 'libgcc_s_seh-1.dll',
+        'libstdc++-6.dll', 'libvpl.dll', 'libwinpthread-1.dll', 'vcruntime140.dll'
+    )
+    foreach ($required in @($ffmpeg, $ffprobe) + @($requiredRuntimes | ForEach-Object { Join-Path $packageDirectory $_ })) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Packaged runtime is incomplete: $required"
+        }
+    }
     # Use the package's own FFmpeg binaries and DLL search path, never a system installation.
-    $env:PATH = "$packageDirectory;C:\Windows\System32;C:\Windows"
+    $env:PATH = "$packageDirectory;$env:SystemRoot\System32;$env:SystemRoot"
     & $ffmpeg -hide_banner -version *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Packaged ffmpeg.exe could not load with its sibling DLLs.' }
     & $ffprobe -hide_banner -version *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Packaged ffprobe.exe could not load with its sibling DLLs.' }
 
+    $stage = 'fixture_generation_codec'
     $savedErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $ffmpeg -hide_banner -y `
@@ -107,6 +194,7 @@ try {
         throw 'Packaged ffmpeg.exe could not create the deterministic 60-second A/V soak clip.'
     }
 
+    $stage = 'editor_launch_report_wait'
     $env:MAELSTROM_SMOKE_EDITOR = '1'
     $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH = $mediaPath
     $env:MAELSTROM_PLAYBACK_SOAK_REPORT = $appReportPath
@@ -133,14 +221,16 @@ try {
     if ($workingSetSamples.Count -lt 3) {
         throw 'Playback soak completed before a warmed working-set baseline could be sampled.'
     }
-    $warmBaselineBytes = $workingSetSamples[[Math]::Min(2, $workingSetSamples.Count - 1)]
-    $peakWorkingSetBytes = ($workingSetSamples | Measure-Object -Maximum).Maximum
-    $finalWorkingSetBytes = $workingSetSamples[$workingSetSamples.Count - 1]
-    $peakGrowthBytes = [Math]::Max([int64]0, [int64]$peakWorkingSetBytes - [int64]$warmBaselineBytes)
+    $workingSetEvidence = Get-WorkingSetEvidence
+    $warmBaselineBytes = $workingSetEvidence.warm_baseline_bytes
+    $peakWorkingSetBytes = $workingSetEvidence.peak_bytes
+    $finalWorkingSetBytes = $workingSetEvidence.final_bytes
+    $peakGrowthBytes = $workingSetEvidence.peak_growth_bytes
     if ($peakGrowthBytes -gt $maximumWorkingSetGrowthBytes) {
         throw "Playback soak working-set growth exceeded the generous $maximumWorkingSetGrowthBytes-byte bound: $peakGrowthBytes bytes above warm baseline."
     }
 
+    $stage = 'app_report_schema_environment'
     $appReport = Get-Content -LiteralPath $appReportPath -Raw | ConvertFrom-Json
     Assert-JsonUnsignedIntegerProperty $appReport 'schema_version' 'Playback soak report'
     Assert-JsonUnsignedIntegerProperty $appReport 'requested_duration_seconds' 'Playback soak report'
@@ -151,7 +241,7 @@ try {
     }
     $actualDurationSeconds = [double]$appReport.actual_duration_seconds
     $decoderBackends = $appReport.PSObject.Properties['observed_decoder_backends'].Value
-    if ($appReport.schema_version -ne 4 -or
+    if ($appReport.schema_version -ne 5 -or
         $appReport.requested_duration_seconds -ne $DurationSeconds -or
         $actualDurationSeconds -lt $DurationSeconds -or
         $actualDurationSeconds -gt ($DurationSeconds + 2) -or
@@ -171,6 +261,7 @@ try {
         @($decoderBackends | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
         throw 'Playback soak report omitted required full-quality runtime/environment evidence.'
     }
+    $stage = 'app_report_resources'
     $resources = $appReport.monitor_resources
     foreach ($property in @(
         'frame_cache_capacity_bytes', 'current_frame_cache_bytes', 'peak_frame_cache_bytes_upper_bound',
@@ -200,6 +291,7 @@ try {
         $resources.peak_sticky_sessions -lt 1) {
         throw "Playback soak did not exercise bounded monitor cache/session resources: $($resources | ConvertTo-Json -Compress)"
     }
+    $stage = 'app_report_runtime_diagnostics'
     $delta = $appReport.runtime_diagnostics_delta
     foreach ($property in @(
         'monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames',
@@ -208,6 +300,12 @@ try {
         'audio_callback_lock_failures', 'audio_late_discarded_frames'
     )) {
         Assert-JsonUnsignedIntegerProperty $delta $property 'Playback soak runtime diagnostics'
+    }
+    if (-not (Test-JsonFiniteNumber $delta.monitor_turnaround_window_p95_ms) -or
+        $delta.monitor_turnaround_window_p95_ms -lt 0 -or
+        $null -eq $appReport.decoder_stage_timings -or
+        $appReport.decoder_stage_timings.worker_request.samples -lt 1) {
+        throw 'Playback soak report omitted required turnaround/decode-stage timing evidence.'
     }
     foreach ($property in @('monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames', 'native_viewer_uploads')) {
         if ($delta.$property -lt 1) {
@@ -231,26 +329,23 @@ try {
     if ($appReport.loop_count -lt $expectedMinimumLoops) {
         throw "Playback soak looped only $($appReport.loop_count) times; expected at least $expectedMinimumLoops for the requested wall duration."
     }
+    $stage = 'report_publication'
     $finalReport = [ordered]@{
-        schema_version = 1
+        schema_version = 2
+        status = 'passed'
+        failure = $null
         executable_path = $resolvedExecutable
-        executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedExecutable).Hash
+        executable_sha256 = $executableSha256
         duration_seconds_requested = $DurationSeconds
         app_report = $appReport
-        working_set = [ordered]@{
-            sample_interval_seconds = 1
-            sample_count = $workingSetSamples.Count
-            warm_baseline_bytes = $warmBaselineBytes
-            peak_bytes = $peakWorkingSetBytes
-            final_bytes = $finalWorkingSetBytes
-            peak_growth_bytes = $peakGrowthBytes
-            generous_peak_growth_bound_bytes = $maximumWorkingSetGrowthBytes
-            scope = 'WorkingSet64 of the exact launched Maelstrom GUI process only; not total system, GPU, or child-process memory.'
-        }
+        working_set = $workingSetEvidence
     }
     Write-AtomicUtf8File -Path $finalReportPath -Contents ($finalReport | ConvertTo-Json -Depth 8)
     Write-Host "Playback soak passed: $($appReport.actual_duration_seconds) s, $($appReport.loop_count) loops, peak working set $peakWorkingSetBytes bytes."
     Get-Item -LiteralPath $finalReportPath
+} catch {
+    Write-FailedPlaybackSoakReport -Failure $_
+    throw
 } finally {
     if ($process) {
         try {
@@ -265,4 +360,11 @@ try {
     Restore-EnvironmentValue -Name 'MAELSTROM_MEDIA_ACCEPTANCE_PATH' -Value $savedMediaPath
     Restore-EnvironmentValue -Name 'MAELSTROM_PLAYBACK_SOAK_REPORT' -Value $savedSoakReport
     Restore-EnvironmentValue -Name 'MAELSTROM_PLAYBACK_SOAK_SECONDS' -Value $savedSoakSeconds
+    foreach ($temporaryArtifact in @(
+        $mediaPath, "$mediaPath.tmp", $appReportTemporaryPath, $finalReportTemporaryPath
+    )) {
+        if (-not (Remove-FileWithRetries -Path $temporaryArtifact)) {
+            Write-Warning "Could not remove playback-soak temporary artifact: $temporaryArtifact"
+        }
+    }
 }

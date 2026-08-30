@@ -29,6 +29,10 @@ use nle_cache::{FrameCache, FrameKey, FrameValue};
 const MAX_DIMENSION: u32 = 4_096;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const FORWARD_REUSE_TICKS: i64 = 5_000_000;
+// FFmpeg timestamps are rescaled into microseconds with integer rounding. A 30 fps frame can
+// therefore decode as 33_333 µs while the project-side exact rational boundary is 33_334 µs.
+// This is representational error, not a preroll allowance: never accept more than one µs early.
+const SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS: i64 = 1;
 const SCRUB_PROGRESS_INTERVAL: Duration = Duration::from_millis(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const LOW_LATENCY_DECODE_THREADS: usize = 2;
@@ -2728,6 +2732,10 @@ fn latest_same_generation(
     }
 }
 
+fn source_tick_reaches_target(source_tick: i64, target_tick: i64) -> bool {
+    source_tick.saturating_add(SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS) >= target_tick
+}
+
 struct StickyMonitor {
     // Held for the full lifetime of the libav contexts. Every erase, reset, failed open, and
     // hardware-to-software replacement therefore releases capacity through RAII.
@@ -2965,7 +2973,7 @@ impl StickyMonitor {
                         completed_request_id = newer.request_id;
                     }
                 }
-                if source_tick < target {
+                if !source_tick_reaches_target(source_tick, target) {
                     let now = Instant::now();
                     let publish_progress = request.progressive_scrub_frames
                         && scrub_progress_moves_toward_target(
@@ -3051,7 +3059,7 @@ impl StickyMonitor {
                     completed_request_id = newer.request_id;
                 }
             }
-            if source_tick < target {
+            if !source_tick_reaches_target(source_tick, target) {
                 let now = Instant::now();
                 let publish_progress = request.progressive_scrub_frames
                     && scrub_progress_moves_toward_target(
@@ -3634,6 +3642,12 @@ mod tests {
     }
 
     #[test]
+    fn source_timestamp_rounding_tolerance_never_accepts_more_than_one_microsecond_preroll() {
+        assert!(source_tick_reaches_target(33_333, 33_334));
+        assert!(!source_tick_reaches_target(33_332, 33_334));
+    }
+
+    #[test]
     fn scrub_progress_pacer_suppresses_a_burst_regardless_of_source_timestamp() {
         let now = Instant::now();
         for source_tick in [0, 41_667, 5_000_000, 90_000_000] {
@@ -3761,6 +3775,33 @@ mod tests {
             .arg(&path)
             .status()
             .expect("start FFmpeg test fixture");
+        assert!(status.success());
+        path
+    }
+
+    fn thirty_fps_mpeg4_media() -> PathBuf {
+        let sequence = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("maelstrom-30fps-{nanos}-{sequence}.mp4"));
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=64x48:r=30:d=2",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "5",
+            ])
+            .arg(&path)
+            .status()
+            .expect("start 30 fps FFmpeg test fixture");
         assert!(status.success());
         path
     }
@@ -5818,6 +5859,60 @@ mod tests {
         assert_eq!(first_frame.rgba.len(), 40 * 30 * 4);
         assert_eq!(second_frame.rgba.len(), 40 * 30 * 4);
         assert!(monitor.last_source_tick.is_some());
+        drop(monitor);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn sticky_monitor_reuses_30fps_mpeg4_decoder_at_ceil_microsecond_boundaries() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = thirty_fps_mpeg4_media();
+        let first = request(path.clone(), 1_701);
+        let session_pool = MonitorSessionPool::new(1, 0);
+        let mut monitor = open_sticky_monitor(&first, &session_pool, 0, false)
+            .expect("open 30 fps sticky monitor")
+            .expect("foreground permit available");
+        let stage_timings = DecoderStageTimingAccumulators::default();
+        let frame_count = 30_i64;
+
+        for frame_index in 0..frame_count {
+            let mut desired = first.clone();
+            desired.request_id += frame_index as u64;
+            // Exact rational timeline boundaries round upward: e.g. 1 / 30 s is 33_334 µs.
+            desired.source_tick = (frame_index * 1_000_000 + 29) / 30;
+            let frame = monitor
+                .decode(
+                    &desired,
+                    || false,
+                    || None,
+                    &mut |_| {},
+                    &mut |_| {},
+                    &stage_timings,
+                )
+                .expect("decode 30 fps target")
+                .expect("30 fps target was not superseded");
+            assert!(
+                (frame.source_tick - desired.source_tick).abs()
+                    <= SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS,
+                "decoded timestamp {} must represent exact target {} within one microsecond",
+                frame.source_tick,
+                desired.source_tick,
+            );
+        }
+
+        let timings = stage_timings.snapshot();
+        assert!(
+            timings.decoder_calls.samples <= frame_count as u64 * 3,
+            "sequential 30 fps requests must reuse the sticky decoder; got {} decoder calls for {frame_count} frames",
+            timings.decoder_calls.samples,
+        );
+        assert!(
+            timings.demux_packet.samples <= frame_count as u64 * 2,
+            "sequential 30 fps requests must traverse packets linearly; got {} packets for {frame_count} frames",
+            timings.demux_packet.samples,
+        );
         drop(monitor);
         fs::remove_file(path).unwrap();
     }

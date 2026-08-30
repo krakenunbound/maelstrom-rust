@@ -23,8 +23,9 @@ const MIX_BUFFER_SECONDS: usize = 1;
 /// Hard per-decoder-frame guard; normal AAC/PCM frames are orders of magnitude smaller.
 const MAX_DECODED_AUDIO_FRAME_SAMPLES: usize = 262_144;
 /// Fixed callback-side acquisition attempts; this stays bounded and never parks the audio thread.
-/// The spin hints give short decoder queue writes time to finish without risking an unbounded wait.
-const CALLBACK_LOCK_TRY_ATTEMPTS: usize = 64;
+/// 4,096 non-parking spins cover the brief producer critical sections used to enqueue into an
+/// already allocated lane without turning a transient contention window into a 10 ms underrun.
+const CALLBACK_LOCK_TRY_ATTEMPTS: usize = 4_096;
 
 /// Cumulative, non-blocking diagnostics from the native audio transport.
 ///
@@ -411,6 +412,40 @@ impl Default for Lane {
     }
 }
 
+fn playback_lane(
+    target: &AudioTarget,
+    sample_rate: u32,
+    lane_count: usize,
+    device_frame_origin: u64,
+) -> Lane {
+    let (gain_left_linear, gain_right_linear) = channel_gains(target);
+    Lane {
+        // Decoder enqueue runs while `Shared` is held. Reserve the normal bounded allowance
+        // before playback starts so filling that allowance does not allocate in that critical
+        // section and force the output callback to miss a device buffer.
+        samples: VecDeque::with_capacity(lane_capacity_samples(sample_rate, lane_count)),
+        device_frame_origin,
+        target: Some(target.clone()),
+        gain_left_linear,
+        gain_right_linear,
+        processors: build_processors(&target.effects, sample_rate),
+        ..Lane::default()
+    }
+}
+
+fn playback_lanes(targets: &[AudioTarget], sample_rate: u32) -> HashMap<LaneKey, Lane> {
+    let lane_count = targets.len();
+    targets
+        .iter()
+        .map(|target| {
+            (
+                LaneKey::from(target),
+                playback_lane(target, sample_rate, lane_count, 0),
+            )
+        })
+        .collect()
+}
+
 fn db_to_linear(gain_db: f32) -> f32 {
     10f32.powf(gain_db / 20.0)
 }
@@ -513,6 +548,7 @@ impl Shared {
         &mut self,
         targets: &[AudioTarget],
         sample_rate: u32,
+        prepared_lanes: &mut HashMap<LaneKey, Lane>,
     ) -> Option<(u64, HashSet<LaneKey>)> {
         if targets.is_empty() {
             return None;
@@ -548,18 +584,11 @@ impl Shared {
             if let Some(lane) = self.lanes.get_mut(&key) {
                 Self::apply_target_mix_settings(lane, target, sample_rate);
             } else {
-                let (gain_left_linear, gain_right_linear) = channel_gains(target);
-                self.lanes.insert(
-                    key,
-                    Lane {
-                        device_frame_origin,
-                        target: Some(target.clone()),
-                        gain_left_linear,
-                        gain_right_linear,
-                        processors: build_processors(&target.effects, sample_rate),
-                        ..Lane::default()
-                    },
-                );
+                let mut lane = prepared_lanes
+                    .remove(&key)
+                    .expect("prepared playback lane for each reconciliation target");
+                lane.device_frame_origin = device_frame_origin;
+                self.lanes.insert(key, lane);
             }
         }
         Some((self.generation, retained))
@@ -853,25 +882,13 @@ impl AudioEngine {
         self.source_tick
             .store(targets[0].source_tick, Ordering::Release);
         self.device_frames.store(0, Ordering::Release);
+        // Playback is stopped above, so construct and allocate the replacement queues before
+        // briefly taking the shared mixer state lock.
+        let prepared_lanes = playback_lanes(&targets, self.sample_rate);
         let generation = {
             let mut state = self.shared.lock().expect("audio state lock");
             state.generation = state.generation.wrapping_add(1);
-            state.lanes = targets
-                .iter()
-                .map(|target| {
-                    let (gain_left_linear, gain_right_linear) = channel_gains(target);
-                    (
-                        LaneKey::from(target),
-                        Lane {
-                            target: Some(target.clone()),
-                            gain_left_linear,
-                            gain_right_linear,
-                            processors: build_processors(&target.effects, self.sample_rate),
-                            ..Lane::default()
-                        },
-                    )
-                })
-                .collect();
+            state.lanes = prepared_lanes;
             state.generation
         };
         self.meter.clear();
@@ -901,10 +918,14 @@ impl AudioEngine {
         if !self.playing.load(Ordering::Acquire) {
             return false;
         }
+        // Allocate any prospective joining lanes before taking the live mixer lock. Retained
+        // lanes are ignored by `reconcile_targets`; preparing those too keeps this path simple
+        // while ensuring decoder queue allocation never extends callback lock contention.
+        let mut prepared_lanes = playback_lanes(&targets, self.sample_rate);
         let (generation, resume_lanes) = {
             let mut state = self.shared.lock().expect("audio state lock");
             let Some((generation, resume_lanes)) =
-                state.reconcile_targets(&targets, self.sample_rate)
+                state.reconcile_targets(&targets, self.sample_rate, &mut prepared_lanes)
             else {
                 return false;
             };
@@ -1582,6 +1603,56 @@ mod tests {
         )])
     }
 
+    fn preallocation_target(clip_id: u32) -> AudioTarget {
+        AudioTarget {
+            track_id: 1,
+            clip_id,
+            path: PathBuf::from(format!("preallocation-{clip_id}.wav")),
+            source_tick: 0,
+            clip_tick: 0,
+            gain_db: 0.0,
+            gain_left_db: 0.0,
+            gain_right_db: 0.0,
+            pan: 0.0,
+            effects: Vec::new(),
+            fade_in_ticks: 0,
+            fade_in_curve: 0.0,
+            fade_out_ticks: 0,
+            fade_out_curve: 0.0,
+            clip_duration_ticks: 1_000_000,
+            transition: None,
+        }
+    }
+
+    #[test]
+    fn initial_playback_lanes_preallocate_single_lane_pcm_budget() {
+        let target = preallocation_target(1);
+        let lanes = playback_lanes(std::slice::from_ref(&target), 48_000);
+        let lane = lanes.get(&LaneKey::from(&target)).expect("initial lane");
+
+        assert!(lane.samples.is_empty());
+        assert!(lane.samples.capacity() >= lane_capacity_samples(48_000, 1));
+    }
+
+    #[test]
+    fn initial_playback_lanes_split_and_preallocate_multi_lane_pcm_budget() {
+        let targets = vec![
+            preallocation_target(1),
+            preallocation_target(2),
+            preallocation_target(3),
+            preallocation_target(4),
+        ];
+        let lanes = playback_lanes(&targets, 48_000);
+        let expected = lane_capacity_samples(48_000, targets.len());
+
+        assert_eq!(lanes.len(), targets.len());
+        for target in &targets {
+            let lane = lanes.get(&LaneKey::from(target)).expect("initial lane");
+            assert!(lane.samples.is_empty());
+            assert!(lane.samples.capacity() >= expected);
+        }
+    }
+
     #[test]
     fn stereo_width_processes_mid_side_without_reordering_channels() {
         let mut processors =
@@ -1903,8 +1974,10 @@ mod tests {
         };
         state.device_frames.store(48_000, Ordering::Release);
 
+        let targets = [retained.clone(), joining.clone()];
+        let mut prepared_lanes = playback_lanes(&targets, 48_000);
         let (generation, resumed) = state
-            .reconcile_targets(&[retained.clone(), joining.clone()], 48_000)
+            .reconcile_targets(&targets, 48_000, &mut prepared_lanes)
             .expect("same-media lane expansion is safe");
         assert_eq!(resumed, HashSet::from([retained_key]));
         assert_eq!(generation, 45);
@@ -1917,6 +1990,10 @@ mod tests {
         let joining_lane = state.lanes.get(&joining_key).unwrap();
         assert_eq!(joining_lane.device_frame_origin, 48_000);
         assert_eq!(joining_lane.target.as_ref().unwrap().source_tick, 7_000_000);
+        assert!(
+            joining_lane.samples.capacity() >= lane_capacity_samples(48_000, 2),
+            "a lane inserted during reconciliation reserves its share before decoder enqueue"
+        );
         enqueue_decoded_frame(&mut state, joining_key, &[1.0, 1.0, 1.0, 1.0], 48_000).unwrap();
         assert_eq!(state.lanes.get(&joining_key).unwrap().samples.len(), 4);
         state.lanes.get_mut(&retained_key).unwrap().samples.clear();
@@ -1927,8 +2004,10 @@ mod tests {
         assert!((right - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.000_001);
         assert!(audible);
 
+        let targets = [retained];
+        let mut prepared_lanes = playback_lanes(&targets, 48_000);
         let (generation, resumed) = state
-            .reconcile_targets(&[retained], 48_000)
+            .reconcile_targets(&targets, 48_000, &mut prepared_lanes)
             .expect("same-media lane contraction is safe");
         assert_eq!(resumed, HashSet::from([retained_key]));
         assert_eq!(state.lanes.len(), 1);

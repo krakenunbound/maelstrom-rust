@@ -94,11 +94,14 @@ Build the evidence harness before adding engine complexity.
       assertions, plus a four-source decoded-frame cache-pressure scenario using distinct fixture
       paths that forces real LRU eviction at a three-frame 160x90 RGBA cap and proves release and
       source/session/actor bounds; broader sustained pressure remains open. The exact packaged executable passed
-      the 600-second Full/Full real A/V loop soak on 2026-08-28 with 10 loops, zero monitor errors,
-      zero fallback uploads, zero audio underruns/lock failures/late discards, and 237,711,360 bytes
-      peak GUI working-set growth. Its schema-2 resource evidence reported 268,015,616 peak decoded
-      frame-cache bytes below the 1 GiB cap and one peak sticky session below the 16-session app
-      cap. This combined item remains open for broader multi-source memory-pressure coverage,
+      the 600-second Full/Full real A/V loop soak on 2026-08-30 with 10 loops, 18,023 native
+      uploads, zero held/late frames, zero monitor errors/fallback uploads, zero audio
+      underruns/lock failures/late discards, and 12.242 ms rolling request-turnaround p95. Its
+      schema-5 resource evidence reported a 1,071,555,584-byte peak decoded-frame cache below the
+      1 GiB cap, one active foreground session/actor, zero active background sessions, and exact
+      session/actor bounds. The schema-2 wrapper recorded 1,038,934,016 bytes of peak GUI
+      working-set growth above its warmed baseline, within the deliberately generous 1.5 GiB
+      bound. This combined item remains open for broader multi-source memory-pressure coverage,
       including idle/session LRU and cross-hardware proof. See
       `docs/phase0-scenarios.md` and `docs/performance-reports.md`. A separate timed Phase 0
       orchestrator now repeatedly executes the full six-scenario native matrix and writes one

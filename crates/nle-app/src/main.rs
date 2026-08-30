@@ -2442,6 +2442,8 @@ struct RuntimeDiagnosticsReport {
     monitor_hold_events: u64,
     monitor_late_frames: u64,
     monitor_errors: u64,
+    /// Rolling end-to-end request turnaround p95 at the time this snapshot was taken.
+    monitor_turnaround_window_p95_ms: f32,
     native_viewer_uploads: u64,
     fallback_viewer_uploads: u64,
     audio_underrun_frames: u64,
@@ -2471,6 +2473,9 @@ impl RuntimeDiagnosticsReport {
                 .monitor_late_frames
                 .saturating_sub(baseline.monitor_late_frames),
             monitor_errors: self.monitor_errors.saturating_sub(baseline.monitor_errors),
+            // A percentile is not additive. Preserve the final rolling window instead of
+            // subtracting two unrelated distributions.
+            monitor_turnaround_window_p95_ms: self.monitor_turnaround_window_p95_ms,
             native_viewer_uploads: self
                 .native_viewer_uploads
                 .saturating_sub(baseline.native_viewer_uploads),
@@ -2500,6 +2505,7 @@ impl From<RuntimeDiagnostics> for RuntimeDiagnosticsReport {
             monitor_hold_events: diagnostics.monitor_hold_events,
             monitor_late_frames: diagnostics.monitor_late_frames,
             monitor_errors: diagnostics.monitor_errors,
+            monitor_turnaround_window_p95_ms: diagnostics.monitor_turnaround_p95_ms,
             native_viewer_uploads: diagnostics.native_viewer_uploads,
             fallback_viewer_uploads: diagnostics.fallback_viewer_uploads,
             audio_underrun_frames: diagnostics.audio_underrun_frames,
@@ -2579,6 +2585,7 @@ struct PlaybackSoakReport {
     resolved_preview_quality: String,
     monitor_cache_cap_bytes: usize,
     monitor_resources: PlaybackSoakMonitorResources,
+    decoder_stage_timings: DecoderStageTimingsReport,
     audio_transport_healthy_at_completion: bool,
     audio_fault_observed: bool,
     unexpected_playback_stop_observed: bool,
@@ -2681,11 +2688,12 @@ impl PlaybackSoakProbe {
         resolved_preview_quality: String,
         monitor_cache_cap_bytes: usize,
         monitor_resources: PlaybackSoakMonitorResources,
+        decoder_stage_timings: DecoderStageTimingsReport,
         audio_transport_healthy_now: bool,
     ) -> Option<PlaybackSoakReport> {
         let started_at = self.started_at?;
         Some(PlaybackSoakReport {
-            schema_version: 4,
+            schema_version: 5,
             requested_duration_seconds: self.requested_duration.as_secs(),
             actual_duration_seconds: now.duration_since(started_at).as_secs_f64(),
             loop_count: self.loop_count,
@@ -2694,6 +2702,7 @@ impl PlaybackSoakProbe {
             resolved_preview_quality,
             monitor_cache_cap_bytes,
             monitor_resources,
+            decoder_stage_timings,
             audio_transport_healthy_at_completion: audio_transport_healthy_now
                 && !self.audio_fault_observed
                 && !self.unexpected_playback_stop_observed,
@@ -3883,6 +3892,7 @@ impl App {
                     self.monitor_session_pool.diagnostics(),
                     self.monitor_source_coordinator.diagnostics(),
                 ),
+                aggregate_monitor_decoder_stage_timings(&self.monitor_decoders),
                 audio_transport_healthy_now,
             ) {
                 let _ = probe.publish(report);
@@ -5426,6 +5436,17 @@ impl App {
         let prewarm_layer = (!self.editor.playing && !preview.is_scrubbing)
             .then(|| preview.sources.iter().rposition(Option::is_some))
             .flatten();
+        // Speculative paused-preview workers are useful only while the timeline remains paused.
+        // Tear them down before real-time playback or scrub work is admitted so they cannot
+        // retain a background FFmpeg session alongside the foreground decode lane.
+        if (self.editor.playing || preview.is_scrubbing)
+            && self
+                .monitor_last_requests
+                .iter()
+                .any(|request| request.is_some_and(|request| request.prewarm_scrub_workers))
+        {
+            self.release_speculative_monitor_sessions();
+        }
         for layer in 0..MONITOR_LAYER_COUNT {
             self.monitor_admission_priorities[layer] = preview.sources[layer]
                 .map(|source| source.priority)
@@ -7680,6 +7701,7 @@ mod tests {
                     monitor_dropped_frames: 2,
                     monitor_hold_events: 1,
                     monitor_late_frames: 1,
+                    monitor_turnaround_p95_ms: 31.5,
                     native_viewer_uploads: 12,
                     audio_underrun_frames: 48,
                     ..Default::default()
@@ -7705,15 +7727,22 @@ mod tests {
                     lane_actor_cap: 8,
                     retiring_lane_actors: 0,
                 },
+                DecoderStageTimingsReport::default(),
                 true,
             )
             .expect("transport start makes a soak report ready");
-        assert_eq!(report.schema_version, 4);
+        assert_eq!(report.schema_version, 5);
         assert_eq!(report.actual_duration_seconds, 10.0);
         assert_eq!(report.loop_count, 2);
         assert_eq!(report.runtime_diagnostics_delta.monitor_requests, 6);
         assert_eq!(report.runtime_diagnostics_delta.native_viewer_uploads, 5);
         assert_eq!(report.runtime_diagnostics_delta.audio_underrun_frames, 48);
+        assert_eq!(
+            report
+                .runtime_diagnostics_delta
+                .monitor_turnaround_window_p95_ms,
+            31.5
+        );
         assert!(probe.publish(report));
         let published = report_rx.try_recv().expect("one-shot soak report");
         assert_eq!(published.observed_decoder_backends, ["Software"]);
@@ -7774,6 +7803,7 @@ mod tests {
                     lane_actor_cap: 8,
                     retiring_lane_actors: 0,
                 },
+                DecoderStageTimingsReport::default(),
                 false,
             )
             .expect("started probe reports its failure evidence");
@@ -7863,6 +7893,7 @@ mod tests {
             monitor_hold_events: 15,
             monitor_late_frames: 16,
             monitor_errors: 17,
+            monitor_turnaround_window_p95_ms: 18.5,
             native_viewer_uploads: 18,
             fallback_viewer_uploads: 19,
             audio_underrun_frames: 20,
@@ -10271,6 +10302,117 @@ mod tests {
             app.monitor_frame_cache_pool.diagnostics().current_bytes,
             cached_before_release,
             "releasing the final source lease must not clear the shared frame cache"
+        );
+
+        drop(app);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn playback_handoff_releases_paused_prewarm_session_before_foreground_decode() {
+        let fixture = test_catalog_path("playback-handoff-releases-prewarm").with_extension("mp4");
+        let Some(parent) = fixture.parent() else {
+            return;
+        };
+        fs::create_dir_all(parent).expect("create playback handoff fixture directory");
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x36:rate=24",
+                "-t",
+                "1",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "5",
+            ])
+            .arg(&fixture)
+            .output();
+        let Ok(generated) = generated else {
+            let _ = fs::remove_dir_all(parent);
+            return;
+        };
+        assert!(
+            generated.status.success(),
+            "create playback handoff fixture: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths([fixture.clone()]);
+        let video_track = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Video)
+            .expect("app includes a video track")
+            .id;
+        app.editor
+            .timeline
+            .insert_clip(
+                video_track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(900_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert playback handoff clip");
+        app.editor.set_playhead(nle_timeline::Tick(300_000));
+
+        let mut paused = preview_request(&app.editor);
+        paused.output_size = [64, 36];
+        assert!(!app.editor.playing && !paused.is_scrubbing);
+        app.submit_monitor_decode_request(paused);
+        let prewarm_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < prewarm_deadline {
+            let sessions = app.monitor_session_pool.diagnostics();
+            if sessions.active_foreground_sessions == 1 && sessions.active_background_sessions == 1
+            {
+                break;
+            }
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+        let prewarm_sessions = app.monitor_session_pool.diagnostics();
+        assert_eq!(prewarm_sessions.active_foreground_sessions, 1);
+        assert_eq!(prewarm_sessions.active_background_sessions, 1);
+        let errors_before_handoff = app.runtime_diagnostics().monitor_errors;
+
+        app.editor.start_playback();
+        let mut playback = preview_request(&app.editor);
+        playback.output_size = [64, 36];
+        assert!(app.editor.playing && !playback.is_scrubbing);
+        app.submit_monitor_decode_request(playback);
+        assert!(
+            !app.monitor_last_requests[0]
+                .expect("playback foreground request")
+                .prewarm_scrub_workers
+        );
+
+        let handoff_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < handoff_deadline {
+            let sessions = app.monitor_session_pool.diagnostics();
+            if sessions.active_foreground_sessions == 1
+                && sessions.active_background_sessions == 0
+                && !app.monitor_requests_in_flight[0]
+            {
+                break;
+            }
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+        let handoff_sessions = app.monitor_session_pool.diagnostics();
+        assert_eq!(handoff_sessions.active_foreground_sessions, 1);
+        assert_eq!(handoff_sessions.active_background_sessions, 0);
+        assert_eq!(
+            app.runtime_diagnostics().monitor_errors,
+            errors_before_handoff,
+            "releasing prewarm work must not report a monitor error"
         );
 
         drop(app);
