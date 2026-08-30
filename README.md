@@ -287,8 +287,19 @@ runtime in WSL2, then package against it:
 
 ```powershell
 .\scripts\build-ffmpeg-lgpl-windows.ps1
-.\scripts\package-windows.ps1 -FfmpegBundleRoot .\.deps\ffmpeg-project-8.1
+.\scripts\package-windows.ps1 -FfmpegBundleRoot .\.deps\ffmpeg-project-8.1 -SkipSmoke
 ```
+
+`-SkipSmoke` builds and assembles the package and checks required adjacent runtime files without
+launching the editor. It preserves existing `dist\last-*-smoke.json` reports as historical evidence;
+they do not qualify the new executable. `PACKAGE-STATUS.json` inside the new package records its
+executable SHA-256 and `smoke_status: not_run`. The same file records `passed` only after the default
+packaging smoke completes successfully; this is not a full release qualification.
+
+Repository agents must use `-SkipSmoke`: the default packaging smoke launches the editor directly.
+An agent may open the editor only after an explicit user request, through
+`H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`. The launcher's `--verify-runtime` option checks
+required files without opening a window.
 
 Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
 AMD64 directory supplied with
@@ -312,8 +323,8 @@ $env:PATH="$env:FFMPEG_DIR\bin;$env:LIBCLANG_PATH;$env:PATH"
 cargo test --workspace
 ```
 
-The package is written to `dist\Maelstrom-Windows-x64` and is smoke-tested with
-only its adjacent DLLs available. Packaging creates a deterministic A/V clip and requires the
+The package is written to `dist\Maelstrom-Windows-x64`. Without `-SkipSmoke`, it is smoke-tested with
+only its adjacent DLLs available. That smoke creates a deterministic A/V clip and requires the
 packaged app to produce linked bars, metadata, a nonempty waveform, a decoded monitor frame,
 advancing playback, live audio meters, confirmed FFmpeg export progress, and a cleanly cancelled
 snapshot export with no orphaned process or partial output. Its startup-presentation,

@@ -362,7 +362,10 @@ Exit gate:
       p50/p95/max scheduler and matching-frame timings, and enforces only a 1 ms headless
       input-to-submit scheduler p95. It remains local Software-backend evidence rather than sustained, UI-present,
       or cross-hardware completion. See `docs/phase1-multisource.md` and
-      `docs/phase1-latency-comparison.md`. A third opt-in headless local gate now repeats the
+      `docs/phase1-latency-comparison.md`. Windowed probe gaps and no-launch package preparation
+      are recorded in `docs/phase1-ui-qualification.md`; the current package is explicitly
+      GUI-unqualified and historical smoke reports do not qualify the new executable.
+      A third opt-in headless local gate now repeats the
       same four-source Full-1080p five-second-fixture forward/back scrub workload for a bounded
       duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime
       counter deltas including a documented bounded stale-event allowance, bounded cache/session evidence, post-drop release, and tracked-process

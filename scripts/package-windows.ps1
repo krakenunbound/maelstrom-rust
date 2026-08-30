@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$FfmpegBundleRoot,
     [string]$LibClangPath = $env:LIBCLANG_PATH,
-    [string]$VcRedistCrtDirectory
+    [string]$VcRedistCrtDirectory,
+    [Parameter(HelpMessage = 'Build and assemble the package without running the GUI smoke checks. The resulting package is unqualified and existing dist\last-*-smoke.json reports are historical.')]
+    [switch]$SkipSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -258,23 +260,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $modelOutput 'manifest.json'))) {
     throw 'The model manifest was not copied into the Windows package.'
 }
 
-$savedSmokePath = $env:PATH
-$savedSmokeEditor = $env:MAELSTROM_SMOKE_EDITOR
-$savedStartupReport = $env:MAELSTROM_STARTUP_REPORT
-$savedSurfaceSubmissionReport = $env:MAELSTROM_SURFACE_SUBMISSION_REPORT
-$savedMediaAcceptancePath = $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH
-$savedMediaAcceptanceReport = $env:MAELSTROM_MEDIA_ACCEPTANCE_REPORT
-$savedMediaAcceptanceExportPath = $env:MAELSTROM_MEDIA_ACCEPTANCE_EXPORT_PATH
-$startupReportPath = Join-Path $distRoot 'last-startup-smoke.json'
-$surfaceSubmissionReportPath = Join-Path $distRoot 'last-surface-submission-smoke.json'
-$mediaAcceptanceReportPath = Join-Path $distRoot 'last-media-acceptance-smoke.json'
-$smokeMediaPath = Join-Path $distRoot 'packaged-media-acceptance-smoke.mp4'
-$smokeExportPath = Join-Path $distRoot 'packaged-media-acceptance-export.mp4'
-Remove-Item -LiteralPath $startupReportPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $surfaceSubmissionReportPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $mediaAcceptanceReportPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $smokeMediaPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $smokeExportPath -Force -ErrorAction SilentlyContinue
 $requiredPackagedRuntimes = @(
     'avcodec-62.dll',
     'avdevice-62.dll',
@@ -294,6 +279,38 @@ foreach ($runtimeName in $requiredPackagedRuntimes) {
         throw "Packaged Maelstrom runtime is incomplete: $runtimeName is missing beside Maelstrom.exe."
     }
 }
+$packageExePath = Join-Path $output 'Maelstrom.exe'
+$packageStatusPath = Join-Path $output 'PACKAGE-STATUS.json'
+$packageStatus = [ordered]@{
+    schema_version = 1
+    packaged_at_utc = [DateTime]::UtcNow.ToString('o')
+    executable = 'Maelstrom.exe'
+    executable_sha256 = (Get-FileHash -LiteralPath $packageExePath -Algorithm SHA256).Hash
+    smoke_status = if ($SkipSmoke) { 'not_run' } else { 'not_passed' }
+}
+$packageStatus | ConvertTo-Json | Set-Content -LiteralPath $packageStatusPath -Encoding utf8
+if ($SkipSmoke) {
+    Write-Warning 'Skipped GUI smoke checks. This new package is unqualified; dist\last-*-smoke.json reports are historical.'
+    return (Get-Item -LiteralPath $packageExePath)
+}
+
+$savedSmokePath = $env:PATH
+$savedSmokeEditor = $env:MAELSTROM_SMOKE_EDITOR
+$savedStartupReport = $env:MAELSTROM_STARTUP_REPORT
+$savedSurfaceSubmissionReport = $env:MAELSTROM_SURFACE_SUBMISSION_REPORT
+$savedMediaAcceptancePath = $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH
+$savedMediaAcceptanceReport = $env:MAELSTROM_MEDIA_ACCEPTANCE_REPORT
+$savedMediaAcceptanceExportPath = $env:MAELSTROM_MEDIA_ACCEPTANCE_EXPORT_PATH
+$startupReportPath = Join-Path $distRoot 'last-startup-smoke.json'
+$surfaceSubmissionReportPath = Join-Path $distRoot 'last-surface-submission-smoke.json'
+$mediaAcceptanceReportPath = Join-Path $distRoot 'last-media-acceptance-smoke.json'
+$smokeMediaPath = Join-Path $distRoot 'packaged-media-acceptance-smoke.mp4'
+$smokeExportPath = Join-Path $distRoot 'packaged-media-acceptance-export.mp4'
+Remove-Item -LiteralPath $startupReportPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $surfaceSubmissionReportPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $mediaAcceptanceReportPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $smokeMediaPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $smokeExportPath -Force -ErrorAction SilentlyContinue
 $smokeProcess = $null
 try {
     $env:PATH = 'C:\Windows\System32;C:\Windows'
@@ -600,6 +617,8 @@ try {
     Write-Host "Startup smoke: first successful surface presentation in $($startup.first_surface_present_ms) ms"
     Write-Host "Surface submission smoke: $($surfaceSubmission.average_submission_fps) submissions/s, interval p95 $($surfaceSubmission.surface_submission_interval_p95_ms) ms, CPU p95 $($surfaceSubmission.cpu_p95_ms) ms (not scanout/GPU completion)"
     Write-Host "Media acceptance smoke: native viewer upload; balanced viewer/timeline $($mediaAcceptance.viewer_panel_height)/$($mediaAcceptance.timeline_panel_height) px; fitted view $($mediaAcceptance.timeline_view_span_ticks)/$($mediaAcceptance.timeline_end_ticks) ticks; $($mediaAcceptance.linked_video_bars) V bars, $($mediaAcceptance.linked_audio_bars) A bars, $($mediaAcceptance.waveform_peak_count) waveform peaks, $($mediaAcceptance.playhead_advanced_ticks) ticks, export cancelled cleanly"
+    $packageStatus.smoke_status = 'passed'
+    $packageStatus | ConvertTo-Json | Set-Content -LiteralPath $packageStatusPath -Encoding utf8
 } finally {
     if ($smokeProcess) {
         try {
@@ -649,7 +668,7 @@ try {
     Remove-Item -LiteralPath $smokeExportPath -Force -ErrorAction SilentlyContinue
 }
 
-Get-Item -LiteralPath (Join-Path $output 'Maelstrom.exe')
+Get-Item -LiteralPath $packageExePath
 } finally {
     $env:PATH = $savedProcessPath
     if ($null -eq $savedFfmpegDir) {
