@@ -459,7 +459,7 @@ pub struct PlaybackTarget<'a> {
     /// Exact positive source frame rate used to coalesce monitor requests on source-frame
     /// boundaries without rounding NTSC-style rates.
     pub source_frame_rate: Option<SourceFrameRate>,
-    /// Duration to the following indexed source-frame boundary, when packet timing supplied it.
+    /// Duration to the following indexed source-frame boundary, when decoded timing supplied it.
     pub source_frame_duration_tick: Option<Tick>,
     /// Clip-local video opacity after applying the default fade-to-black envelope.
     pub opacity: f32,
@@ -515,7 +515,7 @@ impl SourceFrameRate {
 /// One million microsecond ticks occupy roughly 8 MiB and bound background-analysis output.
 pub const MAX_SOURCE_FRAME_TIME_INDEX_POINTS: usize = 1_000_000;
 
-/// Runtime-only packet-derived source-frame boundaries for one media item.
+/// Runtime-only decoded-frame source boundaries for one media item.
 ///
 /// This deliberately stays out of snapshots: it can be rebuilt from the source file and must
 /// never make a project dirty merely because media analysis completed.
@@ -1510,7 +1510,7 @@ pub struct EditorState {
     waveform_errors: HashMap<MediaId, String>,
     media_errors: HashMap<MediaId, String>,
     media_metadata: HashMap<MediaId, MediaMetadata>,
-    /// Packet timing is rebuildable runtime state and is deliberately never serialized.
+    /// Decoded frame timing is rebuildable runtime state and is deliberately never serialized.
     source_frame_time_indexes: HashMap<MediaId, SourceFrameTimeIndex>,
     media_decoder_backends: HashMap<MediaId, String>,
     /// Runtime-only proxy job/readiness state. It must not dirty or alter project snapshots.
@@ -2615,7 +2615,7 @@ impl EditorState {
         self.media_errors.contains_key(&media_id)
     }
 
-    /// Replaces or clears packet timing for runtime source-frame addressing without affecting saves.
+    /// Replaces or clears decoded frame timing for runtime source-frame addressing without affecting saves.
     pub fn set_media_frame_time_index(
         &mut self,
         media_id: MediaId,

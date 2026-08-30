@@ -38,10 +38,23 @@ const DECODE_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 /// The timing index stores signed microsecond source ticks, so one million
 /// points consumes roughly 8 MiB while still covering several hours of common
-/// frame rates. Packet output is streamed; this is only the retained index.
+/// frame rates. Decoded timestamp output is streamed; this is only the retained index.
 pub const MAX_FRAME_TIMING_POINTS: usize = 1_000_000;
 const MAX_FRAME_TIMING_LINE_BYTES: usize = 4 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(8);
+const FRAME_TIMING_PROBE_ARGS: [&str; 11] = [
+    "-v",
+    "error",
+    "-threads",
+    "1",
+    "-select_streams",
+    "v:0",
+    "-show_frames",
+    "-show_entries",
+    "frame=best_effort_timestamp_time",
+    "-of",
+    "compact=p=0:nk=0",
+];
 
 fn media_tool(name: &'static str) -> PathBuf {
     media_tool_from_executable(name, std::env::current_exe().ok().as_deref())
@@ -139,7 +152,7 @@ impl FrameTimeIndex {
     }
 }
 
-/// Frame-timing classification derived from a complete packet PTS scan.
+/// Frame-timing classification derived from a complete decoded-frame timestamp scan.
 ///
 /// `Variable` is the only state that publishes a frame index. `Unknown` means
 /// the scan produced too little or unusable timing data and must not be used
@@ -282,7 +295,7 @@ pub enum WaveformError {
     Decode { path: PathBuf, message: String },
     /// FFmpeg could not decode or assemble the requested video preview.
     VideoDecode { path: PathBuf, message: String },
-    /// FFprobe could not produce a complete bounded video packet timing scan.
+    /// FFprobe could not produce a complete bounded decoded video frame timing scan.
     FrameTiming { path: PathBuf, message: String },
     /// The owning media-analysis job was superseded and its subprocesses were reaped.
     Cancelled { path: PathBuf },
@@ -829,8 +842,8 @@ pub fn probe_duration_cancellable(
         })
 }
 
-/// Scan the best video stream's packet presentation timestamps without
-/// decoding frames. This blocks on process I/O and belongs on a media worker.
+/// Scan the best video stream's decoded-frame presentation timestamps. This
+/// blocks on process I/O and belongs on a media worker.
 pub fn analyze_frame_timing(path: impl AsRef<Path>) -> Result<FrameTiming, WaveformError> {
     analyze_frame_timing_cancellable(path, Arc::new(AtomicBool::new(false)))
 }
@@ -855,17 +868,7 @@ pub fn analyze_frame_timing_cancellable(
     let mut command = Command::new(media_tool(FFPROBE));
     hide_console_window(&mut command);
     let mut child = command
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_packets",
-            "-show_entries",
-            "packet=pts_time",
-            "-of",
-            "compact=p=0:nk=0",
-        ])
+        .args(FRAME_TIMING_PROBE_ARGS)
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -891,7 +894,7 @@ pub fn analyze_frame_timing_cancellable(
         pending.extend_from_slice(&chunk);
         while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
             let line = pending.drain(..=newline).collect::<Vec<_>>();
-            let pts_time = match parse_packet_pts_line(&line) {
+            let pts_time = match parse_frame_timestamp_line(&line) {
                 Ok(Some(pts_time)) => pts_time,
                 Ok(None) => continue,
                 Err(message) => break 'scan Err(frame_timing_error(path, message)),
@@ -903,7 +906,7 @@ pub fn analyze_frame_timing_cancellable(
         if pending.len() > MAX_FRAME_TIMING_LINE_BYTES {
             break Err(frame_timing_error(
                 path,
-                "FFprobe emitted an oversized packet timing line",
+                "FFprobe emitted an oversized decoded frame timing line",
             ));
         }
     };
@@ -928,8 +931,8 @@ pub fn analyze_frame_timing_cancellable(
         return Err(frame_timing_error(path, stderr_message(&stderr)));
     }
     if !pending.is_empty() {
-        let pts_time =
-            parse_packet_pts_line(&pending).map_err(|message| frame_timing_error(path, message))?;
+        let pts_time = parse_frame_timestamp_line(&pending)
+            .map_err(|message| frame_timing_error(path, message))?;
         if let Some(pts_time) = pts_time {
             retain_frame_timing_point(&mut pts, pts_time)
                 .map_err(|message| frame_timing_error(path, message))?;
@@ -941,7 +944,7 @@ pub fn analyze_frame_timing_cancellable(
 fn retain_frame_timing_point(pts: &mut Vec<i64>, pts_time: i64) -> Result<(), String> {
     if pts.len() == MAX_FRAME_TIMING_POINTS {
         return Err(format!(
-            "video packet timing exceeds the {MAX_FRAME_TIMING_POINTS}-point safety cap"
+            "decoded video frame timing exceeds the {MAX_FRAME_TIMING_POINTS}-point safety cap"
         ));
     }
     pts.push(pts_time);
@@ -955,9 +958,9 @@ fn frame_timing_error(path: &Path, message: impl Into<String>) -> WaveformError 
     }
 }
 
-fn parse_packet_pts_line(line: &[u8]) -> Result<Option<i64>, String> {
+fn parse_frame_timestamp_line(line: &[u8]) -> Result<Option<i64>, String> {
     let line = std::str::from_utf8(line)
-        .map_err(|_| "FFprobe emitted non-UTF-8 packet timing output".to_owned())?
+        .map_err(|_| "FFprobe emitted non-UTF-8 decoded frame timing output".to_owned())?
         .trim();
     if line.is_empty() {
         return Ok(None);
@@ -965,15 +968,15 @@ fn parse_packet_pts_line(line: &[u8]) -> Result<Option<i64>, String> {
     let mut pts_time = None;
     for field in line.split('|') {
         let Some((key, value)) = field.split_once('=') else {
-            return Err("FFprobe emitted malformed compact packet timing output".to_owned());
+            return Err("FFprobe emitted malformed compact decoded frame timing output".to_owned());
         };
-        if key == "pts_time" && pts_time.replace(value).is_some() {
-            return Err("FFprobe emitted duplicate pts_time fields".to_owned());
+        if key == "best_effort_timestamp_time" && pts_time.replace(value).is_some() {
+            return Err("FFprobe emitted duplicate best_effort_timestamp_time fields".to_owned());
         }
     }
-    parse_pts_microseconds(
-        pts_time.ok_or_else(|| "FFprobe packet output omitted pts_time".to_owned())?,
-    )
+    parse_pts_microseconds(pts_time.ok_or_else(|| {
+        "FFprobe decoded frame output omitted best_effort_timestamp_time".to_owned()
+    })?)
     .map(Some)
 }
 
@@ -989,32 +992,32 @@ fn parse_pts_microseconds(value: &str) -> Result<i64, String> {
         || !whole.bytes().all(|byte| byte.is_ascii_digit())
         || !fraction.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(format!("invalid packet pts_time {value:?}"));
+        return Err(format!("invalid decoded frame timestamp {value:?}"));
     }
     let whole = whole
         .parse::<u128>()
-        .map_err(|_| format!("packet pts_time is out of range: {value:?}"))?;
+        .map_err(|_| format!("decoded frame timestamp is out of range: {value:?}"))?;
     let denominator = 10_u128
         .checked_pow(fraction.len() as u32)
-        .ok_or_else(|| format!("packet pts_time has excessive precision: {value:?}"))?;
+        .ok_or_else(|| format!("decoded frame timestamp has excessive precision: {value:?}"))?;
     let fraction = if fraction.is_empty() {
         0
     } else {
         fraction
             .parse::<u128>()
-            .map_err(|_| format!("packet pts_time is out of range: {value:?}"))?
+            .map_err(|_| format!("decoded frame timestamp is out of range: {value:?}"))?
     };
     let numerator = whole
         .checked_mul(denominator)
         .and_then(|value| value.checked_add(fraction))
         .and_then(|value| value.checked_mul(1_000_000))
-        .ok_or_else(|| format!("packet pts_time is out of range: {value:?}"))?;
+        .ok_or_else(|| format!("decoded frame timestamp is out of range: {value:?}"))?;
     let rounded = numerator
         .checked_add(denominator / 2)
-        .ok_or_else(|| format!("packet pts_time is out of range: {value:?}"))?
+        .ok_or_else(|| format!("decoded frame timestamp is out of range: {value:?}"))?
         / denominator;
     let magnitude = i64::try_from(rounded)
-        .map_err(|_| format!("packet pts_time is out of range: {value:?}"))?;
+        .map_err(|_| format!("decoded frame timestamp is out of range: {value:?}"))?;
     Ok(if negative { -magnitude } else { magnitude })
 }
 
@@ -1564,17 +1567,81 @@ mod tests {
     }
 
     #[test]
-    fn packet_timing_parser_is_named_and_rounds_to_decoder_microseconds() {
+    fn decoded_frame_timing_parser_is_named_and_rounds_to_decoder_microseconds() {
         assert_eq!(
-            parse_packet_pts_line(b"duration_time=0.033367|pts_time=0.033366667\n"),
+            parse_frame_timestamp_line(
+                b"pkt_duration_time=0.033367|best_effort_timestamp_time=0.033366667\n"
+            ),
             Ok(Some(33_367))
         );
         assert_eq!(
-            parse_packet_pts_line(b"pts_time=0.033366\n"),
+            parse_frame_timestamp_line(b"best_effort_timestamp_time=0.033366\n"),
             Ok(Some(33_366))
         );
-        assert!(parse_packet_pts_line(b"pts_time=N/A\n").is_err());
-        assert!(parse_packet_pts_line(b"duration_time=1\n").is_err());
+        assert!(parse_frame_timestamp_line(b"best_effort_timestamp_time=N/A\n").is_err());
+        assert!(parse_frame_timestamp_line(b"pkt_duration_time=1\n").is_err());
+    }
+
+    #[test]
+    fn frame_timing_probe_uses_bounded_decoded_best_effort_timestamps() {
+        assert!(
+            FRAME_TIMING_PROBE_ARGS
+                .windows(2)
+                .any(|pair| pair == ["-threads", "1"])
+        );
+        assert!(FRAME_TIMING_PROBE_ARGS.contains(&"-show_frames"));
+        assert!(
+            FRAME_TIMING_PROBE_ARGS
+                .windows(2)
+                .any(|pair| pair == ["-show_entries", "frame=best_effort_timestamp_time"])
+        );
+        assert!(!FRAME_TIMING_PROBE_ARGS.contains(&"-show_packets"));
+    }
+
+    #[test]
+    fn decoded_frame_scan_handles_reordered_b_frame_vfr_media() {
+        if !ffmpeg_tools_available() {
+            return;
+        }
+
+        let path = temporary_path("vfr-b-frames").with_extension("mp4");
+        let result = (|| -> Result<FrameTiming, String> {
+            let status = Command::new(media_tool(FFMPEG))
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=32x32:rate=30:duration=1",
+                    "-vf",
+                    "select='eq(n,0)+eq(n,1)+eq(n,4)+eq(n,5)',setpts=PTS-STARTPTS",
+                    "-fps_mode",
+                    "vfr",
+                    "-c:v",
+                    "mpeg4",
+                    "-bf",
+                    "2",
+                    "-q:v",
+                    "2",
+                    "-y",
+                ])
+                .arg(&path)
+                .status()
+                .map_err(|error| error.to_string())?;
+            if !status.success() {
+                return Err(format!("FFmpeg exited with {status}"));
+            }
+            analyze_frame_timing(&path).map_err(|error| error.to_string())
+        })();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            result,
+            Ok(FrameTiming::Variable(FrameTimeIndex {
+                pts_microseconds: vec![0, 33_333, 133_333, 166_667],
+            }))
+        );
     }
 
     #[test]
@@ -1586,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn irregular_packet_gaps_publish_a_complete_variable_index() {
+    fn irregular_decoded_frame_gaps_publish_a_complete_variable_index() {
         let timing = classify_frame_timing(vec![100_000, 0, 33_333]);
         assert_eq!(
             timing,
@@ -1603,7 +1670,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_or_negative_packet_pts_are_unknown() {
+    fn duplicate_or_negative_decoded_frame_timestamps_are_unknown() {
         assert_eq!(
             classify_frame_timing(vec![0, 0, 33_333]),
             FrameTiming::Unknown

@@ -259,8 +259,11 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       targets, immutable preview requests, request keys, and decoder cache tolerance without
       millihertz rounding. Fractional frame boundaries use the first representable microsecond, and
       unknown timing is neither snapped to an invented 120 fps grid nor allowed to substitute a
-      later cached frame. A bounded/cancellable one-million-point packet-PTS scan now classifies
-      constant, variable, and unknown timing off the UI thread. Variable sources retain a
+      later cached frame. A bounded/cancellable, single-decode-thread, one-million-point decoded
+      best-effort timestamp scan now classifies constant, variable, and unknown timing off the UI
+      thread. This matches the
+      timestamp contract used by the live libav monitor decoder instead of assuming one packet PTS
+      always represents one displayed frame. Variable sources retain a
       runtime-only index, suppress the unsafe average-rate seek grid, hold the greatest source PTS
       at or before the logical playhead, and carry each adjacent local span into request/cache
       policy. The deterministic MPEG-4 fixture proves exact `0/40/110/150/240 ms` irregular PTS
@@ -268,9 +271,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       one irregular indexed source, proves exact-boundary and boundary-plus-one mapping through
       forward and decreasing playheads, carries the same PTS/local span into immutable preview
       requests, and holds the final indexed frame from the exclusive source out-point at both 30 and
-      30000/1001 project rates. Empty indexes retain CFR fallback. This remains open because packet
-      PTS is a safe bounded demux index rather than decoded best-effort frame timing for every
-      complex codec; broad real-media/cross-backend proof is still required.
+      30000/1001 project rates. Empty indexes retain CFR fallback. The probe command contract is
+      regression-locked to decoded best-effort timestamps, and a generated reordered B-frame VFR
+      source exercises that scan in decoded presentation order. This remains open pending broad
+      real-media/cross-backend proof and a real VFR trim/slip export identity gate.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for
