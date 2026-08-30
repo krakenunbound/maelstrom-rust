@@ -4040,9 +4040,9 @@ impl Timeline {
         Ok(result)
     }
 
-    /// Preflights ordinary non-ripple edits against immediate neighbors only.
-    /// Since a track is ordered/non-overlapping, crossing any distant clip
-    /// necessarily crosses one of these neighbors first.
+    /// Preflights the destination of ordinary non-ripple edits before any mutation.
+    /// Unchanged clips stay ordered, so only the nearest unchanged neighbors at the
+    /// destination and the final intervals of other edited clips can overlap it.
     fn validate_timing_changes(&self, changes: &[TimingChange]) -> Result<(), TimelineError> {
         for change in changes {
             if change.start.0 < 0 {
@@ -4054,37 +4054,49 @@ impl Timeline {
             if change.source_in.0 < 0 {
                 return Err(TimelineError::NegativeSourceIn { clip: change.id });
             }
+            checked_add(change.start, change.duration)?;
+            self.clip_location(change.id)
+                .ok_or(TimelineError::UnknownClip(change.id))?;
+        }
+        for change in changes {
             let location = self
                 .clip_location(change.id)
-                .ok_or(TimelineError::UnknownClip(change.id))?;
+                .expect("preflighted clip exists");
             let original = &self.tracks[location.track_index].clips[location.clip_index];
             let end = checked_add(change.start, change.duration)?;
             let track = &self.tracks[location.track_index];
-            let changed_value = |id: ClipId| {
-                changes
-                    .iter()
-                    .find(|candidate| candidate.id == id)
-                    .map(|candidate| (candidate.start, candidate.duration))
-            };
-            let overlaps = |other: &Clip| {
-                let (other_start, other_duration) =
-                    changed_value(other.id).unwrap_or((other.start, other.duration));
+            let overlaps = |other_start: Tick, other_duration: Tick| {
                 change.start < checked_add(other_start, other_duration).expect("preflighted tick")
                     && end > other_start
             };
-            if location.clip_index > 0 && overlaps(&track.clips[location.clip_index - 1]) {
-                return Err(TimelineError::Overlap {
-                    track: original.track_id,
-                    clip: change.id,
-                });
+            let unchanged = |other: &&Clip| !changes.iter().any(|edit| edit.id == other.id);
+            let destination = track
+                .clips
+                .partition_point(|clip| clip.start < change.start);
+            let previous = track.clips[..destination].iter().rev().find(unchanged);
+            let next = track.clips[destination..].iter().find(unchanged);
+            for other in previous.into_iter().chain(next) {
+                if overlaps(other.start, other.duration) {
+                    return Err(TimelineError::Overlap {
+                        track: original.track_id,
+                        clip: change.id,
+                    });
+                }
             }
-            if let Some(next) = track.clips.get(location.clip_index + 1)
-                && overlaps(next)
-            {
-                return Err(TimelineError::Overlap {
-                    track: original.track_id,
-                    clip: change.id,
-                });
+            for other in changes {
+                if other.id != change.id
+                    && self
+                        .clip_location(other.id)
+                        .expect("preflighted clip exists")
+                        .track_index
+                        == location.track_index
+                    && overlaps(other.start, other.duration)
+                {
+                    return Err(TimelineError::Overlap {
+                        track: original.track_id,
+                        clip: change.id,
+                    });
+                }
             }
         }
         Ok(())
@@ -4128,14 +4140,51 @@ impl Timeline {
             clip.source_in = change.source_in;
             Self::clamp_fades_to_clip(clip);
         }
-        let did_reorder = !reordered_tracks.is_empty();
         for track_index in reordered_tracks {
-            self.tracks[track_index]
-                .clips
-                .sort_by_key(|clip| clip.start);
-        }
-        if did_reorder {
-            self.rebuild_clip_locations();
+            let changes_on_track = changes
+                .iter()
+                .filter(|change| {
+                    self.clip_location(change.id)
+                        .is_some_and(|location| location.track_index == track_index)
+                })
+                .count();
+            if changes_on_track > 1 {
+                self.tracks[track_index]
+                    .clips
+                    .sort_by_key(|clip| clip.start);
+                let len = self.tracks[track_index].clips.len();
+                self.refresh_clip_locations_range(track_index, 0, len);
+                continue;
+            }
+
+            let change = changes
+                .iter()
+                .find(|change| {
+                    self.clip_location(change.id)
+                        .is_some_and(|location| location.track_index == track_index)
+                })
+                .expect("reordered track has one preflighted change");
+            let original_index = self
+                .clip_location(change.id)
+                .expect("preflighted clip exists")
+                .clip_index;
+            let (range_start, range_end) = {
+                let clips = &mut self.tracks[track_index].clips;
+                if original_index > 0 && clips[original_index - 1].start > change.start {
+                    let new_index =
+                        clips[..original_index].partition_point(|clip| clip.start <= change.start);
+                    clips[new_index..=original_index].rotate_right(1);
+                    (new_index, original_index + 1)
+                } else {
+                    let new_end = original_index
+                        + 1
+                        + clips[original_index + 1..]
+                            .partition_point(|clip| clip.start < change.start);
+                    clips[original_index..new_end].rotate_left(1);
+                    (original_index, new_end)
+                }
+            };
+            self.refresh_clip_locations_range(track_index, range_start, range_end);
         }
         self.prune_invalid_transitions();
         debug_assert!(self.check_invariants().is_ok());
@@ -4621,6 +4670,20 @@ impl Timeline {
                     },
                 );
             }
+        }
+    }
+
+    fn refresh_clip_locations_range(&mut self, track_index: usize, start: usize, end: usize) {
+        for clip_index in start..end {
+            let clip_id = self.tracks[track_index].clips[clip_index].id;
+            // Membership and track ownership did not change. Updating an existing entry also
+            // avoids HashMap::insert growing a full map during a purely positional edit.
+            let location = self
+                .clip_locations
+                .get_mut(&clip_id)
+                .expect("reordered clip is indexed");
+            debug_assert_eq!(location.track_index, track_index);
+            location.clip_index = clip_index;
         }
     }
 
@@ -5784,6 +5847,177 @@ mod tests {
         }
         assert_eq!(timeline.clip(pair.video).unwrap().track_id, video_track);
         assert_eq!(timeline.clip(pair.audio).unwrap().track_id, audio_track);
+        timeline.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn moving_linked_pair_relocates_each_track_in_place_and_preserves_history() {
+        let mut timeline = Timeline::new_default();
+        let pair = timeline
+            .insert_linked_av_pair(MediaId(9), Tick(40), Tick(10), Tick(7))
+            .unwrap();
+        let video_track = timeline.clip(pair.video).unwrap().track_id;
+        let audio_track = timeline.clip(pair.audio).unwrap().track_id;
+        let video_first = timeline
+            .insert_clip(video_track, MediaId(10), Tick(0), Tick(10), Tick(0))
+            .unwrap();
+        let video_next = timeline
+            .insert_clip(video_track, MediaId(11), Tick(20), Tick(10), Tick(0))
+            .unwrap();
+        let audio_first = timeline
+            .insert_clip(audio_track, MediaId(12), Tick(0), Tick(10), Tick(0))
+            .unwrap();
+        let audio_next = timeline
+            .insert_clip(audio_track, MediaId(13), Tick(20), Tick(10), Tick(0))
+            .unwrap();
+        let unaffected_track = timeline.add_track(TrackKind::Video);
+        let unaffected = timeline
+            .insert_clip(unaffected_track, MediaId(14), Tick(0), Tick(10), Tick(0))
+            .unwrap();
+
+        let video_index = timeline.track_index(video_track).unwrap();
+        let audio_index = timeline.track_index(audio_track).unwrap();
+        let video_pointer = timeline.tracks[video_index].clips.as_ptr();
+        let video_capacity = timeline.tracks[video_index].clips.capacity();
+        let audio_pointer = timeline.tracks[audio_index].clips.as_ptr();
+        let audio_capacity = timeline.tracks[audio_index].clips.capacity();
+        let location_capacity = timeline.clip_locations.capacity();
+        let unaffected_location = timeline.clip_location(unaffected).unwrap();
+        let before = timeline.snapshot();
+
+        timeline.move_clip(pair.video, Tick(-30)).unwrap();
+        assert_clip_location_index_matches_tracks(&timeline);
+        for (track_id, expected) in [
+            (video_track, vec![video_first, pair.video, video_next]),
+            (audio_track, vec![audio_first, pair.audio, audio_next]),
+        ] {
+            assert_eq!(
+                timeline
+                    .track(track_id)
+                    .unwrap()
+                    .clips
+                    .iter()
+                    .map(|clip| clip.id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        assert_eq!(
+            timeline
+                .clip_location(unaffected)
+                .map(|location| (location.track_index, location.clip_index)),
+            Some((
+                unaffected_location.track_index,
+                unaffected_location.clip_index
+            ))
+        );
+        assert_eq!(timeline.tracks[video_index].clips.as_ptr(), video_pointer);
+        assert_eq!(
+            timeline.tracks[video_index].clips.capacity(),
+            video_capacity
+        );
+        assert_eq!(timeline.tracks[audio_index].clips.as_ptr(), audio_pointer);
+        assert_eq!(
+            timeline.tracks[audio_index].clips.capacity(),
+            audio_capacity
+        );
+        assert_eq!(timeline.clip_locations.capacity(), location_capacity);
+        let after_left = timeline.snapshot();
+
+        let mut history = UndoStack::default();
+        assert!(history.record(&before, &after_left));
+        assert!(history.undo(&mut timeline));
+        assert_eq!(timeline.snapshot(), before);
+        assert!(history.redo(&mut timeline));
+        assert_eq!(timeline.snapshot(), after_left);
+
+        timeline.move_clip(pair.video, Tick(20)).unwrap();
+        assert_clip_location_index_matches_tracks(&timeline);
+        for (track_id, expected) in [
+            (video_track, vec![video_first, video_next, pair.video]),
+            (audio_track, vec![audio_first, audio_next, pair.audio]),
+        ] {
+            assert_eq!(
+                timeline
+                    .track(track_id)
+                    .unwrap()
+                    .clips
+                    .iter()
+                    .map(|clip| clip.id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        assert_eq!(
+            timeline
+                .clip_location(unaffected)
+                .map(|location| (location.track_index, location.clip_index)),
+            Some((
+                unaffected_location.track_index,
+                unaffected_location.clip_index
+            ))
+        );
+        let after_right = timeline.snapshot();
+        assert!(history.record(&after_left, &after_right));
+        assert!(history.undo(&mut timeline));
+        assert_eq!(timeline.snapshot(), after_left);
+        assert!(history.redo(&mut timeline));
+        assert_eq!(timeline.snapshot(), after_right);
+        timeline.check_invariants().unwrap();
+    }
+
+    fn assert_clip_location_index_matches_tracks(timeline: &Timeline) {
+        for (track_index, track) in timeline.tracks.iter().enumerate() {
+            for (clip_index, clip) in track.clips.iter().enumerate() {
+                let location = timeline
+                    .clip_location(clip.id)
+                    .expect("clip must be indexed, not found by scan fallback");
+                assert_eq!(
+                    (location.track_index, location.clip_index),
+                    (track_index, clip_index)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_timing_changes_preserve_sorted_fallback_and_location_index() {
+        let clips = (1..=4)
+            .map(|id| test_clip(id, i64::from(id - 1) * 3, 1))
+            .collect();
+        let (mut timeline, _) = cached_timeline_with_clips(clips);
+        let unrelated = timeline.add_track(TrackKind::Audio);
+        timeline
+            .insert_clip(unrelated, MediaId(7), Tick(0), Tick(10), Tick(0))
+            .unwrap();
+        let mut expected = timeline.snapshot();
+        let changes = [
+            TimingChange {
+                id: ClipId(1),
+                start: Tick(21),
+                duration: Tick(1),
+                source_in: Tick(0),
+            },
+            TimingChange {
+                id: ClipId(3),
+                start: Tick(24),
+                duration: Tick(1),
+                source_in: Tick(0),
+            },
+        ];
+        for change in &changes {
+            expected.tracks[0]
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == change.id)
+                .unwrap()
+                .start = change.start;
+        }
+        expected.tracks[0].clips.sort_by_key(|clip| clip.start);
+        timeline.validate_timing_changes(&changes).unwrap();
+        timeline.apply_timing_changes(&changes);
+        assert_eq!(timeline.snapshot(), expected);
+        assert_clip_location_index_matches_tracks(&timeline);
         timeline.check_invariants().unwrap();
     }
 

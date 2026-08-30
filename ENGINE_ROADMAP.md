@@ -186,6 +186,16 @@ Exit gate:
       separate from the historical package/draw results above. Profile relocation,
       index maintenance, and history capture before changing implementation or budgets.
       See `docs/phase1-generation-stress.md` for retained logs.
+      A subsequent relocation fix replaced whole-track sorting/global lookup rebuilds with
+      in-place range rotation and localized index updates, and fixed distant-destination
+      collision rejection before mutation. Serial release workspace verification passed 707
+      tests and strict workspace Clippy passed. The ten-trial history rerun improved move
+      p50 to 0.5434 ms and total edit/release p50 to 1.6175 ms, but only six trials passed both
+      unchanged 2 ms limits: three press captures and one release exceeded them. Pointer-press
+      p95 was 2.2894 ms; edit/release p95 was 2.4516 ms. This gate stays open for checkpoint
+      capture/release tail work; see `docs/timeline-relocation-performance.md`. The preceding
+      parallel workspace run also exposed a decoder-fixture cleanup sharing violation that
+      did not recur in the serial run; deterministic teardown remains to be repaired.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope

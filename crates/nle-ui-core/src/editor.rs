@@ -17553,15 +17553,19 @@ mod tests {
         let press_elapsed = press_started.elapsed();
 
         let release_started = Instant::now();
+        let move_started = Instant::now();
         editor
             .timeline
             .move_clip_with_link(ClipId(25_000), Tick(-49_997_000), false)
             .unwrap();
+        let move_elapsed = move_started.elapsed();
+        let history_started = Instant::now();
         assert!(editor.commit_timeline_history());
+        let history_elapsed = history_started.elapsed();
         let release_elapsed = release_started.elapsed();
 
         eprintln!(
-            "50k editor history events: press checkpoint={press_elapsed:?}, edit+release={release_elapsed:?}"
+            "50k editor history events: press checkpoint={press_elapsed:?}, move-only={move_elapsed:?}, history-record={history_elapsed:?}, edit+release={release_elapsed:?}"
         );
         assert!(
             press_elapsed < Duration::from_millis(2),

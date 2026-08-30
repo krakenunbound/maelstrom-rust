@@ -78,6 +78,13 @@ general structural diff. The release 50,000-clip gate requires history recording
 the same 2 ms interaction budget. The editor records against the live timeline after a gesture,
 avoiding a redundant full after-state clone while retaining the before snapshot required for undo.
 
+Ordinary relocation uses a binary destination search and in-place rotation of only the crossed
+clip range, independently for linked audio/video tracks. Only affected location-index entries are
+updated; multi-change reorders retain stable sorting on the affected track. Collision validation
+checks the destination's unchanged neighbors and the final intervals of other edited clips before
+any mutation. The 50k history gate remains open for before-state capture and release tail latency;
+see `docs/timeline-relocation-performance.md` for the retained measurements and limits.
+
 Timeline-bound Media Pool and operating-system file drops use non-ripple overwrite edits on V1/A1
 or A1: occupied sections become source-accurate outer tails and later clips do not move. The explicit
 Add action remains append-only. Placement emits background analysis only after the bar exists, and
