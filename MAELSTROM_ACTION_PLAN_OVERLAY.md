@@ -127,7 +127,7 @@ Finish holes. Do not replace working crates.
 
 ### Incomplete — finish, don’t replace
 
-1. **Multi-source scheduler.** Slots exist; a real `PreviewRequest` plus session eviction under the 512–2048 MiB cap does not. Four 1080p sources must not hitch the timeline. A slow source must not stall the clock.
+1. **Multi-source scheduler.** Immutable multi-source requests, shared source actors, hard caps, and speculative-prewarm-first priority/recency eviction now exist. Visible reverse-scrub work is protected from speculative release. The remaining gate is UI-present/cross-hardware proof that four 1080p sources do not hitch the timeline and a slow source does not stall the clock.
 2. **VFR / rational rates.** Project rate exists; source-time mapping across trim, slip, reverse, and 30000/1001 is still a correctness hole.
 3. **Proxies.** Optional derived media. Never a prerequisite to play or edit.
 4. **Premultiplied alpha.** Layers composite; image/video alpha semantics are unfinished. Redo the blend path, not the compositor crate.
@@ -173,7 +173,7 @@ Gate: one report on integrated Intel and one on discrete GPU. Foundation 50k + p
 ### Then — Phase 1 holes
 
 Done-ish: adaptive preview, manual quality, per-source slots.
-Open: `PreviewRequest` multi-source scheduler, session eviction, optional proxies, VFR mapping, inspector backend/fallback per layer.
+Open: UI-present/cross-hardware multi-source proof, live-audio continuity proof, optional proxies, broad VFR/cross-backend proof, and inspector backend/fallback per layer. Bounded speculative-prewarm-first priority/recency session eviction is implemented; strict priority has no age-based fairness guarantee.
 
 Gate: four 1080p sources requested at once; timeline latency unchanged; slow source cannot stall the clock.
 

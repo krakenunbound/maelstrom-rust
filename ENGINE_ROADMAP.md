@@ -150,13 +150,22 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       The post-refactor authoritative ten-minute four-source gate held four source groups, five
       live actors/sessions under the eight-actor/session cap, zero retiring actors at the final
       sample, and zero sessions after app drop.
-- [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing. Video
+- [x] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing. Video
       admission now releases all absent positional slots first, then uses an allocation-free fixed
       array to admit contributing sources by descending priority with the visually topmost layer
       winning ties. A one-source-cap regression proves a top layer wins fresh contention and an
-      absent lower layer releases before its upper replacement is admitted. This remains open for
-      audible-versus-speculative arbitration and safe preemptive eviction under active contention;
-      actual audio playback is still never truncated to the diagnostic snapshot cap.
+      absent lower layer releases before its upper replacement is admitted. Under active contention,
+      the app now discards speculative background lanes first, then yields one complete strictly
+      lower-priority physical source group; equal/higher-priority consumers protect a shared source,
+      and oldest request ID breaks equal-priority ties. The selected group's logical leases yield
+      sequentially without waiting for actor shutdown. Yielding retains each exact latest request
+      and last presented frame, and deferred retry uses the same priority/topmost order. Visible
+      reverse-scrub lanes are not treated as speculative prewarm. Deterministic coverage proves
+      real-media lower-first takeover, permit-safe retry during actor retirement, actor/session
+      bounds, shared-source group selection, recency, and an unchanged complete editor audio-target
+      snapshot. This is not yet live audio-device continuity proof. Strict priority has no
+      age-based fairness bound. Audio remains independently scheduled and is never truncated to the
+      diagnostic snapshot cap.
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.
 - [x] Add adaptive full/half/quarter/eighth preview resolution based on measured frame budget.
 - [x] Add manual preview-quality override and an honest Auto mode.
@@ -178,9 +187,14 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       30000/1001 project rates. Empty indexes retain CFR fallback. This remains open because packet
       PTS is a safe bounded demux index rather than decoded best-effort frame timing for every
       complex codec; broad real-media/cross-backend proof is still required.
-- [ ] Add decode-session eviction that respects the global byte/session cap. Release-first cleanup
-      now prevents a noncontributing positional slot from blocking its replacement, but it is not
-      global priority/recency eviction and makes no preemption claim for active contributors.
+- [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
+      policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
+      eligible visual source group, yielding its logical leases sequentially without waiting for
+      actor shutdown. The decoder drops actor leases asynchronously through the bounded reaper while
+      retaining exact retry work; explicit release still creates no retry. Visible reverse-scrub
+      lanes are protected from speculative release. Hard-cap, permit-retirement, and
+      post-release-zero tests cover live plus retiring actors. The decoded-frame cache remains
+      independently byte-capped by its exact LRU accounting.
 - [ ] Expose active source backend, preview scale, proxy/original choice, and fallback reason.
 
 Exit gate:
@@ -463,7 +477,7 @@ Exit gate:
 - [ ] Optional proxies
 - [ ] VFR-correct source mapping
 - [ ] Broad decode corpus
-- [ ] Bounded decoder/session eviction
+- [x] Bounded decoder/session eviction
 - [ ] Accurate backend/fallback reporting
 
 ### Video compositor

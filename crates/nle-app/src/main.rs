@@ -1146,6 +1146,103 @@ fn contributing_video_layers_by_priority(
     (layers, count)
 }
 
+/// Selects one complete lower-priority physical source group for eviction. Multiple logical
+/// layers may share one coordinator actor, so returning only one layer would not release the
+/// group's hard permit. A group needed by any equal/higher-priority contributor is protected.
+fn lower_priority_monitor_eviction_group(
+    sources: &[Option<PreviewSourceRequest>; MONITOR_LAYER_COUNT],
+    identities: &[Option<MonitorSourceIdentity>; MONITOR_LAYER_COUNT],
+    deferred: &[bool; MONITOR_LAYER_COUNT],
+    latest_request_ids: &[u64; MONITOR_LAYER_COUNT],
+    requester_layer: usize,
+    requester_identity: &MonitorSourceIdentity,
+) -> [bool; MONITOR_LAYER_COUNT] {
+    let Some(requester) = sources[requester_layer] else {
+        return [false; MONITOR_LAYER_COUNT];
+    };
+    let mut selected_layer = None;
+    let mut selected_rank = (u8::MAX, u64::MAX, usize::MAX);
+
+    for candidate_layer in 0..MONITOR_LAYER_COUNT {
+        let Some(candidate_identity) = identities[candidate_layer].as_ref() else {
+            continue;
+        };
+        if candidate_identity == requester_identity {
+            continue;
+        }
+        if identities[..candidate_layer]
+            .iter()
+            .any(|identity| identity.as_ref() == Some(candidate_identity))
+        {
+            continue;
+        }
+
+        let mut has_live_member = false;
+        let mut group_priority = 0;
+        let mut group_recency = 0;
+        let mut group_top_layer = 0;
+        for layer in 0..MONITOR_LAYER_COUNT {
+            if identities[layer].as_ref() != Some(candidate_identity) {
+                continue;
+            }
+            has_live_member |= !deferred[layer];
+            group_recency = group_recency.max(latest_request_ids[layer]);
+            if let Some(source) = sources[layer] {
+                group_priority = group_priority.max(source.priority);
+                group_top_layer = group_top_layer.max(layer);
+            }
+        }
+        if !has_live_member || group_priority >= requester.priority {
+            continue;
+        }
+        let rank = (group_priority, group_recency, group_top_layer);
+        if selected_layer.is_none() || rank < selected_rank {
+            selected_layer = Some(candidate_layer);
+            selected_rank = rank;
+        }
+    }
+
+    let mut selected = [false; MONITOR_LAYER_COUNT];
+    let Some(selected_identity) = selected_layer.and_then(|layer| identities[layer].as_ref())
+    else {
+        return selected;
+    };
+    for layer in 0..MONITOR_LAYER_COUNT {
+        selected[layer] = identities[layer].as_ref() == Some(selected_identity);
+    }
+    selected
+}
+
+/// Orders only selected monitor slots for deferred retry. Higher visual priority wins; visually
+/// topmost layers win ties, matching first admission and preventing an evicted lower layer from
+/// stealing a newly freed source permit back on the next pump.
+fn selected_monitor_layers_by_priority(
+    priorities: &[u8; MONITOR_LAYER_COUNT],
+    selected: &[bool; MONITOR_LAYER_COUNT],
+) -> ([usize; MONITOR_LAYER_COUNT], usize) {
+    let mut layers = [0; MONITOR_LAYER_COUNT];
+    let mut count = 0;
+    for layer in 0..MONITOR_LAYER_COUNT {
+        if !selected[layer] {
+            continue;
+        }
+        let mut insert_at = count;
+        while insert_at > 0 {
+            let preceding = layers[insert_at - 1];
+            if priorities[preceding] > priorities[layer]
+                || (priorities[preceding] == priorities[layer] && preceding > layer)
+            {
+                break;
+            }
+            layers[insert_at] = preceding;
+            insert_at -= 1;
+        }
+        layers[insert_at] = layer;
+        count += 1;
+    }
+    (layers, count)
+}
+
 fn preview_decode_size(editor: &EditorState, scrubbing: bool) -> (u32, u32) {
     if editor.playing || scrubbing {
         editor.monitor_playback_decode_size_hint()
@@ -3076,6 +3173,7 @@ struct App {
     monitor_next_request_id: u64,
     monitor_requests_in_flight: [bool; MONITOR_LAYER_COUNT],
     monitor_request_deferred: [bool; MONITOR_LAYER_COUNT],
+    monitor_admission_priorities: [u8; MONITOR_LAYER_COUNT],
     monitor_request_started_at: [Option<(u64, Instant)>; MONITOR_LAYER_COUNT],
     adaptive_preview: AdaptivePreviewController,
     hub: ProjectHubState,
@@ -3376,6 +3474,7 @@ impl App {
             monitor_next_request_id: 1,
             monitor_requests_in_flight: [false; MONITOR_LAYER_COUNT],
             monitor_request_deferred: [false; MONITOR_LAYER_COUNT],
+            monitor_admission_priorities: [0; MONITOR_LAYER_COUNT],
             monitor_request_started_at: [None; MONITOR_LAYER_COUNT],
             adaptive_preview: AdaptivePreviewController::default(),
             hub,
@@ -5206,6 +5305,11 @@ impl App {
         let prewarm_layer = (!self.editor.playing && !preview.is_scrubbing)
             .then(|| preview.sources.iter().rposition(Option::is_some))
             .flatten();
+        for layer in 0..MONITOR_LAYER_COUNT {
+            self.monitor_admission_priorities[layer] = preview.sources[layer]
+                .map(|source| source.priority)
+                .unwrap_or(0);
+        }
         // Release every no-longer-contributing positional slot before admitting any source. This
         // gives a newly visible high-priority layer a chance to take a hard coordinator permit
         // immediately instead of being deferred behind an inactive lower layer.
@@ -5369,17 +5473,56 @@ impl App {
                     // normal monitor pump after another positional source releases a group.
                     // It remains logically in flight so a retry event still matches this exact
                     // generation/request ID; it is not a decoder-unavailable error.
+                    let requester_identity = MonitorSourceIdentity {
+                        media_id: source.media_id,
+                        path: target_path,
+                        acceleration,
+                    };
                     self.record_monitor_request_submission(
                         layer,
                         key,
-                        MonitorSourceIdentity {
-                            media_id: source.media_id,
-                            path: target_path,
-                            acceleration,
-                        },
+                        requester_identity.clone(),
                         request_id,
                         true,
                     );
+                    let released_speculative = self.release_speculative_monitor_sessions();
+                    if released_speculative {
+                        match self.monitor_decoders[layer].retry_deferred_requests() {
+                            Ok(()) => self.monitor_request_deferred[layer] = false,
+                            Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {}
+                            Err(error) => {
+                                self.monitor_runtime_metrics.record_error();
+                                self.monitor_requests_in_flight[layer] = false;
+                                self.monitor_request_deferred[layer] = false;
+                                self.monitor_request_started_at[layer] = None;
+                                self.editor.set_monitor_error(error.to_string());
+                            }
+                        }
+                    }
+                    let source_capacity_still_full = {
+                        let diagnostics = self.monitor_source_coordinator.diagnostics();
+                        diagnostics.live_source_groups >= diagnostics.source_group_cap
+                    };
+                    if self.monitor_request_deferred[layer]
+                        && (!released_speculative || source_capacity_still_full)
+                        && self.defer_lower_priority_monitor_group(
+                            &preview,
+                            layer,
+                            &requester_identity,
+                        )
+                    {
+                        match self.monitor_decoders[layer].retry_deferred_requests() {
+                            Ok(()) => self.monitor_request_deferred[layer] = false,
+                            Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {}
+                            Err(error) => {
+                                self.monitor_runtime_metrics.record_error();
+                                self.monitor_requests_in_flight[layer] = false;
+                                self.monitor_request_deferred[layer] = false;
+                                self.monitor_request_started_at[layer] = None;
+                                self.editor.set_monitor_error(error.to_string());
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
                     self.monitor_runtime_metrics.record_error();
@@ -5390,6 +5533,66 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Reclaims unprotected prewarm lanes globally before visible work is considered for
+    /// eviction. Audio decoding is owned by the native audio engine and is not represented here.
+    fn release_speculative_monitor_sessions(&mut self) -> bool {
+        let mut released = false;
+        for decoder in &self.monitor_decoders {
+            match decoder.release_speculative_sessions() {
+                Ok(did_release) => released |= did_release,
+                Err(error) => {
+                    self.monitor_runtime_metrics.record_error();
+                    self.editor.set_monitor_error(error.to_string());
+                }
+            }
+        }
+        released
+    }
+
+    /// Yields one complete lower-priority visual source group. The decoder retains each victim's
+    /// exact latest request, so its last presented frame remains visible and normal priority-ordered
+    /// polling can resume it when capacity returns. Audio has independent ownership and is never
+    /// consulted or changed here.
+    fn defer_lower_priority_monitor_group(
+        &mut self,
+        preview: &PreviewRequest,
+        requester_layer: usize,
+        requester_identity: &MonitorSourceIdentity,
+    ) -> bool {
+        let selected = lower_priority_monitor_eviction_group(
+            &preview.sources,
+            &self.monitor_source_identities,
+            &self.monitor_request_deferred,
+            &self.monitor_latest_request_ids,
+            requester_layer,
+            requester_identity,
+        );
+        let mut yielded = false;
+        for layer in 0..MONITOR_LAYER_COUNT {
+            if !selected[layer] {
+                continue;
+            }
+            match self.monitor_decoders[layer].defer_live_sessions() {
+                Ok(true) => {
+                    yielded = true;
+                    self.monitor_request_deferred[layer] = true;
+                    self.monitor_requests_in_flight[layer] = true;
+                    self.monitor_request_started_at[layer] =
+                        Some((self.monitor_latest_request_ids[layer], Instant::now()));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.monitor_runtime_metrics.record_error();
+                    self.monitor_requests_in_flight[layer] = false;
+                    self.monitor_request_deferred[layer] = false;
+                    self.monitor_request_started_at[layer] = None;
+                    self.editor.set_monitor_error(error.to_string());
+                }
+            }
+        }
+        yielded
     }
 
     fn sync_audio_transport(&mut self) {
@@ -5920,22 +6123,26 @@ impl App {
     /// HOT PATH — nonblocking channel drains and one retained texture update per ready layer.
     fn poll_monitor_decoder(&mut self) {
         let mut adaptive_quality_changed = false;
-        for layer in 0..MONITOR_LAYER_COUNT {
-            if self.monitor_request_deferred[layer] {
-                // Capacity deferral is retried only for a retained latest request, avoiding
-                // idle endpoint locks on the ordinary monitor pump path.
-                match self.monitor_decoders[layer].retry_deferred_requests() {
-                    Ok(()) => self.monitor_request_deferred[layer] = false,
-                    Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {}
-                    Err(error) => {
-                        self.monitor_runtime_metrics.record_error();
-                        self.monitor_requests_in_flight[layer] = false;
-                        self.monitor_request_deferred[layer] = false;
-                        self.monitor_request_started_at[layer] = None;
-                        self.editor.set_monitor_error(error.to_string());
-                    }
+        let deferred = self.monitor_request_deferred;
+        let (retry_layers, retry_count) =
+            selected_monitor_layers_by_priority(&self.monitor_admission_priorities, &deferred);
+        for &layer in &retry_layers[..retry_count] {
+            // Capacity deferral is retried only for a retained latest request, avoiding idle
+            // endpoint locks on the ordinary monitor pump path. Priority order must match first
+            // admission so a displaced lower layer cannot steal the permit back.
+            match self.monitor_decoders[layer].retry_deferred_requests() {
+                Ok(()) => self.monitor_request_deferred[layer] = false,
+                Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {}
+                Err(error) => {
+                    self.monitor_runtime_metrics.record_error();
+                    self.monitor_requests_in_flight[layer] = false;
+                    self.monitor_request_deferred[layer] = false;
+                    self.monitor_request_started_at[layer] = None;
+                    self.editor.set_monitor_error(error.to_string());
                 }
             }
+        }
+        for layer in 0..MONITOR_LAYER_COUNT {
             loop {
                 let event = match self.monitor_decoders[layer].try_recv() {
                     Ok(Some(event)) => event,
@@ -8286,12 +8493,9 @@ mod tests {
         app.monitor_source_coordinator = coordinator;
     }
 
-    fn priority_test_app() -> App {
+    fn priority_test_app_with_paths(paths: [PathBuf; 2]) -> App {
         let mut app = App::new_with_catalog(false, None);
-        app.editor.add_media_paths([
-            PathBuf::from("priority-lower-does-not-exist.mp4"),
-            PathBuf::from("priority-upper-does-not-exist.mp4"),
-        ]);
+        app.editor.add_media_paths(paths);
         let video_tracks = app
             .editor
             .timeline
@@ -8318,6 +8522,13 @@ mod tests {
         app
     }
 
+    fn priority_test_app() -> App {
+        priority_test_app_with_paths([
+            PathBuf::from("priority-lower-does-not-exist.mp4"),
+            PathBuf::from("priority-upper-does-not-exist.mp4"),
+        ])
+    }
+
     #[test]
     fn contributing_video_layers_prioritize_visible_top_layers_without_allocating() {
         let mut lower = preview_source(0, 1);
@@ -8336,6 +8547,132 @@ mod tests {
             sources[1].is_none(),
             "release pass precedes this admission list"
         );
+    }
+
+    #[test]
+    fn eviction_selection_releases_a_complete_lower_priority_shared_source_group() {
+        let mut lower = preview_source(0, 1);
+        lower.priority = 2;
+        let mut shared_lower = preview_source(1, 1);
+        shared_lower.priority = 3;
+        let mut requester = preview_source(3, 2);
+        requester.priority = 9;
+        let sources = preview_sources([lower, shared_lower, requester]);
+        let shared_identity = MonitorSourceIdentity {
+            media_id: 1,
+            path: PathBuf::from("shared-lower.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let requester_identity = MonitorSourceIdentity {
+            media_id: 2,
+            path: PathBuf::from("requester.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let identities = [
+            Some(shared_identity.clone()),
+            Some(shared_identity),
+            None,
+            Some(requester_identity.clone()),
+        ];
+
+        let selected = lower_priority_monitor_eviction_group(
+            &sources,
+            &identities,
+            &[true, false, false, true],
+            &[4, 5, 0, 10],
+            3,
+            &requester_identity,
+        );
+
+        assert_eq!(selected, [true, true, false, false]);
+    }
+
+    #[test]
+    fn eviction_selection_protects_a_source_needed_by_equal_priority_visual_work() {
+        let mut lower = preview_source(0, 1);
+        lower.priority = 2;
+        let mut protected = preview_source(2, 1);
+        protected.priority = 9;
+        let mut requester = preview_source(3, 2);
+        requester.priority = 9;
+        let sources = preview_sources([lower, protected, requester]);
+        let shared_identity = MonitorSourceIdentity {
+            media_id: 1,
+            path: PathBuf::from("protected-shared.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let requester_identity = MonitorSourceIdentity {
+            media_id: 2,
+            path: PathBuf::from("requester.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let identities = [
+            Some(shared_identity.clone()),
+            None,
+            Some(shared_identity),
+            Some(requester_identity.clone()),
+        ];
+
+        let selected = lower_priority_monitor_eviction_group(
+            &sources,
+            &identities,
+            &[false, false, false, true],
+            &[4, 0, 5, 10],
+            3,
+            &requester_identity,
+        );
+
+        assert_eq!(selected, [false; MONITOR_LAYER_COUNT]);
+    }
+
+    #[test]
+    fn eviction_selection_uses_oldest_request_within_the_same_visual_priority() {
+        let mut older = preview_source(0, 1);
+        older.priority = 3;
+        let mut newer = preview_source(1, 2);
+        newer.priority = 3;
+        let mut requester = preview_source(3, 3);
+        requester.priority = 9;
+        let sources = preview_sources([older, newer, requester]);
+        let older_identity = MonitorSourceIdentity {
+            media_id: 1,
+            path: PathBuf::from("older.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let newer_identity = MonitorSourceIdentity {
+            media_id: 2,
+            path: PathBuf::from("newer.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let requester_identity = MonitorSourceIdentity {
+            media_id: 3,
+            path: PathBuf::from("requester.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let identities = [
+            Some(older_identity),
+            Some(newer_identity),
+            None,
+            Some(requester_identity.clone()),
+        ];
+
+        let selected = lower_priority_monitor_eviction_group(
+            &sources,
+            &identities,
+            &[false, false, false, true],
+            &[20, 40, 0, 50],
+            3,
+            &requester_identity,
+        );
+
+        assert_eq!(selected, [true, false, false, false]);
+    }
+
+    #[test]
+    fn deferred_monitor_retries_keep_visual_priority_and_topmost_tie_order() {
+        let (layers, count) =
+            selected_monitor_layers_by_priority(&[1, 9, 9, 4], &[true; MONITOR_LAYER_COUNT]);
+        assert_eq!(&layers[..count], &[2, 1, 3, 0]);
     }
 
     #[test]
@@ -8379,6 +8716,162 @@ mod tests {
             !replacement.monitor_request_deferred[1],
             "releasing the absent lower layer must happen before upper admission"
         );
+    }
+
+    #[test]
+    fn active_lower_source_yields_to_top_priority_without_changing_audio_targets() {
+        let fixture_root = test_catalog_path("priority-active-takeover")
+            .parent()
+            .expect("fixture root")
+            .to_path_buf();
+        fs::create_dir_all(&fixture_root).expect("create priority fixture directory");
+        let lower_path = fixture_root.join("lower.mp4");
+        let upper_path = fixture_root.join("upper.mp4");
+        for path in [&lower_path, &upper_path] {
+            let generated = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=64x36:rate=24",
+                    "-t",
+                    "1",
+                    "-an",
+                    "-c:v",
+                    "mpeg4",
+                    "-q:v",
+                    "5",
+                ])
+                .arg(path)
+                .output();
+            let Ok(generated) = generated else {
+                let _ = fs::remove_dir_all(&fixture_root);
+                return;
+            };
+            assert!(
+                generated.status.success(),
+                "create priority fixture: {}",
+                String::from_utf8_lossy(&generated.stderr)
+            );
+        }
+
+        let mut app = priority_test_app_with_paths([lower_path.clone(), upper_path.clone()]);
+        reconfigure_test_monitor_source_cap(&mut app, 1);
+        let audio_track = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Audio)
+            .expect("priority test app has an audio track")
+            .id;
+        app.editor
+            .timeline
+            .insert_clip(
+                audio_track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(1_000_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert independent audible clip");
+        let audio_before = app
+            .editor
+            .audio_playback_targets()
+            .into_iter()
+            .map(|target| {
+                (
+                    target.track_id,
+                    target.clip_id,
+                    target.media_id,
+                    target.path.to_path_buf(),
+                    target.source_tick,
+                    target.clip_tick,
+                    target.gain_db.to_bits(),
+                    target.pan.to_bits(),
+                    target.transition,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audio_before.len(), 1);
+
+        let mut lower_only = preview_request(&app.editor);
+        lower_only.is_scrubbing = true;
+        lower_only.output_size = [64, 36];
+        lower_only.sources[1] = None;
+        app.submit_monitor_decode_request(lower_only);
+        assert!(!app.monitor_request_deferred[0]);
+        let lower_deadline = Instant::now() + Duration::from_secs(5);
+        while app.editor.monitor_frame_for_layer(0).is_none() && Instant::now() < lower_deadline {
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            app.editor
+                .monitor_frame_for_layer(0)
+                .and_then(|frame| frame.media_id),
+            Some(1)
+        );
+        let errors_before_takeover = app.runtime_diagnostics().monitor_errors;
+
+        let mut both = preview_request(&app.editor);
+        both.is_scrubbing = true;
+        both.output_size = [64, 36];
+        app.submit_monitor_decode_request(both);
+
+        let upper_deadline = Instant::now() + Duration::from_secs(5);
+        while app.editor.monitor_frame_for_layer(1).is_none() && Instant::now() < upper_deadline {
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(app.monitor_request_deferred[0]);
+        assert!(
+            !app.monitor_request_deferred[1],
+            "top source must take the yielded one-source permit"
+        );
+        assert_eq!(
+            app.editor
+                .monitor_frame_for_layer(1)
+                .and_then(|frame| frame.media_id),
+            Some(2),
+            "top source must eventually decode after the old session permit retires"
+        );
+        assert_eq!(
+            app.runtime_diagnostics().monitor_errors,
+            errors_before_takeover,
+            "active takeover must not turn transient permit pressure into an error"
+        );
+        let source_diagnostics = app.monitor_source_coordinator.diagnostics();
+        assert_eq!(source_diagnostics.live_source_groups, 1);
+        assert!(
+            source_diagnostics.live_lane_actors + source_diagnostics.retiring_lane_actors
+                <= source_diagnostics.lane_actor_cap
+        );
+        let audio_after = app
+            .editor
+            .audio_playback_targets()
+            .into_iter()
+            .map(|target| {
+                (
+                    target.track_id,
+                    target.clip_id,
+                    target.media_id,
+                    target.path.to_path_buf(),
+                    target.source_tick,
+                    target.clip_tick,
+                    target.gain_db.to_bits(),
+                    target.pan.to_bits(),
+                    target.transition,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audio_after, audio_before);
+        drop(app);
+        fs::remove_dir_all(fixture_root).expect("remove priority fixture directory");
     }
 
     fn wait_for_project_open(app: &mut App) {

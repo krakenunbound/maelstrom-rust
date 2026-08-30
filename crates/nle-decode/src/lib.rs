@@ -771,7 +771,13 @@ struct CoordinatorEndpoint {
     frame_cache: Arc<Mutex<MonitorFrameCache>>,
     resource_diagnostics: Arc<DecoderResourceDiagnostics>,
     active: Mutex<Option<CoordinatorLease>>,
-    deferred_request: Mutex<Option<DecodeRequest>>,
+    deferred_request: Mutex<Option<DeferredDecodeRequest>>,
+}
+
+#[derive(Clone)]
+struct DeferredDecodeRequest {
+    request: DecodeRequest,
+    speculative: bool,
 }
 
 /// One lease-specific command slot. An actor only ever consumes this client, never the mutable
@@ -788,6 +794,10 @@ struct CoordinatorLease {
     lane: MonitorSessionLane,
     actor: Arc<SourceLaneActor>,
     client: Arc<CoordinatorClient>,
+    /// Retains the exact latest command even after the actor has consumed its command slot.
+    request: DecodeRequest,
+    /// True only for paused prewarm work. Reverse scrub lanes are visible work and stay protected.
+    speculative: bool,
 }
 
 /// One fixed reaper thread joins retired actors off the request/control path. Every live or
@@ -1245,7 +1255,7 @@ impl MonitorDecoder {
                 for index in 0..self.workers.len() {
                     let mut lane_request = request.clone();
                     lane_request.prewarm_scrub_workers = false;
-                    match self.send_to(index, MonitorCommand::Request(lane_request)) {
+                    match self.send_request_to(index, lane_request, index != 0) {
                         Err(DecoderClosed::Closed) => outcome = Err(DecoderClosed::Closed),
                         Err(DecoderClosed::SourceCapacityDeferred)
                             if outcome != Err(DecoderClosed::Closed) =>
@@ -1257,7 +1267,7 @@ impl MonitorDecoder {
                 }
                 return outcome;
             }
-            return self.send_to(0, MonitorCommand::Request(request));
+            return self.send_request_to(0, request, false);
         }
         let reverse = {
             let mut previous = self.last_scrub_target.lock().expect("scrub target lock");
@@ -1272,7 +1282,7 @@ impl MonitorDecoder {
         } else {
             0
         };
-        self.send_to(index, MonitorCommand::Request(request))
+        self.send_request_to(index, request, false)
     }
 
     /// Clears queued work while retaining open media contexts for reuse.
@@ -1320,6 +1330,106 @@ impl MonitorDecoder {
         }
     }
 
+    /// Yields live source-actor leases while retaining each lane's exact latest request for an
+    /// explicit later [`Self::retry_deferred_requests`]. This never joins an actor on the caller
+    /// thread. Explicit [`Self::release_live_sessions`] does not create retry work.
+    ///
+    /// Without the opt-in shared source coordinator there is no shared source-group capacity to
+    /// yield, so this is equivalent to [`Self::release_live_sessions`].
+    pub fn defer_live_sessions(&self) -> Result<bool, DecoderClosed> {
+        *self.last_scrub_target.lock().expect("scrub target lock") = None;
+        if self.source_coordinator.is_none() {
+            self.release_live_sessions()?;
+            return Ok(false);
+        }
+        let mut closed = false;
+        let mut deferred_live_lease = false;
+        for (index, worker) in self.workers.iter().enumerate() {
+            let Some(endpoint) = worker.endpoint.as_ref() else {
+                closed |= self.send_to(index, MonitorCommand::Release).is_err();
+                continue;
+            };
+            let _control = endpoint
+                .control
+                .lock()
+                .expect("coordinator endpoint control lock");
+            let lease = endpoint
+                .active
+                .lock()
+                .expect("coordinator endpoint lease lock")
+                .take();
+            if let Some(lease) = lease {
+                deferred_live_lease = true;
+                *endpoint
+                    .deferred_request
+                    .lock()
+                    .expect("coordinator deferred request lock") = Some(DeferredDecodeRequest {
+                    request: lease.request.clone(),
+                    speculative: lease.speculative,
+                });
+                *lease.client.commands.lock().expect("monitor command lock") =
+                    Some(MonitorCommand::Release);
+                drop(lease);
+            }
+            endpoint
+                .resource_diagnostics
+                .publish_worker_session(index, false);
+        }
+        if closed {
+            Err(DecoderClosed::Closed)
+        } else {
+            Ok(deferred_live_lease)
+        }
+    }
+
+    /// Releases every speculative background lane and discards its deferred retry without
+    /// disturbing the foreground lane. Callers use this as the first reclamation step before
+    /// yielding any visible source. Actor shutdown and join remain asynchronous.
+    pub fn release_speculative_sessions(&self) -> Result<bool, DecoderClosed> {
+        if self.source_coordinator.is_none() {
+            return Ok(false);
+        }
+
+        let mut released_live_lease = false;
+        for (index, worker) in self.workers.iter().enumerate().skip(1) {
+            let Some(endpoint) = worker.endpoint.as_ref() else {
+                continue;
+            };
+            let _control = endpoint
+                .control
+                .lock()
+                .expect("coordinator endpoint control lock");
+            let mut deferred = endpoint
+                .deferred_request
+                .lock()
+                .expect("coordinator deferred request lock");
+            if deferred.as_ref().is_some_and(|request| request.speculative) {
+                deferred.take();
+            }
+            drop(deferred);
+            let mut active = endpoint
+                .active
+                .lock()
+                .expect("coordinator endpoint lease lock");
+            let lease = active
+                .as_ref()
+                .is_some_and(|lease| lease.speculative)
+                .then(|| active.take())
+                .flatten();
+            drop(active);
+            if let Some(lease) = lease {
+                released_live_lease = true;
+                *lease.client.commands.lock().expect("monitor command lock") =
+                    Some(MonitorCommand::Release);
+                drop(lease);
+                endpoint
+                    .resource_diagnostics
+                    .publish_worker_session(index, false);
+            }
+        }
+        Ok(released_live_lease)
+    }
+
     /// Retries newest requests explicitly deferred by the bounded source coordinator. Call this
     /// after another monitor frees a source group; a repeated capacity result keeps each latest
     /// request retained for a later retry.
@@ -1335,7 +1445,9 @@ impl MonitorDecoder {
                 .expect("coordinator deferred request lock")
                 .clone();
             if let Some(request) = request {
-                if let Err(error) = self.send_to(index, MonitorCommand::Request(request)) {
+                if let Err(error) =
+                    self.send_request_to(index, request.request, request.speculative)
+                {
                     deferred = Some(error);
                 }
             }
@@ -1380,7 +1492,25 @@ impl MonitorDecoder {
         self.source_coordinator.clone()
     }
 
+    fn send_request_to(
+        &self,
+        index: usize,
+        request: DecodeRequest,
+        speculative: bool,
+    ) -> Result<(), DecoderClosed> {
+        self.send_to_with_role(index, MonitorCommand::Request(request), speculative)
+    }
+
     fn send_to(&self, index: usize, command: MonitorCommand) -> Result<(), DecoderClosed> {
+        self.send_to_with_role(index, command, false)
+    }
+
+    fn send_to_with_role(
+        &self,
+        index: usize,
+        command: MonitorCommand,
+        speculative: bool,
+    ) -> Result<(), DecoderClosed> {
         let worker = &self.workers[index];
         if let (Some(coordinator), Some(endpoint)) = (&self.source_coordinator, &worker.endpoint) {
             let _control = endpoint
@@ -1464,7 +1594,11 @@ impl MonitorDecoder {
                         *endpoint
                             .deferred_request
                             .lock()
-                            .expect("coordinator deferred request lock") = Some(request);
+                            .expect("coordinator deferred request lock") =
+                            Some(DeferredDecodeRequest {
+                                request,
+                                speculative,
+                            });
                         endpoint
                             .resource_diagnostics
                             .publish_worker_session(index, false);
@@ -1506,28 +1640,37 @@ impl MonitorDecoder {
                 .lock()
                 .expect("coordinator deferred request lock")
                 .take();
-            if endpoint
+            let mut active = endpoint
                 .active
                 .lock()
-                .expect("coordinator endpoint lease lock")
-                .is_none()
-            {
-                *endpoint
-                    .active
-                    .lock()
-                    .expect("coordinator endpoint lease lock") = Some(CoordinatorLease {
-                    key,
-                    lane,
-                    actor: Arc::clone(&actor),
-                    client: Arc::clone(&client),
-                });
-            };
+                .expect("coordinator endpoint lease lock");
+            match active.as_mut() {
+                Some(lease) => {
+                    lease.request = retained_request.clone();
+                    lease.speculative = speculative;
+                }
+                None => {
+                    *active = Some(CoordinatorLease {
+                        key,
+                        lane,
+                        actor: Arc::clone(&actor),
+                        client: Arc::clone(&client),
+                        request: retained_request.clone(),
+                        speculative,
+                    });
+                }
+            }
+            drop(active);
             if let Err(error) = actor.submit(&client) {
                 if error == DecoderClosed::SourceCapacityDeferred {
                     *endpoint
                         .deferred_request
                         .lock()
-                        .expect("coordinator deferred request lock") = Some(retained_request);
+                        .expect("coordinator deferred request lock") =
+                        Some(DeferredDecodeRequest {
+                            request: retained_request,
+                            speculative,
+                        });
                     return Err(error);
                 }
                 let lease = endpoint
@@ -2252,7 +2395,7 @@ fn decode_monitor_request(
     stage_timings: &DecoderStageTimingAccumulators,
     session_pool: &MonitorSessionPool,
     worker_index: usize,
-    retain_session_on_cache_reset: bool,
+    coordinator_owned_sessions: bool,
 ) -> Option<DecodeEvent> {
     let span = tracing::debug_span!(
         "monitor_decode",
@@ -2268,7 +2411,7 @@ fn decode_monitor_request(
         .lock()
         .expect("monitor frame cache lock")
         .prepare_request(request)
-        && !retain_session_on_cache_reset
+        && !coordinator_owned_sessions
     {
         sessions.clear();
         on_session_state(false);
@@ -2340,7 +2483,12 @@ fn decode_monitor_request(
         _ => {
             sessions.remove(&request.media_id);
             on_session_state(!sessions.is_empty());
-            match open_sticky_monitor(request, session_pool, worker_index) {
+            match open_sticky_monitor(
+                request,
+                session_pool,
+                worker_index,
+                coordinator_owned_sessions,
+            ) {
                 Ok(Some(mut session)) => {
                     let result = decode_with_session(
                         &mut session,
@@ -2378,6 +2526,7 @@ fn decode_monitor_request(
             stage_timings,
             session_pool,
             worker_index,
+            coordinator_owned_sessions,
         ),
         result => result,
     };
@@ -2464,6 +2613,7 @@ fn recover_hardware_decode_failure(
     stage_timings: &DecoderStageTimingAccumulators,
     session_pool: &MonitorSessionPool,
     worker_index: usize,
+    coordinator_owned_sessions: bool,
 ) -> Result<Option<DecodedRgba>, String> {
     let fallback = sessions
         .get(&request.media_id)
@@ -2473,7 +2623,12 @@ fn recover_hardware_decode_failure(
     };
     sessions.remove(&request.media_id);
     on_session_state(!sessions.is_empty());
-    match open_sticky_monitor(&open_request, session_pool, worker_index) {
+    match open_sticky_monitor(
+        &open_request,
+        session_pool,
+        worker_index,
+        coordinator_owned_sessions,
+    ) {
         Ok(Some(mut session)) => {
             tracing::warn!(
                 target: "maelstrom::decode",
@@ -2512,11 +2667,14 @@ fn recover_hardware_decode_failure(
 }
 
 /// Acquires a permit before allocating FFmpeg contexts. Background capacity exhaustion is a
-/// normal defer outcome; foreground exhaustion is an invariant violation visible to the caller.
+/// normal defer outcome. Foreground exhaustion is also transient for source-coordinator actors:
+/// an asynchronously retiring predecessor may still own the permit. Independent schedulers keep
+/// treating it as an invariant violation.
 fn open_sticky_monitor(
     request: &DecodeRequest,
     session_pool: &MonitorSessionPool,
     worker_index: usize,
+    coordinator_owned_sessions: bool,
 ) -> Result<Option<StickyMonitor>, String> {
     let lane = if worker_index == 0 {
         MonitorSessionLane::Foreground
@@ -2524,9 +2682,9 @@ fn open_sticky_monitor(
         MonitorSessionLane::Background
     };
     let Some(permit) = session_pool.try_acquire(lane) else {
-        return match lane {
-            MonitorSessionLane::Background => Ok(None),
-            MonitorSessionLane::Foreground => Err(
+        return match (lane, coordinator_owned_sessions) {
+            (MonitorSessionLane::Background, _) | (_, true) => Ok(None),
+            (MonitorSessionLane::Foreground, false) => Err(
                 "monitor foreground session pool is exhausted; a foreground permit was not released"
                     .to_owned(),
             ),
@@ -4003,6 +4161,298 @@ mod tests {
     }
 
     #[test]
+    fn deferred_live_sessions_yield_capacity_and_retry_the_latest_request() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let first_path = tiny_media();
+        let second_path = tiny_media();
+        let pool = MonitorSessionPool::new(1, 3);
+        let coordinator = MonitorSourceCoordinator::new(1, pool.clone());
+        let first = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            coordinator.clone(),
+        );
+        let second = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            coordinator.clone(),
+        );
+        let mut first_request = request(first_path.clone(), 1161);
+        first.request(first_request.clone()).unwrap();
+        let _ = receive_for(&first, &first_request);
+        first_request.request_id = 1162;
+        first_request.source_tick = 100_000;
+        first.request(first_request.clone()).unwrap();
+        let _ = receive_for(&first, &first_request);
+
+        assert!(first.defer_live_sessions().unwrap());
+        let released_deadline = Instant::now() + Duration::from_secs(2);
+        while (pool.diagnostics().active_sticky_sessions != 0
+            || coordinator.diagnostics().live_source_groups != 0)
+            && Instant::now() < released_deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
+        assert_eq!(coordinator.diagnostics().live_source_groups, 0);
+
+        let mut second_request = request(second_path.clone(), 1163);
+        second_request.media_id = 4;
+        second.request(second_request.clone()).unwrap();
+        let _ = receive_for(&second, &second_request);
+        let diagnostics = coordinator.diagnostics();
+        assert!(diagnostics.live_source_groups <= diagnostics.source_group_cap);
+        assert!(
+            diagnostics.live_lane_actors + diagnostics.retiring_lane_actors
+                <= diagnostics.lane_actor_cap
+        );
+        assert_eq!(
+            first.retry_deferred_requests(),
+            Err(DecoderClosed::SourceCapacityDeferred)
+        );
+
+        assert!(second.defer_live_sessions().unwrap());
+        second.cancel_pending().unwrap();
+        let second_released_deadline = Instant::now() + Duration::from_secs(2);
+        while (pool.diagnostics().active_sticky_sessions != 0
+            || coordinator.diagnostics().live_source_groups != 0)
+            && Instant::now() < second_released_deadline
+        {
+            thread::yield_now();
+        }
+        first.retry_deferred_requests().unwrap();
+        let DecodeEvent::Frame(frame) = receive_for(&first, &first_request) else {
+            panic!("deferred latest request did not decode after retry")
+        };
+        assert_eq!(frame.request_id, first_request.request_id);
+        assert!(frame.source_tick >= first_request.source_tick);
+
+        first.release_live_sessions().unwrap();
+        let final_deadline = Instant::now() + Duration::from_secs(2);
+        while (pool.diagnostics().active_sticky_sessions != 0
+            || coordinator.diagnostics().live_source_groups != 0)
+            && Instant::now() < final_deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
+        assert_eq!(coordinator.diagnostics().live_source_groups, 0);
+        drop(first);
+        drop(second);
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn coordinator_foreground_waits_for_a_preempted_session_permit_without_error() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let first_path = tiny_media();
+        let second_path = tiny_media();
+        let pool = MonitorSessionPool::new(1, 0);
+        let coordinator = MonitorSourceCoordinator::new(1, pool.clone());
+        let first = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            coordinator.clone(),
+        );
+        let second = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            coordinator.clone(),
+        );
+        let first_request = request(first_path.clone(), 1170);
+        first.request(first_request.clone()).unwrap();
+        let _ = receive_for(&first, &first_request);
+        assert_eq!(pool.diagnostics().active_foreground_sessions, 1);
+
+        let mut blocked = first_request;
+        blocked.request_id = 1171;
+        blocked.source_tick = 100_000;
+        let barrier = install_test_decode_barrier(blocked.request_id, first_path.clone());
+        first.request(blocked).unwrap();
+        barrier.wait_until_blocked();
+        assert!(first.defer_live_sessions().unwrap());
+
+        let mut top = request(second_path.clone(), 1172);
+        top.media_id = 4;
+        second.request(top.clone()).unwrap();
+        thread::sleep(Duration::from_millis(25));
+        assert!(
+            second.try_recv().unwrap().is_none(),
+            "transient foreground permit pressure must not publish an error"
+        );
+        assert_eq!(pool.diagnostics().active_foreground_sessions, 1);
+
+        barrier.release();
+        let DecodeEvent::Frame(frame) = receive_for(&second, &top) else {
+            panic!("top request did not recover after the preempted permit returned")
+        };
+        assert_eq!(frame.request_id, top.request_id);
+        assert_frame_reaches_target(&frame, &top);
+
+        first.cancel_pending().unwrap();
+        second.release_live_sessions().unwrap();
+        let final_deadline = Instant::now() + Duration::from_secs(2);
+        while (pool.diagnostics().active_sticky_sessions != 0
+            || coordinator.diagnostics().live_source_groups != 0
+            || coordinator.diagnostics().retiring_lane_actors != 0)
+            && Instant::now() < final_deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
+        assert_eq!(coordinator.diagnostics().live_source_groups, 0);
+        assert_eq!(coordinator.diagnostics().retiring_lane_actors, 0);
+        drop(barrier);
+        drop(first);
+        drop(second);
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn speculative_release_reclaims_background_before_foreground() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let pool = MonitorSessionPool::new(1, 1);
+        let coordinator = MonitorSourceCoordinator::new(1, pool.clone());
+        let decoder = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            coordinator.clone(),
+        );
+        let mut prewarm = request(path.clone(), 1164);
+        prewarm.prewarm_scrub_workers = true;
+        decoder.request(prewarm).unwrap();
+        assert_eq!(coordinator.diagnostics().live_source_groups, 1);
+        assert_eq!(coordinator.diagnostics().live_lane_actors, 2);
+
+        assert!(decoder.release_speculative_sessions().unwrap());
+        let background_deadline = Instant::now() + Duration::from_secs(2);
+        while (coordinator.diagnostics().live_lane_actors != 1
+            || coordinator.diagnostics().retiring_lane_actors != 0)
+            && Instant::now() < background_deadline
+        {
+            thread::yield_now();
+        }
+        let diagnostics = coordinator.diagnostics();
+        assert_eq!(diagnostics.live_source_groups, 1);
+        assert_eq!(diagnostics.live_lane_actors, 1);
+        assert_eq!(diagnostics.retiring_lane_actors, 0);
+        assert!(
+            diagnostics.live_lane_actors + diagnostics.retiring_lane_actors
+                <= diagnostics.lane_actor_cap
+        );
+
+        decoder.release_live_sessions().unwrap();
+        let final_deadline = Instant::now() + Duration::from_secs(2);
+        while (coordinator.diagnostics().live_source_groups != 0
+            || coordinator.diagnostics().live_lane_actors != 0
+            || coordinator.diagnostics().retiring_lane_actors != 0
+            || pool.diagnostics().active_sticky_sessions != 0)
+            && Instant::now() < final_deadline
+        {
+            thread::yield_now();
+        }
+        let final_diagnostics = coordinator.diagnostics();
+        assert_eq!(final_diagnostics.live_source_groups, 0);
+        assert_eq!(final_diagnostics.live_lane_actors, 0);
+        assert_eq!(final_diagnostics.retiring_lane_actors, 0);
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
+        drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn speculative_release_preserves_visible_reverse_scrub_lane() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let pool = MonitorSessionPool::new(1, 1);
+        let coordinator = MonitorSourceCoordinator::new(1, pool.clone());
+        let decoder = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            coordinator.clone(),
+        );
+        let mut forward = request(path.clone(), 1164);
+        forward.is_scrubbing = true;
+        forward.source_tick = 200_000;
+        decoder.request(forward).unwrap();
+        let mut reverse = request(path.clone(), 1165);
+        reverse.is_scrubbing = true;
+        reverse.source_tick = 100_000;
+        decoder.request(reverse.clone()).unwrap();
+        let event = receive_matching(&decoder, |frame| frame.request_id == reverse.request_id);
+        assert!(matches!(event, DecodeEvent::Frame(_)));
+        assert_eq!(coordinator.diagnostics().live_lane_actors, 2);
+        let active_deadline = Instant::now() + Duration::from_secs(2);
+        while decoder.diagnostics().active_sticky_sessions != 2 && Instant::now() < active_deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(decoder.diagnostics().active_sticky_sessions, 2);
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 2);
+
+        assert!(!decoder.release_speculative_sessions().unwrap());
+        assert_eq!(coordinator.diagnostics().live_lane_actors, 2);
+        assert_eq!(decoder.diagnostics().active_sticky_sessions, 2);
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 2);
+
+        let mut further_reverse = request(path.clone(), 1166);
+        further_reverse.is_scrubbing = true;
+        further_reverse.source_tick = 50_000;
+        decoder.request(further_reverse.clone()).unwrap();
+        let event = receive_matching(&decoder, |frame| {
+            frame.request_id == further_reverse.request_id
+        });
+        assert!(matches!(event, DecodeEvent::Frame(_)));
+        let preserved_reverse_request_id = {
+            let reverse_lease = decoder.workers[1]
+                .endpoint
+                .as_ref()
+                .expect("coordinator endpoint")
+                .active
+                .lock()
+                .expect("coordinator endpoint lease lock");
+            let reverse_lease = reverse_lease.as_ref().expect("visible reverse lease");
+            (reverse_lease.request.request_id, reverse_lease.speculative)
+        };
+        assert_eq!(preserved_reverse_request_id, (reverse.request_id, false));
+        let continued_reverse_index = further_reverse.request_id as usize % decoder.workers.len();
+        let continued_reverse_request_id = {
+            let reverse_lease = decoder.workers[continued_reverse_index]
+                .endpoint
+                .as_ref()
+                .expect("coordinator endpoint")
+                .active
+                .lock()
+                .expect("coordinator endpoint lease lock");
+            let reverse_lease = reverse_lease
+                .as_ref()
+                .expect("continued visible reverse lease");
+            (reverse_lease.request.request_id, reverse_lease.speculative)
+        };
+        assert_eq!(
+            continued_reverse_request_id,
+            (further_reverse.request_id, false)
+        );
+        assert_eq!(decoder.diagnostics().active_sticky_sessions, 3);
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 2);
+
+        decoder.release_live_sessions().unwrap();
+        drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn cancel_clears_a_deferred_source_request_before_retry() {
         if !ffmpeg_available() {
             return;
@@ -4667,6 +5117,7 @@ mod tests {
             &stage_timings,
             &session_pool,
             0,
+            false,
         )
         .expect("software fallback decodes supplied media")
         .expect("same-generation replacement was not cancelled");
@@ -5335,7 +5786,7 @@ mod tests {
         let path = tiny_media();
         let first = request(path.clone(), 1);
         let session_pool = MonitorSessionPool::new(1, 0);
-        let mut monitor = open_sticky_monitor(&first, &session_pool, 0)
+        let mut monitor = open_sticky_monitor(&first, &session_pool, 0, false)
             .expect("open sticky monitor")
             .expect("foreground permit available");
         let stage_timings = DecoderStageTimingAccumulators::default();
@@ -5522,7 +5973,7 @@ mod tests {
         first.acceleration = AccelerationPreference::PreferHardware;
         first.source_tick = 12_000_000;
         let session_pool = MonitorSessionPool::new(1, 0);
-        let mut monitor = open_sticky_monitor(&first, &session_pool, 0)
+        let mut monitor = open_sticky_monitor(&first, &session_pool, 0, false)
             .expect("open hardware monitor")
             .expect("foreground permit available");
         let stage_timings = DecoderStageTimingAccumulators::default();

@@ -42,6 +42,41 @@ submission, all four Full-1080p frames ready in 82 ms, four source groups, five
 live actors/sessions (four foreground plus one shared speculative background),
 zero retiring actors at the sample, and zero sessions after app drop.
 
+## Priority and eviction semantics
+
+Source capacity is managed globally by the app's four monitor slots. A request
+that cannot acquire a new physical source group first releases every speculative
+background lane. If group pressure remains, it yields one complete eligible
+visual source group using this deterministic order:
+
+1. strictly lower visual priority;
+2. oldest latest-request ID;
+3. visually lowest layer.
+
+Every logical layer sharing the selected media/path/backend identity is selected
+as one group, then its logical leases are yielded sequentially without blocking
+on actor shutdown. Any equal- or higher-priority contributor protects that
+identity. The decoder retains each yielded lane's exact latest request while
+actor shutdown and join run through the bounded reaper; the app keeps the last
+completed frame visible and retries in the same priority/topmost order. Explicit
+release does not create retry work. Reverse-scrub lanes remain visible work and
+are not classified as speculative prewarm. The policy is intentionally strict:
+a lower-priority source can remain deferred while a higher-priority source keeps
+capacity; no age-based fairness bound is claimed.
+
+Audio playback is owned independently and is not evicted or truncated by monitor
+pressure. Current regression coverage proves that the editor's complete audio
+playback-target snapshot is unchanged across visual takeover; it is not yet a
+live audio-device continuity or underrun proof.
+
+Deterministic decoder and app tests prove speculative-prewarm-first release,
+preservation of a visible reverse-scrub lane, active real-media lower-to-top
+takeover at a one-group cap, permit-safe retry while the retiring actor still
+holds its session, shared-source protection, oldest-first selection,
+live-plus-retiring actor bounds, final zero sessions/actors, and the unchanged
+editor audio-target snapshot. These tests establish the scheduling invariants;
+the UI-present, live-audio, and cross-hardware Phase 1 exit proof remains open.
+
 This is a preliminary bounded-session/full-output local scheduler gate. Its
 single submission measurement is a local threshold, not a timeline-latency
 regression baseline, p95, sustained playback, GPU compositing benchmark, or
