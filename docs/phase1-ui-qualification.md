@@ -1,5 +1,10 @@
 # Phase 1 windowed four-source qualification
 
+Latest follow-up: [scrub seek performance](scrub-seek-performance.md) records the
+subsequent seek/EOF fixes, two clean final-package repetitions (four-source p95
+74–104 ms), and two workload-integrity invalidations. The measurements below
+remain historical evidence for the earlier timestamp-rounding fix.
+
 The local one/four-source windowed CPU gate passes on Intel UHD 770 and NVIDIA
 RTX 3090 after correcting a timestamp-rounding completion bug. The broader
 four-source UI/cross-hardware exit gate remains open: these are two adapters on

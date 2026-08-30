@@ -371,6 +371,11 @@ Exit gate:
       431–474 ms with Software decoding; reference-machine, broader backend/media, and sustained
       playback qualification remain open. See `docs/phase1-ui-qualification.md`; the dedicated
       workload does not replace the package's general smoke suite.
+      A follow-up nearest-keyframe seek with bounded preroll fallback reduces local four-source
+      matching-frame p95 to 74–104 ms in two clean final-package repetitions, with CPU limits
+      unchanged. Pixel/reference and packet-work regressions also cover reordered media and
+      final delayed B-frames; 735 release tests pass. Two additional workload-integrity
+      invalidations remain disclosed and unproven in origin. See `docs/scrub-seek-performance.md`.
       A third opt-in headless local gate now repeats the
       same four-source Full-1080p five-second-fixture forward/back scrub workload for a bounded
       duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime

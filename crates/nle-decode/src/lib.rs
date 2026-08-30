@@ -1,5 +1,8 @@
 //! Latest-wins in-process FFmpeg monitor decoding.
 
+#[cfg(test)]
+mod scrub_seek_tests;
+
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fmt,
@@ -29,6 +32,9 @@ use nle_cache::{FrameCache, FrameKey, FrameValue};
 const MAX_DIMENSION: u32 = 4_096;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const FORWARD_REUSE_TICKS: i64 = 5_000_000;
+// Long pointer jumps should use the demuxer's nearest keyframe instead of decoding seconds
+// of intermediate video. Nearby scrub motion still reuses the open decoder.
+const SCRUB_FORWARD_REUSE_TICKS: i64 = 250_000;
 // B-frame packet DTS can precede the requested presentation timestamp. Keep a bounded
 // keyframe lookbehind so stream-specific seeks retain enough decoder preroll.
 const SEEK_PREROLL_TICKS: i64 = 5_000_000;
@@ -2823,6 +2829,22 @@ fn seek_stream_timestamp(
         .rescale((1, 1_000_000), time_base)
 }
 
+fn nearest_seek_stream_timestamp(
+    local_target_tick: i64,
+    stream_start_time_microseconds: i64,
+    time_base: ffmpeg::Rational,
+) -> i64 {
+    local_target_tick
+        .saturating_add(stream_start_time_microseconds)
+        .rescale((1, 1_000_000), time_base)
+}
+
+enum MonitorDecodeAttempt {
+    Frame(DecodedRgba),
+    Invalidated,
+    RetryPreroll,
+}
+
 struct StickyMonitor {
     // Held for the full lifetime of the libav contexts. Every erase, reset, failed open, and
     // hardware-to-software replacement therefore releases capacity through RAII.
@@ -2948,6 +2970,45 @@ impl StickyMonitor {
         on_traversal: &mut dyn FnMut(&DecodedRgba),
         stage_timings: &DecoderStageTimingAccumulators,
     ) -> Result<Option<DecodedRgba>, String> {
+        let previous_source_tick = self.last_source_tick;
+        for conservative_preroll in [false, true] {
+            if invalidated() {
+                self.last_source_tick = None;
+                return Ok(None);
+            }
+            match self.decode_attempt(
+                request,
+                &mut invalidated,
+                &mut newest_target,
+                on_progress,
+                on_traversal,
+                stage_timings,
+                conservative_preroll,
+            )? {
+                MonitorDecodeAttempt::Frame(frame) => return Ok(Some(frame)),
+                MonitorDecodeAttempt::Invalidated => return Ok(None),
+                MonitorDecodeAttempt::RetryPreroll => {
+                    // A demuxer may index packet DTS rather than frame PTS. Do not publish an
+                    // initial frame after the target: retry once with the proven lookbehind.
+                    // Retain direction for dense reverse caching; the retry always seeks.
+                    self.last_source_tick = previous_source_tick;
+                }
+            }
+        }
+        Err("monitor decoder exhausted bounded seek attempts".into())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_attempt(
+        &mut self,
+        request: &DecodeRequest,
+        mut invalidated: impl FnMut() -> bool,
+        mut newest_target: impl FnMut() -> Option<DecodeRequest>,
+        on_progress: &mut dyn FnMut(&DecodedRgba),
+        on_traversal: &mut dyn FnMut(&DecodedRgba),
+        stage_timings: &DecoderStageTimingAccumulators,
+        conservative_preroll: bool,
+    ) -> Result<MonitorDecodeAttempt, String> {
         let (width, height, _) = bounded_dimensions(request.width, request.height);
         if self.output_size != (width, height)
             || self.scaler_high_quality != Some(request.high_quality_scaling)
@@ -2984,16 +3045,31 @@ impl StickyMonitor {
         let dense_reverse_cache = self
             .last_source_tick
             .is_some_and(|last_source_tick| target < last_source_tick);
-        let can_continue = self.last_source_tick.is_some_and(|last| {
-            target > last && target.saturating_sub(last) <= FORWARD_REUSE_TICKS
-        });
-        let can_read_from_open_start = self.last_source_tick.is_none() && target == 0;
-        if !can_continue && !can_read_from_open_start {
+        let reuse_ticks = if request.is_scrubbing {
+            SCRUB_FORWARD_REUSE_TICKS
+        } else {
+            FORWARD_REUSE_TICKS
+        };
+        let can_continue = !conservative_preroll
+            && self
+                .last_source_tick
+                .is_some_and(|last| target > last && target.saturating_sub(last) <= reuse_ticks);
+        let can_read_from_open_start =
+            !conservative_preroll && self.last_source_tick.is_none() && target == 0;
+        let performed_seek = !can_continue && !can_read_from_open_start;
+        if performed_seek {
             // Select the decoded video stream explicitly. MPEG-TS can expose a default-stream
             // seek point after the only usable preroll keyframe; a stream-specific timestamp
             // keeps that keyframe eligible for B-frame reconstruction.
-            let target_ts =
-                seek_stream_timestamp(target, self.stream_start_time_microseconds, self.time_base);
+            let target_ts = if conservative_preroll {
+                seek_stream_timestamp(target, self.stream_start_time_microseconds, self.time_base)
+            } else {
+                nearest_seek_stream_timestamp(
+                    target,
+                    self.stream_start_time_microseconds,
+                    self.time_base,
+                )
+            };
             let seek_result = unsafe {
                 ffmpeg::ffi::av_seek_frame(
                     self.input.as_mut_ptr(),
@@ -3003,6 +3079,9 @@ impl StickyMonitor {
                 )
             };
             if seek_result < 0 {
+                if !conservative_preroll {
+                    return Ok(MonitorDecodeAttempt::RetryPreroll);
+                }
                 return Err(format!(
                     "could not seek monitor media: {}",
                     ffmpeg::Error::from(seek_result)
@@ -3026,6 +3105,7 @@ impl StickyMonitor {
         let scaled_size = &mut self.scaled_size;
         let mut last_tick = self.last_source_tick;
         let mut last_progress_published = None;
+        let mut saw_decoded_frame = false;
         let mut packets = self.input.packets();
         while let Some((stream, packet)) = {
             let _timer = StageTimer::new(&stage_timings.demux_packet);
@@ -3033,7 +3113,7 @@ impl StickyMonitor {
         } {
             if invalidated() {
                 self.last_source_tick = None;
-                return Ok(None);
+                return Ok(MonitorDecodeAttempt::Invalidated);
             }
             // Scrub input can move several times before a long GOP yields a frame. Retarget
             // between packets when the open preroll can reach the newer point. A reverse target
@@ -3064,7 +3144,7 @@ impl StickyMonitor {
             } {
                 if invalidated() {
                     self.last_source_tick = None;
-                    return Ok(None);
+                    return Ok(MonitorDecodeAttempt::Invalidated);
                 }
                 let source_tick = decoded
                     .timestamp()
@@ -3086,6 +3166,15 @@ impl StickyMonitor {
                         completed_request_id = newer.request_id;
                     }
                 }
+                if !saw_decoded_frame
+                    && performed_seek
+                    && !conservative_preroll
+                    && source_tick
+                        > target.saturating_add(SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS)
+                {
+                    return Ok(MonitorDecodeAttempt::RetryPreroll);
+                }
+                saw_decoded_frame = true;
                 if !source_tick_reaches_target(source_tick, target) {
                     let now = Instant::now();
                     let publish_progress = request.progressive_scrub_frames
@@ -3141,14 +3230,17 @@ impl StickyMonitor {
                 last_tick = Some(source_tick);
                 self.last_visible_tick = last_tick;
                 self.last_source_tick = last_tick;
-                return Ok(Some(frame));
+                return Ok(MonitorDecodeAttempt::Frame(frame));
             }
         }
         {
             let _timer = StageTimer::new(&stage_timings.decoder_calls);
-            decoder
-                .send_eof()
-                .map_err(|error| format!("could not flush video decoder: {error}"))?;
+            // A prior source-frame request may already have started draining. FFmpeg returns
+            // EOF for another null packet even while reordered frames remain to be received.
+            match decoder.send_eof() {
+                Ok(()) | Err(ffmpeg::Error::Eof) => {}
+                Err(error) => return Err(format!("could not flush video decoder: {error}")),
+            }
         }
         let mut decoded = Video::empty();
         while {
@@ -3157,7 +3249,7 @@ impl StickyMonitor {
         } {
             if invalidated() {
                 self.last_source_tick = None;
-                return Ok(None);
+                return Ok(MonitorDecodeAttempt::Invalidated);
             }
             let source_tick = decoded
                 .timestamp()
@@ -3173,6 +3265,14 @@ impl StickyMonitor {
                     completed_request_id = newer.request_id;
                 }
             }
+            if !saw_decoded_frame
+                && performed_seek
+                && !conservative_preroll
+                && source_tick > target.saturating_add(SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS)
+            {
+                return Ok(MonitorDecodeAttempt::RetryPreroll);
+            }
+            saw_decoded_frame = true;
             if !source_tick_reaches_target(source_tick, target) {
                 let now = Instant::now();
                 let publish_progress = request.progressive_scrub_frames
@@ -3224,7 +3324,10 @@ impl StickyMonitor {
             last_tick = Some(source_tick);
             self.last_visible_tick = last_tick;
             self.last_source_tick = last_tick;
-            return Ok(Some(frame));
+            return Ok(MonitorDecodeAttempt::Frame(frame));
+        }
+        if !saw_decoded_frame && performed_seek && !conservative_preroll {
+            return Ok(MonitorDecodeAttempt::RetryPreroll);
         }
         self.last_source_tick = last_tick;
         Err("monitor decoder reached end of video before target".to_owned())

@@ -114,6 +114,52 @@ struct PendingFailureDiagnostics {
     presentation: PresentationDiagnostics,
 }
 
+/// End-of-run snapshot of one monitor decoder's accumulated worker CPU spans.
+/// Totals can overlap between layer workers and therefore are not wall-clock latency.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct DecoderLayerStageTimings {
+    layer: usize,
+    cache_lookup: DecoderStageTiming,
+    demux_packet: DecoderStageTiming,
+    decoder_calls: DecoderStageTiming,
+    hardware_transfer: DecoderStageTiming,
+    scaler: DecoderStageTiming,
+    rgba_copy_letterbox: DecoderStageTiming,
+    worker_request: DecoderStageTiming,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+struct DecoderStageTiming {
+    samples: u64,
+    total_nanos: u64,
+    max_nanos: u64,
+}
+
+impl From<nle_decode::MonitorStageTiming> for DecoderStageTiming {
+    fn from(timing: nle_decode::MonitorStageTiming) -> Self {
+        Self {
+            samples: timing.samples,
+            total_nanos: timing.total_nanos,
+            max_nanos: timing.max_nanos,
+        }
+    }
+}
+
+impl DecoderLayerStageTimings {
+    fn from_snapshot(layer: usize, timings: nle_decode::MonitorDecoderStageTimings) -> Self {
+        Self {
+            layer,
+            cache_lookup: timings.cache_lookup.into(),
+            demux_packet: timings.demux_packet.into(),
+            decoder_calls: timings.decoder_calls.into(),
+            hardware_transfer: timings.hardware_transfer.into(),
+            scaler: timings.scaler.into(),
+            rgba_copy_letterbox: timings.rgba_copy_letterbox.into(),
+            worker_request: timings.worker_request.into(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct PresentationDiagnostics {
     upload_serials: [u64; MONITOR_LAYER_COUNT],
@@ -678,6 +724,16 @@ impl App {
             let renderer = self.renderer_report.as_ref();
             let resources = self.monitor_session_pool.diagnostics();
             let cache = self.monitor_frame_cache_pool.diagnostics();
+            // This is intentionally captured only while finishing the opt-in probe. The
+            // counters accumulate from decoder creation, and independent workers can overlap.
+            let decoder_stage_timings: Vec<_> = (0..MONITOR_LAYER_COUNT)
+                .map(|layer| {
+                    DecoderLayerStageTimings::from_snapshot(
+                        layer,
+                        self.monitor_decoders[layer].stage_timings(),
+                    )
+                })
+                .collect();
             let gpu = self.hub_renderer.as_ref().map(|renderer| {
                 GpuStageTimingsReport::from_snapshots(
                     renderer.viewer_compositor_gpu_timing(),
@@ -695,6 +751,10 @@ impl App {
                 "preview_quality":"Full", "requested_output_size":[1920,1080],
                 "cache_bytes":cache.current_bytes, "cache_peak_bytes":cache.peak_bytes, "cache_cap_bytes":self.monitor_cache_cap_bytes,
                 "active_sessions":resources.active_sticky_sessions, "peak_sessions":resources.peak_sticky_sessions, "session_cap":resources.session_cap,
+                "decoder_stage_timings_scope":"Accumulated CPU call-boundary durations since the start of each monitor decoder lifetime; per-layer worker time can overlap and is not wall-clock latency.",
+                "decoder_stage_timings":decoder_stage_timings,
+                "viewer_upload_timing_scope":"Rolling CPU/API submission timing; excludes GPU completion and scanout.",
+                "viewer_upload_timing":self.viewer_upload_timings.snapshot(),
                 "gpu_stage_timings":gpu,
                 "runtime_diagnostics":RuntimeDiagnosticsReport::from(self.runtime_diagnostics())
             });
@@ -1034,5 +1094,63 @@ mod tests {
             .map(|index| 1 + index * 37 % 149)
             .collect();
         assert_eq!(ticks.len(), TOTAL_SAMPLES);
+    }
+
+    #[test]
+    fn phase1_ui_decoder_stage_snapshot_serializes_raw_accumulated_counters() {
+        let snapshot = nle_decode::MonitorDecoderStageTimings {
+            cache_lookup: nle_decode::MonitorStageTiming {
+                samples: 1,
+                total_nanos: 2,
+                max_nanos: 3,
+            },
+            demux_packet: nle_decode::MonitorStageTiming {
+                samples: 4,
+                total_nanos: 5,
+                max_nanos: 6,
+            },
+            decoder_calls: nle_decode::MonitorStageTiming {
+                samples: 7,
+                total_nanos: 8,
+                max_nanos: 9,
+            },
+            hardware_transfer: nle_decode::MonitorStageTiming {
+                samples: 10,
+                total_nanos: 11,
+                max_nanos: 12,
+            },
+            scaler: nle_decode::MonitorStageTiming {
+                samples: 13,
+                total_nanos: 14,
+                max_nanos: 15,
+            },
+            rgba_copy_letterbox: nle_decode::MonitorStageTiming {
+                samples: 16,
+                total_nanos: 17,
+                max_nanos: 18,
+            },
+            worker_request: nle_decode::MonitorStageTiming {
+                samples: 19,
+                total_nanos: 20,
+                max_nanos: 21,
+            },
+        };
+
+        let value = serde_json::to_value(DecoderLayerStageTimings::from_snapshot(2, snapshot))
+            .expect("stage snapshot serializes");
+        assert_eq!(value["layer"], 2);
+        for (stage, counters) in [
+            ("cache_lookup", [1, 2, 3]),
+            ("demux_packet", [4, 5, 6]),
+            ("decoder_calls", [7, 8, 9]),
+            ("hardware_transfer", [10, 11, 12]),
+            ("scaler", [13, 14, 15]),
+            ("rgba_copy_letterbox", [16, 17, 18]),
+            ("worker_request", [19, 20, 21]),
+        ] {
+            assert_eq!(value[stage]["samples"], counters[0]);
+            assert_eq!(value[stage]["total_nanos"], counters[1]);
+            assert_eq!(value[stage]["max_nanos"], counters[2]);
+        }
     }
 }

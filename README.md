@@ -306,6 +306,8 @@ also defaults to preparation without opening the editor. Its authorized run mode
 launcher with `MAELSTROM_LAUNCHER_WAIT=1` to retain process ownership until the editor exits.
 Local Intel UHD 770 and RTX 3090 runs pass its input/frame CPU limits; fresh-frame waiting,
 reference-machine coverage, and sustained playback remain separate qualification work.
+The [scrub seek follow-up](./docs/scrub-seek-performance.md) records reduced fresh-image
+waiting, reordered-frame correctness, and the limits of the local evidence.
 
 Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
 AMD64 directory supplied with
