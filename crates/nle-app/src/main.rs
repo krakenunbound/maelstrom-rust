@@ -4298,8 +4298,8 @@ impl App {
                 }
                 Screen::Splash => {}
             });
-            if measured_input && let Some(probe) = &mut self.phase1_ui_probe {
-                probe.ui_complete(editor);
+            if let Some(probe) = &mut self.phase1_ui_probe {
+                probe.after_ui(editor, measured_input);
             }
             native_primitive_counts = (
                 timeline_canvas.rect_scratch.len(),

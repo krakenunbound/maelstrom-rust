@@ -308,6 +308,8 @@ Local Intel UHD 770 and RTX 3090 runs pass its input/frame CPU limits; fresh-fra
 reference-machine coverage, and sustained playback remain separate qualification work.
 The [scrub seek follow-up](./docs/scrub-seek-performance.md) records reduced fresh-image
 waiting, reordered-frame correctness, and the limits of the local evidence.
+The [input integrity follow-up](./docs/windowed-input-integrity.md) records the
+pointer-interference regression and bounded diagnostics that preserve failed samples.
 
 Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
 AMD64 directory supplied with

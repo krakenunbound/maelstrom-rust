@@ -376,6 +376,11 @@ Exit gate:
       unchanged. Pixel/reference and packet-work regressions also cover reordered media and
       final delayed B-frames; 735 release tests pass. Two additional workload-integrity
       invalidations remain disclosed and unproven in origin. See `docs/scrub-seek-performance.md`.
+      A deterministic real-egui test now reproduces incoming pointer motion changing the held
+      benchmark drag. Failed samples retain their original target/identity evidence, plus a
+      bounded input summary; native input is not suppressed and no acceptance rule is relaxed.
+      One further four-case windowed run and 737 release tests pass. Historical input origin
+      remains unproven; see `docs/windowed-input-integrity.md` for evidence and limits.
       A third opt-in headless local gate now repeats the
       same four-source Full-1080p five-second-fixture forward/back scrub workload for a bounded
       duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime

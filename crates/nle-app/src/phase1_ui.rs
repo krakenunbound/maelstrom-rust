@@ -114,6 +114,70 @@ struct PendingFailureDiagnostics {
     presentation: PresentationDiagnostics,
 }
 
+/// One backend input batch, captured before probe injection. Never retain keys, text,
+/// clipboard contents, device identifiers, or screenshot payloads.
+#[derive(Debug, Serialize)]
+struct BackendInputObservation {
+    elapsed_ms: f64,
+    pending_sample_index: Option<usize>,
+    focused: bool,
+    event_count: usize,
+    pointer_moves: usize,
+    pointer_buttons: usize,
+    relative_mouse_moves: usize,
+    focus_events: usize,
+    other_events: usize,
+    last_pointer: Option<[f32; 2]>,
+    playhead_before: i64,
+    playhead_after: Option<i64>,
+    scrubbing_before: bool,
+    scrubbing_after: Option<bool>,
+    injected_motion: bool,
+}
+
+impl BackendInputObservation {
+    fn capture(
+        input: &egui::RawInput,
+        editor: &EditorState,
+        elapsed_ms: f64,
+        pending_sample_index: Option<usize>,
+    ) -> Self {
+        let mut observation = Self {
+            elapsed_ms,
+            pending_sample_index,
+            focused: input.focused,
+            event_count: input.events.len(),
+            pointer_moves: 0,
+            pointer_buttons: 0,
+            relative_mouse_moves: 0,
+            focus_events: 0,
+            other_events: 0,
+            last_pointer: None,
+            playhead_before: editor.playhead.0,
+            playhead_after: None,
+            scrubbing_before: editor.is_scrubbing(),
+            scrubbing_after: None,
+            injected_motion: false,
+        };
+        for event in &input.events {
+            match event {
+                egui::Event::PointerMoved(point) => {
+                    observation.pointer_moves += 1;
+                    observation.last_pointer = Some([point.x, point.y]);
+                }
+                egui::Event::PointerButton { pos, .. } => {
+                    observation.pointer_buttons += 1;
+                    observation.last_pointer = Some([pos.x, pos.y]);
+                }
+                egui::Event::MouseMoved(_) => observation.relative_mouse_moves += 1,
+                egui::Event::WindowFocused(_) => observation.focus_events += 1,
+                _ => observation.other_events += 1,
+            }
+        }
+        observation
+    }
+}
+
 /// End-of-run snapshot of one monitor decoder's accumulated worker CPU spans.
 /// Totals can overlap between layer workers and therefore are not wall-clock latency.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -237,6 +301,8 @@ pub(super) struct Probe {
     report_sent: bool,
     last_paint_serial: u64,
     last_presentation: nle_render::ViewerPresentationEvidence,
+    last_backend_input: Option<BackendInputObservation>,
+    backend_input_this_frame: bool,
     timeline_generation: Option<u64>,
     tx: Option<mpsc::SyncSender<serde_json::Value>>,
     writer: Option<thread::JoinHandle<()>>,
@@ -308,6 +374,8 @@ impl Probe {
             report_sent: false,
             last_paint_serial: 0,
             last_presentation: Default::default(),
+            last_backend_input: None,
+            backend_input_this_frame: false,
             timeline_generation: None,
             tx: Some(tx),
             writer: Some(writer),
@@ -321,8 +389,18 @@ impl Probe {
 
     // Called before context.run_ui. The injected events enter the ordinary egui ruler handler.
     pub fn inject_input(&mut self, input: &mut egui::RawInput, editor: &EditorState) -> bool {
+        self.backend_input_this_frame = false;
         if self.report_sent || self.failure.is_some() || !self.armed {
             return false;
+        }
+        if self.pressed && !self.released && !input.events.is_empty() {
+            self.last_backend_input = Some(BackendInputObservation::capture(
+                input,
+                editor,
+                self.started.elapsed().as_secs_f64() * 1000.0,
+                self.pending.as_ref().map(|pending| pending.sample.index),
+            ));
+            self.backend_input_this_frame = true;
         }
         let Some(geometry) = editor.timeline_scrub_geometry() else {
             return false;
@@ -389,6 +467,37 @@ impl Probe {
             last_observed: std::array::from_fn(|_| None),
         });
         true
+    }
+
+    pub fn after_ui(&mut self, editor: &EditorState, measured_input: bool) {
+        if measured_input {
+            self.ui_complete(editor);
+        }
+        if self.backend_input_this_frame
+            && let Some(observation) = &mut self.last_backend_input
+        {
+            observation.playhead_after = Some(editor.playhead.0);
+            observation.scrubbing_after = Some(editor.is_scrubbing());
+            observation.injected_motion = measured_input;
+        }
+    }
+
+    fn check_editor_state(&mut self, editor: &EditorState) {
+        if self.failure.is_some() {
+            return;
+        }
+        if self
+            .timeline_generation
+            .is_some_and(|generation| generation != editor.timeline.generation())
+        {
+            self.failure = Some("timeline changed during the fixed qualification workload".into());
+        } else if let Some(pending) = &self.pending
+            && pending.first_surface_recorded
+            && (!editor.is_scrubbing() || editor.playhead.0 != pending.sample.playhead_tick)
+        {
+            self.failure =
+                Some("ruler target changed while waiting for its matching layers".into());
+        }
     }
 
     pub fn ui_complete(&mut self, editor: &EditorState) {
@@ -466,11 +575,12 @@ impl Probe {
     ) {
         self.last_paint_serial = evidence.paint_serial;
         self.last_presentation = evidence;
-        if self.report_sent {
+        if self.report_sent || self.failure.is_some() {
             return;
         }
         if self.started.elapsed() > Duration::from_secs(150) {
             self.failure = Some("windowed probe exceeded 150 seconds".into());
+            return;
         }
         let Some(pending) = &mut self.pending else {
             return;
@@ -486,6 +596,7 @@ impl Probe {
                 "sample {} timed out waiting for exact native layer identities",
                 pending.sample.index
             ));
+            return;
         }
         if pending.sample.targets.len() != self.config.source_paths.len()
             || evidence.paint_serial <= pending.sample.paint_serial_before_input
@@ -555,6 +666,13 @@ impl Probe {
             "measured_samples":MEASURED_SAMPLES, "measurement_scope":"synthetic egui ruler input to UI CPU completion and matching native layers to surface submission; not physical input, GPU completion, or scanout",
             "cpu_budgets_passed":budgets_passed, "input_to_ui_cpu":input, "full_cpu_frame":cpu,
             "matching_layers_to_surface":ready, "environment":environment, "samples":self.samples });
+        if self.failure.is_some() {
+            report["last_backend_input"] = serde_json::to_value(&self.last_backend_input)
+                .expect("backend input observation serializes");
+            report["backend_input_scope"] = serde_json::json!(
+                "Last nonempty egui-winit input batch during the controlled gesture, before probe injection; aggregate counts and pointer position only, not physical-device attribution."
+            );
+        }
         if let Some(diagnostics) = pending_failure_diagnostics {
             report["pending_failure_diagnostics"] =
                 serde_json::to_value(diagnostics).expect("failure diagnostics serialize");
@@ -700,20 +818,7 @@ impl App {
                 probe.failure = Some("source analysis did not verify all Full-1080p inputs".into());
             }
         }
-        if probe
-            .timeline_generation
-            .is_some_and(|generation| generation != self.editor.timeline.generation())
-        {
-            probe.failure = Some("timeline changed during the fixed qualification workload".into());
-        }
-        if let Some(pending) = &probe.pending
-            && pending.first_surface_recorded
-            && (!self.editor.is_scrubbing()
-                || self.editor.playhead.0 != pending.sample.playhead_tick)
-        {
-            probe.failure =
-                Some("ruler target changed while waiting for its matching layers".into());
-        }
+        probe.check_editor_state(&self.editor);
         let evidence = self
             .hub_renderer
             .as_ref()
@@ -832,19 +937,130 @@ mod tests {
     }
 
     fn input_frame(context: &egui::Context, editor: &mut EditorState, probe: &mut Probe) -> bool {
+        input_frame_with_events(context, editor, probe, Vec::new())
+    }
+
+    fn input_frame_with_events(
+        context: &egui::Context,
+        editor: &mut EditorState,
+        probe: &mut Probe,
+        events: Vec<egui::Event>,
+    ) -> bool {
         let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1920.0, 1080.0),
             )),
+            events,
             ..Default::default()
         };
         let measured = probe.inject_input(&mut input, editor);
         let _ = context.run_ui(input, |ui| nle_ui_core::show_editor(ui, editor));
-        if measured {
-            probe.ui_complete(editor);
-        }
+        probe.after_ui(editor, measured);
+        probe.check_editor_state(editor);
         measured
+    }
+
+    #[test]
+    fn phase1_ui_backend_motion_during_wait_preserves_failed_sample_evidence() {
+        let directory = TemporaryDirectory::new();
+        let config = directory.config(1);
+        let mut probe = Probe::new(config.clone()).unwrap();
+        let context = egui::Context::default();
+        let mut editor = EditorState::new(Language::English, "Backend input regression");
+        editor.add_media_paths(config.source_paths.clone());
+        let track = editor.timeline.add_track(nle_timeline::TrackKind::Video);
+        editor
+            .timeline
+            .insert_clip(
+                track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(5_000_000),
+                nle_timeline::Tick(0),
+            )
+            .unwrap();
+        editor.timeline_view_span = nle_timeline::Tick(5_000_000);
+        editor.set_playhead(nle_timeline::Tick(500_000));
+        input_frame(&context, &mut editor, &mut probe);
+        probe.armed = true;
+        assert!(!input_frame(&context, &mut editor, &mut probe));
+        assert!(input_frame(&context, &mut editor, &mut probe));
+        let target_tick = editor.playhead.0;
+        probe.targets(vec![LayerTarget {
+            slot: 0,
+            media_id: 1,
+            clip_id: 1,
+            generation: 3,
+            request_id: 1,
+            requested_source_tick: target_tick,
+            output_size: [1920, 1080],
+        }]);
+        probe.decoded(0, 1, 1, 3, 1, target_tick, [1920, 1080], None, 1);
+        probe.presented(Duration::from_micros(500), Default::default());
+        assert!(probe.failure.is_none());
+        let geometry = editor.timeline_scrub_geometry().unwrap();
+        let foreign_pointer = egui::pos2(
+            geometry.content.left() + geometry.content.width() * 0.15,
+            geometry.handle_center.y,
+        );
+        assert!(!input_frame_with_events(
+            &context,
+            &mut editor,
+            &mut probe,
+            vec![egui::Event::PointerMoved(foreign_pointer)]
+        ));
+        assert_ne!(editor.playhead.0, target_tick);
+        assert!(
+            probe
+                .failure
+                .as_ref()
+                .unwrap()
+                .contains("ruler target changed")
+        );
+        // Even an eligible paint arriving on the failure frame must not consume the failed
+        // sample or erase the evidence needed to explain the unscripted movement.
+        probe.presented(
+            Duration::from_micros(500),
+            nle_render::ViewerPresentationEvidence {
+                upload_serials: [1, 0, 0, 0],
+                painted_upload_serials: [Some(1), None, None, None],
+                paint_serial: 1,
+            },
+        );
+        assert!(probe.samples.is_empty());
+        assert!(probe.pending.is_some());
+        probe.finish(serde_json::json!({}));
+        drop(probe);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(config.report_path).unwrap()).unwrap();
+        assert_eq!(report["status"], "failed");
+        assert_eq!(report["cpu_budgets_passed"], false);
+        assert_eq!(
+            report["pending_failure_diagnostics"]["pending_sample"]["playhead_tick"],
+            target_tick
+        );
+        let observation = &report["last_backend_input"];
+        assert_eq!(observation["pointer_moves"], 1);
+        assert_eq!(observation["playhead_before"], target_tick);
+        assert_eq!(observation["playhead_after"], editor.playhead.0);
+        assert_eq!(observation["injected_motion"], false);
+        assert_eq!(observation["pending_sample_index"], 0);
+    }
+
+    #[test]
+    fn phase1_ui_backend_input_summary_is_bounded_and_omits_private_payloads() {
+        let editor = EditorState::new(Language::English, "Input summary privacy");
+        let input = egui::RawInput {
+            events: vec![egui::Event::Paste("private clipboard sentinel".into()); 10_000],
+            ..Default::default()
+        };
+        let observation = BackendInputObservation::capture(&input, &editor, 0.0, Some(0));
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(encoded.len() < 512);
+        assert!(!encoded.contains("private clipboard sentinel"));
+        assert_eq!(observation.event_count, 10_000);
+        assert_eq!(observation.other_events, 10_000);
     }
 
     #[test]

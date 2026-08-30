@@ -1,6 +1,9 @@
 # Phase 1 windowed four-source qualification
 
-Latest follow-up: [scrub seek performance](scrub-seek-performance.md) records the
+Latest follow-up: [windowed input integrity](windowed-input-integrity.md) records
+the reproduced pointer-interference mechanism, preserved failure evidence, and a
+new four-case pass. The two historical interruptions remain unattributed.
+[Scrub seek performance](scrub-seek-performance.md) records the
 subsequent seek/EOF fixes, two clean final-package repetitions (four-source p95
 74–104 ms), and two workload-integrity invalidations. The measurements below
 remain historical evidence for the earlier timestamp-rounding fix.

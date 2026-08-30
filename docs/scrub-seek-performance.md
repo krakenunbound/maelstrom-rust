@@ -8,6 +8,10 @@ all codecs, continuous playback, audio continuity, or physical input/display lat
 Two additional attempts were invalidated by unexpected playhead changes and are
 preserved below; they are not treated as passing timing trials.
 
+The subsequent [input integrity follow-up](windowed-input-integrity.md) reproduces
+the incoming-pointer mechanism and repairs failure evidence preservation. It does
+not establish the origin of these historical interruptions.
+
 ## Cause and implementation
 
 The previous path subtracted five seconds before every backward keyframe seek.
@@ -116,6 +120,7 @@ absence of editor/compiler/media-tool processes. Its output
 `scrub-seek-verification.json` has SHA-256
 `3C770CA256976C78A31BA8BFB465B76DE66D1E2A81E328D5A2A52C7D6C118C7A`.
 
-The remaining work includes diagnosing the unscripted-input invalidations, broader
-codec/backend/reference-machine qualification, sustained playback/audio evidence,
-and reducing remaining fresh-frame latency without weakening correctness.
+The remaining work includes attributing any future input-integrity interruption
+using the new diagnostics, broader codec/backend/reference-machine qualification,
+sustained playback/audio evidence, and reducing remaining fresh-frame latency
+without weakening correctness.
