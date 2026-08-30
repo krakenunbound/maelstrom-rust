@@ -13192,6 +13192,502 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires four explicit dynamic 1920x1080 MPEG-4 fixtures and MAELSTROM_PHASE1_GENERATION_STRESS_REPORT"]
+    fn supplied_media_layer_toggle_backward_scrub_stress() {
+        const CYCLES: usize = 32;
+        const CYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+        const OUTPUT_SIZE: [u32; 2] = [640, 360];
+        const FORWARD_TICKS: [i64; 8] = [
+            1_783_000, 2_117_000, 2_449_000, 2_783_000, 3_117_000, 3_449_000, 3_617_000, 3_783_000,
+        ];
+
+        let sources = phase1_multisource_sources().expect("validate four Phase 1 source fixtures");
+        let report_path = phase1_generation_stress_report_path()
+            .expect("validate MAELSTROM_PHASE1_GENERATION_STRESS_REPORT");
+        let mut app = phase1_multisource_app(&sources, MONITOR_LAYER_COUNT);
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+        let clips = (0..MONITOR_LAYER_COUNT)
+            .map(|layer| {
+                app.editor
+                    .timeline
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.clips)
+                    .find(|clip| clip.media == nle_timeline::MediaId(layer as u32 + 1))
+                    .map(|clip| clip.id)
+                    .expect("Phase 1 multisource app has one clip per fixture")
+            })
+            .collect::<Vec<_>>();
+        let baseline_diagnostics = RuntimeDiagnosticsReport::from(app.runtime_diagnostics());
+
+        // First retain real decoder pixels for all layers.  The direct receive below captures a
+        // production DecodeEvent so the later stale proof does not rely on a synthetic frame.
+        app.editor
+            .set_playhead(nle_timeline::Tick(FORWARD_TICKS[0]));
+        let mut initial = preview_request(&app.editor);
+        initial.output_size = OUTPUT_SIZE;
+        app.submit_monitor_decode_request(initial);
+        let initial_deadline = Instant::now() + CYCLE_TIMEOUT;
+        while Instant::now() < initial_deadline
+            && (0..MONITOR_LAYER_COUNT).any(|layer| {
+                app.editor.monitor_frame_for_layer(layer).is_none()
+                    || app.monitor_requests_in_flight[layer]
+            })
+        {
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!((0..MONITOR_LAYER_COUNT).all(|layer| {
+            app.editor.monitor_frame_for_layer(layer).is_some()
+                && !app.monitor_requests_in_flight[layer]
+        }));
+
+        app.editor
+            .set_playhead(nle_timeline::Tick(FORWARD_TICKS[1]));
+        let mut capture_preview = preview_request(&app.editor);
+        capture_preview.output_size = OUTPUT_SIZE;
+        app.submit_monitor_decode_request(capture_preview);
+        let capture_deadline = Instant::now() + CYCLE_TIMEOUT;
+        let captured_real_event = loop {
+            match app.monitor_decoders[0]
+                .try_recv()
+                .expect("capture decoder open")
+            {
+                Some(event @ nle_decode::DecodeEvent::Frame(_)) => break event,
+                Some(event) => {
+                    let mut adaptive_quality_changed = false;
+                    let _ = app.apply_monitor_decode_event(0, event, &mut adaptive_quality_changed);
+                }
+                None => {
+                    assert!(
+                        Instant::now() < capture_deadline,
+                        "did not capture a real layer-zero decoder frame before generation stress"
+                    );
+                    // Do not call the general poller here: it would consume the exact real
+                    // layer-zero event this test needs to capture and replay.
+                    for layer in 1..MONITOR_LAYER_COUNT {
+                        while let Some(event) = app.monitor_decoders[layer]
+                            .try_recv()
+                            .expect("non-captured decoder remains open")
+                        {
+                            let mut adaptive_quality_changed = false;
+                            let _ = app.apply_monitor_decode_event(
+                                layer,
+                                event,
+                                &mut adaptive_quality_changed,
+                            );
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+        };
+        let captured_real_identity = match &captured_real_event {
+            nle_decode::DecodeEvent::Frame(frame) => (frame.project_epoch, frame.request_id),
+            nle_decode::DecodeEvent::Error(_) => unreachable!("captured frame event"),
+        };
+        let captured_real_event_for_cycle = captured_real_event.clone();
+        let mut adaptive_quality_changed = false;
+        assert!(app.apply_monitor_decode_event(
+            0,
+            captured_real_event.clone(),
+            &mut adaptive_quality_changed,
+        ));
+
+        // Advance layer zero's generation once before the loop and replay the real event. This
+        // is deliberately identified in the report as a captured-event replay, not a live late
+        // delivery; the barrier below separately proves an actual request was superseded.
+        assert!(app.editor.set_timeline_clip_enabled(clips[0], false));
+        let mut disabled_capture = preview_request(&app.editor);
+        disabled_capture.output_size = OUTPUT_SIZE;
+        app.submit_monitor_decode_request(disabled_capture);
+        assert!(app.editor.monitor_frame_for_layer(0).is_none());
+        assert!(app.editor.set_timeline_clip_enabled(clips[0], true));
+        let mut restored_capture = preview_request(&app.editor);
+        restored_capture.output_size = OUTPUT_SIZE;
+        app.submit_monitor_decode_request(restored_capture);
+        assert_eq!(app.editor.playback_targets().next().unwrap().media_id, 1);
+        assert_ne!(app.monitor_generations[0], captured_real_identity.0);
+        assert!(app.editor.monitor_frame_for_layer(0).is_none());
+        assert!(app.monitor_last_proxy_frames[0].is_none());
+        let captured_real_frame_rejected = !app.apply_monitor_decode_event(
+            0,
+            captured_real_event.clone(),
+            &mut adaptive_quality_changed,
+        );
+        assert!(captured_real_frame_rejected);
+        assert!(app.editor.monitor_frame_for_layer(0).is_none());
+        // Hold pixels, source, request ID, and target constant: changing only the epoch must
+        // make this otherwise eligible real event present. A media/convergence rejection alone
+        // therefore cannot make the stale-generation proof pass.
+        let nle_decode::DecodeEvent::Frame(mut epoch_control) = captured_real_event else {
+            unreachable!("captured a real frame");
+        };
+        let control_generation = app.monitor_generations[0];
+        epoch_control.project_epoch = control_generation;
+        let matching_generation_control_presented = app.apply_monitor_decode_event(
+            0,
+            nle_decode::DecodeEvent::Frame(epoch_control),
+            &mut adaptive_quality_changed,
+        );
+        assert!(matching_generation_control_presented);
+
+        let mut per_cycle = Vec::with_capacity(CYCLES);
+        let mut barrier_request_id = 0_u64;
+        let mut barrier_blocked = false;
+        let mut resource_checkpoint_count = 0_usize;
+        let mut check_resources = |app: &App| {
+            let resources = aggregate_playback_soak_monitor_resources(
+                &app.monitor_frame_cache_pool,
+                app.monitor_session_pool.diagnostics(),
+                app.monitor_source_coordinator.diagnostics(),
+            );
+            assert!(
+                phase1_live_audio_resources_are_bounded(&resources),
+                "unbounded stress checkpoint: {resources:?}"
+            );
+            resource_checkpoint_count += 1;
+        };
+        for cycle in 0..CYCLES {
+            // Start with the top positional source so the barrier's next request ID is exact;
+            // later cycles rotate every independent fixture through the disable path.
+            let toggled_layer = (cycle + MONITOR_LAYER_COUNT - 1) % MONITOR_LAYER_COUNT;
+            let forward_playhead_tick = FORWARD_TICKS[cycle % FORWARD_TICKS.len()];
+            let backward_playhead_tick = forward_playhead_tick - 166_667;
+            app.editor
+                .set_playhead(nle_timeline::Tick(forward_playhead_tick));
+            let mut forward = preview_request(&app.editor);
+            forward.output_size = OUTPUT_SIZE;
+
+            // On the first cycle, block the exact real top-layer request before decoding, then
+            // supersede it by disabling that layer. Guard Drop releases it during unwinding.
+            let barrier = if cycle == 0 {
+                barrier_request_id = app.monitor_next_request_id;
+                Some(nle_decode::install_test_decode_barrier(
+                    barrier_request_id,
+                    sources[toggled_layer].path.clone(),
+                ))
+            } else {
+                None
+            };
+            app.submit_monitor_decode_request(forward);
+            if let Some(barrier) = &barrier {
+                barrier.wait_until_blocked();
+                barrier_blocked = barrier.is_blocked();
+                assert!(barrier_blocked);
+            }
+
+            let forward_deadline = Instant::now() + CYCLE_TIMEOUT;
+            while Instant::now() < forward_deadline
+                && (0..MONITOR_LAYER_COUNT).any(|layer| {
+                    layer != toggled_layer
+                        && (app.editor.monitor_frame_for_layer(layer).is_none()
+                            || app.monitor_requests_in_flight[layer])
+                })
+            {
+                app.poll_monitor_decoder();
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!((0..MONITOR_LAYER_COUNT).all(|layer| {
+                layer == toggled_layer
+                    || (app.editor.monitor_frame_for_layer(layer).is_some()
+                        && !app.monitor_requests_in_flight[layer])
+            }));
+            let forward_identities = (0..MONITOR_LAYER_COUNT)
+                .map(|layer| {
+                    let request =
+                        app.monitor_last_requests[layer].expect("forward retained request");
+                    Phase1GenerationStressIdentity {
+                        layer,
+                        generation: app.monitor_generations[layer],
+                        request_id: app.monitor_latest_request_ids[layer],
+                        media_id: request.media_id,
+                        source_tick: request.source_tick,
+                    }
+                })
+                .collect();
+
+            assert!(
+                app.editor
+                    .set_timeline_clip_enabled(clips[toggled_layer], false)
+            );
+            let mut disabled = preview_request(&app.editor);
+            disabled.output_size = OUTPUT_SIZE;
+            assert!(
+                disabled
+                    .sources
+                    .iter()
+                    .flatten()
+                    .all(|source| source.media_id != toggled_layer as u32 + 1)
+                    && disabled.sources[MONITOR_LAYER_COUNT - 1].is_none(),
+                "disabled logical source must be absent after positional monitor-layer compaction"
+            );
+            app.submit_monitor_decode_request(disabled);
+            check_resources(&app);
+            let disabled_frame_cleared = !(0..MONITOR_LAYER_COUNT).any(|layer| {
+                app.editor
+                    .monitor_frame_for_layer(layer)
+                    .is_some_and(|frame| frame.media_id == Some(toggled_layer as u32 + 1))
+            });
+            assert!(
+                disabled_frame_cleared,
+                "cycle {cycle} disabled layer retained pixels"
+            );
+            let disabled_deadline = Instant::now() + CYCLE_TIMEOUT;
+            while Instant::now() < disabled_deadline
+                && (0..MONITOR_LAYER_COUNT)
+                    .filter(|layer| *layer != toggled_layer)
+                    .any(|media_layer| {
+                        !(0..MONITOR_LAYER_COUNT).any(|slot| {
+                            app.editor
+                                .monitor_frame_for_layer(slot)
+                                .is_some_and(|frame| {
+                                    frame.media_id == Some(media_layer as u32 + 1)
+                                        && frame.source_tick.is_some_and(|tick| {
+                                            tick.0 >= forward_playhead_tick
+                                                && tick.0 <= forward_playhead_tick + 33_334
+                                        })
+                                })
+                        })
+                    })
+            {
+                app.poll_monitor_decoder();
+                thread::sleep(Duration::from_millis(2));
+            }
+            // Disabling a lower timeline clip compacts positional monitor slots.  Assert retained
+            // logical media identities after that remap, never stale positional texture slots.
+            let unaffected_layers_retained = (0..MONITOR_LAYER_COUNT)
+                .filter(|layer| *layer != toggled_layer)
+                .all(|media_layer| {
+                    (0..MONITOR_LAYER_COUNT).any(|slot| {
+                        app.editor
+                            .monitor_frame_for_layer(slot)
+                            .is_some_and(|frame| {
+                                frame.media_id == Some(media_layer as u32 + 1)
+                                    && frame.source_tick.is_some_and(|tick| {
+                                        tick.0 >= forward_playhead_tick
+                                            && tick.0 <= forward_playhead_tick + 33_334
+                                    })
+                            })
+                    })
+                });
+            assert!(
+                unaffected_layers_retained,
+                "cycle {cycle} did not retain unaffected logical media after slot remapping"
+            );
+            let disabled_identities = (0..MONITOR_LAYER_COUNT)
+                .filter_map(|layer| {
+                    app.monitor_last_requests[layer].map(|request| Phase1GenerationStressIdentity {
+                        layer,
+                        generation: app.monitor_generations[layer],
+                        request_id: app.monitor_latest_request_ids[layer],
+                        media_id: request.media_id,
+                        source_tick: request.source_tick,
+                    })
+                })
+                .collect();
+            assert!(
+                app.editor
+                    .set_timeline_clip_enabled(clips[toggled_layer], true)
+            );
+            app.editor
+                .set_playhead(nle_timeline::Tick(backward_playhead_tick));
+            let mut backward = preview_request(&app.editor);
+            backward.output_size = OUTPUT_SIZE;
+            backward.is_scrubbing = true;
+            app.submit_monitor_decode_request(backward);
+            check_resources(&app);
+            if let Some(barrier) = &barrier {
+                barrier.release();
+            }
+
+            let settled_deadline = Instant::now() + CYCLE_TIMEOUT;
+            let mut final_applied_identities = [None; MONITOR_LAYER_COUNT];
+            while Instant::now() < settled_deadline
+                && (0..MONITOR_LAYER_COUNT).any(|layer| {
+                    !app.editor
+                        .monitor_frame_for_layer(layer)
+                        .is_some_and(|frame| {
+                            frame.media_id == Some(layer as u32 + 1)
+                                && frame.source_tick.is_some_and(|tick| {
+                                    tick.0 >= backward_playhead_tick
+                                        && tick.0 <= backward_playhead_tick + 33_334
+                                })
+                        })
+                        || app.monitor_requests_in_flight[layer]
+                })
+            {
+                // Keep the actual accepted DecodeEvent identity beside the final pixels.  The
+                // normal production acceptance method remains the sole event application path.
+                for (layer, applied_identity) in final_applied_identities.iter_mut().enumerate() {
+                    while let Some(event) = app.monitor_decoders[layer]
+                        .try_recv()
+                        .expect("final decoder remains open")
+                    {
+                        let identity = match &event {
+                            nle_decode::DecodeEvent::Frame(frame) => {
+                                Some((frame.project_epoch, frame.request_id))
+                            }
+                            nle_decode::DecodeEvent::Error(_) => None,
+                        };
+                        if app.apply_monitor_decode_event(
+                            layer,
+                            event,
+                            &mut adaptive_quality_changed,
+                        ) {
+                            assert_eq!(
+                                identity.unwrap().0,
+                                app.monitor_generations[layer],
+                                "cycle {cycle} transiently presented an obsolete generation on layer {layer}"
+                            );
+                            *applied_identity = identity;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(
+                (0..MONITOR_LAYER_COUNT).all(|layer| {
+                    app.editor
+                        .monitor_frame_for_layer(layer)
+                        .is_some_and(|frame| {
+                            frame.media_id == Some(layer as u32 + 1)
+                                && (frame.width, frame.height) == (OUTPUT_SIZE[0], OUTPUT_SIZE[1])
+                                && frame.source_tick.is_some_and(|tick| {
+                                    tick.0 >= backward_playhead_tick
+                                        && tick.0 <= backward_playhead_tick + 33_334
+                                })
+                        })
+                        && !app.monitor_requests_in_flight[layer]
+                }),
+                "cycle {cycle} did not settle four current backward-scrub frames before deadline"
+            );
+            let latest_identities = (0..MONITOR_LAYER_COUNT)
+                .map(|layer| {
+                    let request = app.monitor_last_requests[layer].expect("final retained request");
+                    let frame = app.editor.monitor_frame_for_layer(layer).expect("final retained frame");
+                    assert_eq!(request.media_id, layer as u32 + 1);
+                    assert_eq!(request.source_tick, backward_playhead_tick);
+                    assert!(!app.monitor_requests_in_flight[layer]);
+                    assert_eq!(
+                        final_applied_identities[layer],
+                        Some((app.monitor_generations[layer], app.monitor_latest_request_ids[layer])),
+                        "cycle {cycle} final pixels were not accepted from the current generation/request"
+                    );
+                    Phase1GenerationStressIdentity {
+                        layer,
+                        generation: app.monitor_generations[layer],
+                        request_id: app.monitor_latest_request_ids[layer],
+                        media_id: frame.media_id.expect("final media id"),
+                        source_tick: frame.source_tick.expect("final source tick").0,
+                    }
+                })
+                .collect();
+            let captured_real_frame_replay_rejected = !app.apply_monitor_decode_event(
+                0,
+                captured_real_event_for_cycle.clone(),
+                &mut adaptive_quality_changed,
+            );
+            assert!(captured_real_frame_replay_rejected);
+            check_resources(&app);
+            per_cycle.push(Phase1GenerationStressCycle {
+                cycle,
+                toggled_layer,
+                forward_playhead_tick,
+                backward_playhead_tick,
+                disabled_frame_cleared,
+                unaffected_layers_retained,
+                forward_identities,
+                disabled_identities,
+                latest_identities,
+                final_applied_identities,
+                captured_real_frame_replay_rejected,
+            });
+        }
+
+        let diagnostics_delta = RuntimeDiagnosticsReport::from(app.runtime_diagnostics())
+            .delta_since(baseline_diagnostics);
+        let resources = aggregate_playback_soak_monitor_resources(
+            &app.monitor_frame_cache_pool,
+            app.monitor_session_pool.diagnostics(),
+            app.monitor_source_coordinator.diagnostics(),
+        );
+        let resources_valid = phase1_live_audio_resources_are_bounded(&resources);
+        assert!(
+            resources_valid,
+            "generation stress exceeded monitor resource bounds: {resources:?}"
+        );
+        assert_eq!(
+            diagnostics_delta.monitor_errors, 0,
+            "generation stress accepted a current decoder error"
+        );
+        assert!(
+            !app.observed_decoder_backends.is_empty(),
+            "real decoder backend was not observed"
+        );
+        let observed_decoder_backends = app.observed_decoder_backends.clone();
+        let monitor_session_pool = app.monitor_session_pool.clone();
+        let monitor_source_coordinator = app.monitor_source_coordinator.clone();
+        drop(app);
+        let release_deadline = Instant::now() + CYCLE_TIMEOUT;
+        let post_drop = loop {
+            let sessions = monitor_session_pool.diagnostics();
+            let sources = monitor_source_coordinator.diagnostics();
+            if sessions.active_sticky_sessions == 0
+                && sources.live_source_groups == 0
+                && sources.live_lane_actors + sources.retiring_lane_actors == 0
+            {
+                break Phase1GenerationStressPostDrop {
+                    active_sessions: sessions.active_sticky_sessions,
+                    live_source_groups: sources.live_source_groups,
+                    live_lane_actors: sources.live_lane_actors,
+                    retiring_lane_actors: sources.retiring_lane_actors,
+                };
+            }
+            assert!(
+                Instant::now() < release_deadline,
+                "generation stress sources did not release after App drop: sessions={sessions:?} sources={sources:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        let report = Phase1GenerationStressReport {
+            schema_version: 1,
+            status: "passed",
+            source_count: sources.len(),
+            cycles: CYCLES,
+            sources,
+            output_size: OUTPUT_SIZE,
+            operations: Phase1GenerationStressOperations {
+                forward_submits: CYCLES,
+                backward_submits: CYCLES,
+                disable_operations: CYCLES + 1,
+                reenable_operations: CYCLES + 1,
+                barrier_supersessions: usize::from(barrier_blocked),
+            },
+            observed_decoder_backends,
+            stale_rejection: Phase1GenerationStressStaleRejection {
+                barrier_blocked,
+                barrier_request_id,
+                captured_real_frame_identity: captured_real_identity,
+                captured_real_frame_replayed_after_generation: true,
+                captured_real_frame_rejected,
+                matching_generation_control_presented,
+                control_generation,
+            },
+            per_cycle,
+            runtime_diagnostics_delta: diagnostics_delta,
+            resources_valid,
+            resource_checkpoint_count,
+            resources,
+            post_drop,
+        };
+        phase1_multisource_write_report(&report_path, &report)
+            .expect("atomically write Phase 1 generation stress report");
+    }
+
+    #[test]
     #[ignore = "requires four dynamic 1920x1080 fixtures, a real default audio output, and MAELSTROM_PHASE1_LIVE_AUDIO_REPORT"]
     fn supplied_media_four_video_layers_preserve_live_audio_continuity() {
         const INPUT_TO_SUBMIT_P95_US_LIMIT: u128 = 1_000;
@@ -14179,6 +14675,77 @@ mod tests {
         post_drop_active_sessions: usize,
     }
 
+    #[derive(Serialize)]
+    struct Phase1GenerationStressIdentity {
+        layer: usize,
+        generation: u64,
+        request_id: u64,
+        media_id: u32,
+        source_tick: i64,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1GenerationStressCycle {
+        cycle: usize,
+        toggled_layer: usize,
+        forward_playhead_tick: i64,
+        backward_playhead_tick: i64,
+        disabled_frame_cleared: bool,
+        unaffected_layers_retained: bool,
+        forward_identities: Vec<Phase1GenerationStressIdentity>,
+        disabled_identities: Vec<Phase1GenerationStressIdentity>,
+        latest_identities: Vec<Phase1GenerationStressIdentity>,
+        final_applied_identities: [Option<(u64, u64)>; MONITOR_LAYER_COUNT],
+        captured_real_frame_replay_rejected: bool,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1GenerationStressOperations {
+        forward_submits: usize,
+        backward_submits: usize,
+        disable_operations: usize,
+        reenable_operations: usize,
+        barrier_supersessions: usize,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1GenerationStressStaleRejection {
+        barrier_blocked: bool,
+        barrier_request_id: u64,
+        captured_real_frame_identity: (u64, u64),
+        captured_real_frame_replayed_after_generation: bool,
+        captured_real_frame_rejected: bool,
+        matching_generation_control_presented: bool,
+        control_generation: u64,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1GenerationStressPostDrop {
+        active_sessions: usize,
+        live_source_groups: usize,
+        live_lane_actors: usize,
+        retiring_lane_actors: usize,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1GenerationStressReport {
+        schema_version: u32,
+        status: &'static str,
+        source_count: usize,
+        cycles: usize,
+        sources: Vec<Phase1MultisourceSource>,
+        output_size: [u32; 2],
+        operations: Phase1GenerationStressOperations,
+        observed_decoder_backends: Vec<String>,
+        stale_rejection: Phase1GenerationStressStaleRejection,
+        per_cycle: Vec<Phase1GenerationStressCycle>,
+        runtime_diagnostics_delta: RuntimeDiagnosticsReport,
+        resources_valid: bool,
+        resource_checkpoint_count: usize,
+        resources: PlaybackSoakMonitorResources,
+        post_drop: Phase1GenerationStressPostDrop,
+    }
+
     fn phase0_required_absolute_path(name: &str) -> Result<PathBuf, String> {
         let path = std::env::var_os(name)
             .map(PathBuf::from)
@@ -14231,6 +14798,23 @@ mod tests {
         if !parent.is_dir() {
             return Err(format!(
                 "MAELSTROM_PHASE1_MULTISOURCE_REPORT parent does not exist: {}",
+                parent.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    fn phase1_generation_stress_report_path() -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path("MAELSTROM_PHASE1_GENERATION_STRESS_REPORT")?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE1_GENERATION_STRESS_REPORT must end in .json".to_owned());
+        }
+        let parent = path.parent().ok_or_else(|| {
+            "MAELSTROM_PHASE1_GENERATION_STRESS_REPORT has no parent directory".to_owned()
+        })?;
+        if !parent.is_dir() {
+            return Err(format!(
+                "MAELSTROM_PHASE1_GENERATION_STRESS_REPORT parent does not exist: {}",
                 parent.display()
             ));
         }

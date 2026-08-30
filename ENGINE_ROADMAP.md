@@ -168,7 +168,7 @@ Exit gate:
       NVIDIA RTX 3090 `DiscreteGpu` explicitly, rejected adapter-class fallback, and passed all
       schema, CPU, cadence, media, audio, GPU, runtime-counter, and cancelled-export checks. It does
       not prove DWM composition or physical scanout.
-- [x] Existing foundation gates remain green.
+- [ ] Existing foundation gates remain green.
       Requalified on 2026-08-30 against the exact Windows package. Workspace tests and strict
       all-target Clippy passed; the release 50,000-bar editor measured 0.472 ms wide-frame p95,
       0.268 ms detail-frame p95, and 0.307 ms playhead p95. The combined real H.264 plus 20,002-bar
@@ -178,6 +178,14 @@ Exit gate:
       cancellation, and passed the full-path launcher check with all 12 adjacent runtime DLLs.
       Packaged `Maelstrom.exe` SHA-256:
       `19859AB6534223B968E236048A7593C9CD4ABFACFD00C3F6CC872A9B842F2348`.
+      Reopened by a later 2026-08-30 source-tree check: the existing ignored release
+      `fifty_thousand_clip_editor_history_events_stay_under_two_ms` test exceeded its
+      unchanged 2 ms edit/release threshold in four runs (3.0755, 2.6410, 2.7171,
+      2.6261 ms). Pointer-press checkpoints remained below 2 ms. The ordinary app,
+      decoder, and UI-core suites passed; this newly measured history failure is
+      separate from the historical package/draw results above. Profile relocation,
+      index maintenance, and history capture before changing implementation or budgets.
+      See `docs/phase1-generation-stress.md` for retained logs.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope
@@ -361,11 +369,20 @@ Exit gate:
       presenting, the device clock keeps advancing with nonzero consumed PCM and no underruns, and
       the delayed source recovers after release. This is local Software-backend evidence; the
       separate four-source UI-present/cross-hardware exit gate remains open.
-- [ ] Rapid layer enable/disable and backward scrubbing publish only the latest generation.
+- [x] Rapid layer enable/disable and backward scrubbing publish only the latest generation.
       A deterministic app sequence covers forward/backward scrub, disable, re-enable, and newest
       re-enabled generation/request presentation while an unaffected layer remains retained;
-      real-media stress coverage
-      remains required.
+      the opt-in real-media gate now adds 32 rotating-layer cycles across four independent
+      dynamic 1080p30 MPEG-4 inputs with explicit 640x360 output. It forces one real decoder
+      supersession, rejects a captured real frame after same-media re-enable, and accepts a
+      control changing only its generation. All 33 stale replays are rejected; each cycle's
+      actually accepted final event must match the latest generation/request, and transient
+      obsolete acceptance during recovery fails immediately. The final 2026-08-30 local
+      Software run passed in 1.73 seconds with zero current errors, 96 resource checkpoints,
+      a 246,988,800-byte peak cache below 1 GiB, five peak sessions below eight, and zero
+      post-drop session/source/actor ownership. This is headless correctness evidence, not
+      Full-1080p output, UI latency, audio continuity, ten-minute soak, or cross-hardware proof.
+      See `docs/phase1-generation-stress.md`.
 - [ ] Cache/session memory remains inside its configured hard limit during a ten-minute stress run.
 
 ### Phase 2 — Real-time GPU compositor
