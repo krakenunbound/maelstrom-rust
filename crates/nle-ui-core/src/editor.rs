@@ -18,6 +18,8 @@ use nle_compositor::{
     CompositeLayerInput, CompositeQuad, CompositionRequest, MAX_COMPOSITE_LAYERS, PixelSize,
     fade_envelope_value, plan_composition, video_opacity_at,
 };
+#[cfg(test)]
+use nle_timeline::ClipData;
 use nle_timeline::{
     AnimatedScalar, AudioEffect, AudioTransitionId, BrightnessContrastEffect, Clip, ClipId,
     ColorCurve, ColorParameter, CurvePoint, EditTarget, EvaluatedVideoEffectStack, Fade, FadeEdge,
@@ -17366,7 +17368,7 @@ mod tests {
             frame_width: 160,
             frame_height: 80,
         };
-        let clip = Clip {
+        let clip = Clip::new(ClipData {
             id: ClipId(1),
             media: TimelineMediaId(1),
             track_id: TrackId(1),
@@ -17383,7 +17385,7 @@ mod tests {
             transform: nle_timeline::ClipTransform::default(),
             fade_in: Default::default(),
             fade_out: Default::default(),
-        };
+        });
         let strip = CachedVideoStrip {
             native_texture_id: 73,
             texture: egui::TextureId::Managed(17),
@@ -17419,7 +17421,7 @@ mod tests {
             frame_width: 160,
             frame_height: 80,
         };
-        let clip = Clip {
+        let clip = Clip::new(ClipData {
             id: ClipId(1),
             media: TimelineMediaId(1),
             track_id: TrackId(1),
@@ -17436,7 +17438,7 @@ mod tests {
             transform: nle_timeline::ClipTransform::default(),
             fade_in: Default::default(),
             fade_out: Default::default(),
-        };
+        });
         let mut canvas = RecordingTimelineCanvas::default();
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(80.0, 80.0));
         draw_timeline_video_tiles(
@@ -17473,7 +17475,7 @@ mod tests {
             .find(|track| track.id == track_id)
             .unwrap();
         for index in 0..50_000_i64 {
-            track.clips.push(Clip {
+            track.clips.push(Clip::new(ClipData {
                 id: ClipId(index as u32 + 1),
                 media: TimelineMediaId(1),
                 track_id,
@@ -17490,7 +17492,7 @@ mod tests {
                 transform: nle_timeline::ClipTransform::default(),
                 fade_in: Default::default(),
                 fade_out: Default::default(),
-            });
+            }));
         }
         editor.timeline = Timeline::from_snapshot(snapshot).unwrap();
         editor.timeline_view_span = Tick(100_000_000);
@@ -17527,23 +17529,25 @@ mod tests {
             .find(|track| track.id == track_id)
             .unwrap()
             .clips = (1..=50_000_u32)
-            .map(|id| Clip {
-                id: ClipId(id),
-                media: TimelineMediaId(1),
-                track_id,
-                link_id: None,
-                enabled: true,
-                start: Tick(i64::from(id - 1) * 2_000),
-                duration: Tick(1_000),
-                source_in: Tick(0),
-                gain_db: 0.0,
-                gain_left_db: 0.0,
-                gain_right_db: 0.0,
-                effects: Vec::new(),
-                video_effects: Vec::new(),
-                transform: nle_timeline::ClipTransform::default(),
-                fade_in: Default::default(),
-                fade_out: Default::default(),
+            .map(|id| {
+                Clip::new(ClipData {
+                    id: ClipId(id),
+                    media: TimelineMediaId(1),
+                    track_id,
+                    link_id: None,
+                    enabled: true,
+                    start: Tick(i64::from(id - 1) * 2_000),
+                    duration: Tick(1_000),
+                    source_in: Tick(0),
+                    gain_db: 0.0,
+                    gain_left_db: 0.0,
+                    gain_right_db: 0.0,
+                    effects: Vec::new(),
+                    video_effects: Vec::new(),
+                    transform: nle_timeline::ClipTransform::default(),
+                    fade_in: Default::default(),
+                    fade_out: Default::default(),
+                })
             })
             .collect();
         editor.timeline = Timeline::from_snapshot(snapshot).unwrap();
@@ -23160,24 +23164,26 @@ mod tests {
 
         let mut dangling = editor.snapshot();
         let track_id = dangling.timeline.tracks[0].id;
-        dangling.timeline.tracks[0].clips.push(nle_timeline::Clip {
-            id: ClipId(99),
-            media: TimelineMediaId(99),
-            track_id,
-            link_id: None,
-            enabled: true,
-            start: Tick(0),
-            duration: Tick(1),
-            source_in: Tick(0),
-            gain_db: 0.0,
-            gain_left_db: 0.0,
-            gain_right_db: 0.0,
-            effects: Vec::new(),
-            video_effects: Vec::new(),
-            transform: nle_timeline::ClipTransform::default(),
-            fade_in: Default::default(),
-            fade_out: Default::default(),
-        });
+        dangling.timeline.tracks[0]
+            .clips
+            .push(nle_timeline::Clip::new(nle_timeline::ClipData {
+                id: ClipId(99),
+                media: TimelineMediaId(99),
+                track_id,
+                link_id: None,
+                enabled: true,
+                start: Tick(0),
+                duration: Tick(1),
+                source_in: Tick(0),
+                gain_db: 0.0,
+                gain_left_db: 0.0,
+                gain_right_db: 0.0,
+                effects: Vec::new(),
+                video_effects: Vec::new(),
+                transform: nle_timeline::ClipTransform::default(),
+                fade_in: Default::default(),
+                fade_out: Default::default(),
+            }));
         assert!(matches!(
             EditorState::restore(Language::English, "Test", dangling),
             Err(EditorRestoreError::UnknownTimelineMedia(99))

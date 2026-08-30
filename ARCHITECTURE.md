@@ -69,10 +69,14 @@ edits invalidate that array; the visible-clip loop performs one array lookup rat
 The foundation edit kernel owns move, trim, razor, slip, roll, insert/overwrite, replace, delete,
 linked A/V selection, gain, fades, and mute. Successful edits bump generation once. Undo/redo stores
 capped batches of inverse clip/track operations (256 entries), not project snapshots. Persistent
-project snapshots are only for background save/export boundaries.
+project snapshots are used at background save/export boundaries and temporarily before gestures.
+Clip arrays contain shared immutable records (`Clip` over `Arc<ClipData>`). Snapshot capture copies
+lightweight handles; any mutable field access detaches only that clip through copy-on-write.
+Nested audio/video effects and keyframes remain isolated from undo and export snapshots. Project
+JSON is unchanged; Rust constructors use `Clip::new(ClipData { ... })`.
 
-History capture has a linear, allocation-free fast path when track and clip cardinality are
-unchanged. It compares stable clip IDs directly and records only changed records, including a
+History comparison has a linear fast path without per-clip maps when track and clip cardinality are
+unchanged. It skips shared records by identity, compares other records by value, and records only changes, including a
 single relocated clip; inserts, deletes, cross-track moves, and complex reorders fall back to the
 general structural diff. The release 50,000-clip gate requires history recording to remain below
 the same 2 ms interaction budget. The editor records against the live timeline after a gesture,
@@ -82,8 +86,12 @@ Ordinary relocation uses a binary destination search and in-place rotation of on
 clip range, independently for linked audio/video tracks. Only affected location-index entries are
 updated; multi-change reorders retain stable sorting on the affected track. Collision validation
 checks the destination's unchanged neighbors and the final intervals of other edited clips before
-any mutation. The 50k history gate remains open for before-state capture and release tail latency;
-see `docs/timeline-relocation-performance.md` for the retained measurements and limits.
+any mutation. Ten local release trials passed both unchanged 2 ms history limits after shared-record
+capture: press p95 0.3481 ms and edit/release p95 0.9921 ms. These CPU measurements do not establish
+UI-present or cross-hardware latency; see `docs/timeline-relocation-performance.md` for evidence.
+Per-clip allocation and indirection increase base storage overhead; retained draw caches still use
+compact columns. Canonical restore retains shared clips, but validates/normalizes cloned nonempty
+video-effect vectors before deciding whether a record must detach.
 
 Timeline-bound Media Pool and operating-system file drops use non-ripple overwrite edits on V1/A1
 or A1: occupied sections become source-accurate outer tails and later clips do not move. The explicit

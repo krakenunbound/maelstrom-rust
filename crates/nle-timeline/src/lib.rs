@@ -6,6 +6,8 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -824,8 +826,74 @@ impl Default for Fade {
     }
 }
 
+/// A copy-on-write clip record. Snapshots share unchanged records; editing any
+/// field detaches the record so history and concurrent consumers stay immutable.
+#[derive(Clone, Debug)]
+pub struct Clip(Arc<ClipData>);
+
+impl Clip {
+    pub fn new(data: ClipData) -> Self {
+        Self(Arc::new(data))
+    }
+
+    pub fn make_mut(&mut self) -> &mut ClipData {
+        Arc::make_mut(&mut self.0)
+    }
+
+    pub fn end(&self) -> Tick {
+        self.0.end()
+    }
+
+    pub fn mix_gain_db(&self, track: &Track) -> f32 {
+        self.0.mix_gain_db(track)
+    }
+
+    pub fn evaluate_video_effects(&self, source_tick: Tick) -> EvaluatedVideoEffectStack {
+        self.0.evaluate_video_effects(source_tick)
+    }
+
+    fn same_history_record(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self == other
+    }
+}
+
+impl Deref for Clip {
+    type Target = ClipData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Clip {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.make_mut()
+    }
+}
+
+impl PartialEq for Clip {
+    fn eq(&self, other: &Self) -> bool {
+        // Keep ordinary floating-point equality, even for shared NaN records.
+        self.0.as_ref() == other.0.as_ref()
+    }
+}
+
+impl Serialize for Clip {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Clip {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ClipData::deserialize(deserializer).map(Self::new)
+    }
+}
+
+/// Persisted clip fields. The shared runtime handle does not change the schema.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Clip {
+#[serde(rename = "Clip")]
+pub struct ClipData {
     pub id: ClipId,
     pub media: MediaId,
     /// The track containing this clip. Kept on the clip for ID-based clients.
@@ -1015,7 +1083,7 @@ fn clamp_crop_pair(first: &mut f32, second: &mut f32) {
     }
 }
 
-impl Clip {
+impl ClipData {
     pub fn end(&self) -> Tick {
         Tick(self.start.0.saturating_add(self.duration.0))
     }
@@ -1305,7 +1373,7 @@ fn color_scalar(
 }
 
 fn color_scalar_mut(
-    clip: &mut Clip,
+    clip: &mut ClipData,
     effect_id: VideoEffectId,
     parameter: ColorParameter,
 ) -> Option<&mut AnimatedScalar> {
@@ -1790,11 +1858,8 @@ fn append_transition_delta(
 }
 
 fn timeline_tracks_delta(before: &[Track], after: &[Track]) -> Option<TimelineEditBatch> {
-    if before == after {
-        return None;
-    }
     if let Some(edits) = same_cardinality_timeline_delta(before, after) {
-        return Some(timeline_edit_batch(edits));
+        return (!edits.is_empty()).then(|| timeline_edit_batch(edits));
     }
     let before_tracks = before
         .iter()
@@ -1871,7 +1936,7 @@ fn timeline_tracks_delta(before: &[Track], after: &[Track]) -> Option<TimelineEd
         );
         for before_clip in &before_track.clips {
             if let Some((_, after_clip)) = after_clips.get(&before_clip.id)
-                && before_clip != *after_clip
+                && !before_clip.same_history_record(after_clip)
             {
                 edits.push(TimelineEdit::PatchClip {
                     before: before_clip.clone(),
@@ -1963,7 +2028,7 @@ fn append_same_cardinality_clip_delta(
             before
                 .iter()
                 .zip(after)
-                .filter(|(left, right)| left != right)
+                .filter(|(left, right)| !left.same_history_record(right))
                 .map(|(before, after)| TimelineEdit::PatchClip {
                     before: before.clone(),
                     after: after.clone(),
@@ -1975,13 +2040,13 @@ fn append_same_cardinality_clip_delta(
     let prefix = before
         .iter()
         .zip(after)
-        .take_while(|(left, right)| left == right)
+        .take_while(|(left, right)| left.same_history_record(right))
         .count();
     let suffix = before[prefix..]
         .iter()
         .rev()
         .zip(after[prefix..].iter().rev())
-        .take_while(|(left, right)| left == right)
+        .take_while(|(left, right)| left.same_history_record(right))
         .count();
     let end = before.len().saturating_sub(suffix);
     let before_middle = &before[prefix..end];
@@ -1989,11 +2054,11 @@ fn append_same_cardinality_clip_delta(
     let last = before_middle.len().checked_sub(1)?;
 
     let moved = if after_middle[0].id == before_middle[last].id
-        && before_middle[..last] == after_middle[1..]
+        && same_history_clips(&before_middle[..last], &after_middle[1..])
     {
         Some((&before_middle[last], &after_middle[0]))
     } else if before_middle[0].id == after_middle[last].id
-        && before_middle[1..] == after_middle[..last]
+        && same_history_clips(&before_middle[1..], &after_middle[..last])
     {
         Some((&before_middle[0], &after_middle[last]))
     } else {
@@ -2004,6 +2069,14 @@ fn append_same_cardinality_clip_delta(
         after: moved.1.clone(),
     });
     Some(())
+}
+
+fn same_history_clips(before: &[Clip], after: &[Clip]) -> bool {
+    before.len() == after.len()
+        && before
+            .iter()
+            .zip(after)
+            .all(|(left, right)| left.same_history_record(right))
 }
 
 fn timeline_edit_batch(edits: Vec<TimelineEdit>) -> TimelineEditBatch {
@@ -2315,7 +2388,8 @@ impl Timeline {
                 {
                     return Err(TimelineSnapshotError::InvalidClipEffect { clip: clip.id });
                 }
-                if !normalize_video_effects(&mut clip.video_effects) {
+                let mut video_effects = clip.video_effects.clone();
+                if !normalize_video_effects(&mut video_effects) {
                     return Err(TimelineSnapshotError::InvalidVideoEffect { clip: clip.id });
                 }
                 if !clip.fade_in.curve.is_finite() || !clip.fade_out.curve.is_finite() {
@@ -2324,13 +2398,39 @@ impl Timeline {
                 if !clip.transform.is_finite() {
                     return Err(TimelineSnapshotError::NonFiniteTransform { clip: clip.id });
                 }
-                clip.gain_db = clip.gain_db.clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                clip.gain_left_db = clip.gain_left_db.clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                clip.gain_right_db = clip.gain_right_db.clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                clip.fade_in.curve = clip.fade_in.curve.clamp(MIN_FADE_CURVE, MAX_FADE_CURVE);
-                clip.fade_out.curve = clip.fade_out.curve.clamp(MIN_FADE_CURVE, MAX_FADE_CURVE);
-                clip.transform = clip.transform.clamped();
-                Self::clamp_fades_to_clip(clip);
+                let gain_db = clip.gain_db.clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+                let gain_left_db = clip.gain_left_db.clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+                let gain_right_db = clip.gain_right_db.clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+                let mut fade_in = clip.fade_in;
+                let mut fade_out = clip.fade_out;
+                fade_in.curve = fade_in.curve.clamp(MIN_FADE_CURVE, MAX_FADE_CURVE);
+                fade_out.curve = fade_out.curve.clamp(MIN_FADE_CURVE, MAX_FADE_CURVE);
+                fade_in.duration = Tick(fade_in.duration.0.clamp(0, clip.duration.0));
+                fade_out.duration = Tick(
+                    fade_out
+                        .duration
+                        .0
+                        .clamp(0, clip.duration.0 - fade_in.duration.0),
+                );
+                let transform = clip.transform.clamped();
+                // Restoring a canonical snapshot must retain its shared records.
+                if gain_db != clip.gain_db
+                    || gain_left_db != clip.gain_left_db
+                    || gain_right_db != clip.gain_right_db
+                    || fade_in != clip.fade_in
+                    || fade_out != clip.fade_out
+                    || transform != clip.transform
+                    || video_effects != clip.video_effects
+                {
+                    let data = clip.make_mut();
+                    data.gain_db = gain_db;
+                    data.gain_left_db = gain_left_db;
+                    data.gain_right_db = gain_right_db;
+                    data.fade_in = fade_in;
+                    data.fade_out = fade_out;
+                    data.transform = transform;
+                    data.video_effects = video_effects;
+                }
                 max_clip_id = max_clip_id.max(clip.id.0);
                 if let Some(link_id) = clip.link_id {
                     if link_id.0 == 0 {
@@ -4574,7 +4674,7 @@ impl Timeline {
         }
         let end = checked_add(start, duration)?;
         let id = self.allocate_clip_id();
-        let clip = Clip {
+        let clip = Clip::new(ClipData {
             id,
             media,
             track_id,
@@ -4591,7 +4691,7 @@ impl Timeline {
             transform: ClipTransform::default(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
-        };
+        });
         let track_index = self.track_index(track_id)?;
         let track = &mut self.tracks[track_index];
         let insert_at = track
@@ -4886,7 +4986,7 @@ impl Timeline {
         id
     }
 
-    fn clamp_fades_to_clip(clip: &mut Clip) {
+    fn clamp_fades_to_clip(clip: &mut ClipData) {
         clip.fade_in.duration = Tick(clip.fade_in.duration.0.clamp(0, clip.duration.0));
         clip.fade_out.duration = Tick(
             clip.fade_out
@@ -6252,7 +6352,7 @@ mod tests {
         ));
 
         let mut overlap = snapshot.clone();
-        overlap.tracks[3].clips.push(Clip {
+        overlap.tracks[3].clips.push(Clip::new(ClipData {
             id: ClipId(2),
             media: MediaId(2),
             track_id: track,
@@ -6269,7 +6369,7 @@ mod tests {
             transform: ClipTransform::default(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
-        });
+        }));
         assert!(matches!(
             Timeline::from_snapshot(overlap),
             Err(TimelineSnapshotError::UnsortedOrOverlapping { .. })
@@ -6675,7 +6775,7 @@ mod tests {
     }
 
     fn test_clip(id: u32, start: i64, duration: i64) -> Clip {
-        Clip {
+        Clip::new(ClipData {
             id: ClipId(id),
             media: MediaId(id),
             track_id: TrackId(1),
@@ -6692,7 +6792,7 @@ mod tests {
             transform: ClipTransform::default(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
-        }
+        })
     }
 
     #[test]

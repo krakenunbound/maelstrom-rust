@@ -4634,6 +4634,20 @@ mod tests {
         assert_eq!(pool.diagnostics().active_sticky_sessions, 2);
 
         decoder.release_live_sessions().unwrap();
+        let final_deadline = Instant::now() + Duration::from_secs(2);
+        while (coordinator.diagnostics().live_source_groups != 0
+            || coordinator.diagnostics().live_lane_actors != 0
+            || coordinator.diagnostics().retiring_lane_actors != 0
+            || pool.diagnostics().active_sticky_sessions != 0)
+            && Instant::now() < final_deadline
+        {
+            thread::yield_now();
+        }
+        let final_diagnostics = coordinator.diagnostics();
+        assert_eq!(final_diagnostics.live_source_groups, 0);
+        assert_eq!(final_diagnostics.live_lane_actors, 0);
+        assert_eq!(final_diagnostics.retiring_lane_actors, 0);
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
         drop(decoder);
         fs::remove_file(path).unwrap();
     }

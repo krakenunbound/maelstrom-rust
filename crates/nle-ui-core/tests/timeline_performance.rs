@@ -11,7 +11,7 @@ use std::{
 
 use egui::{Color32, Pos2, Rect, Vec2};
 use nle_decode::{AccelerationPreference, DecodeEvent, DecodeRequest, MonitorDecoder};
-use nle_timeline::{Clip, Fade, MediaId, Tick, Timeline, TimelineSnapshot, TrackKind};
+use nle_timeline::{Clip, ClipData, Fade, MediaId, Tick, Timeline, TimelineSnapshot, TrackKind};
 use nle_ui_core::{EditorState, Language, TimelineCanvas, show_editor_with_timeline_canvas};
 
 const CLIP_COUNT: u32 = 50_000;
@@ -67,25 +67,27 @@ fn fifty_thousand_clips() -> Timeline {
         .find(|track| track.kind == TrackKind::Video)
         .expect("default timeline includes video tracks");
     video_track.clips = (1..=CLIP_COUNT)
-        .map(|id| Clip {
-            id: nle_timeline::ClipId(id),
-            media: MediaId(1),
-            track_id: video_track.id,
-            link_id: None,
-            enabled: true,
-            // One millisecond clip followed by one millisecond of empty timeline. This keeps
-            // the source nonoverlapping and makes the wide view a genuine 50,000-clip case.
-            start: Tick(i64::from(id - 1) * 2_000),
-            duration: Tick(1_000),
-            source_in: Tick(0),
-            gain_db: 0.0,
-            gain_left_db: 0.0,
-            gain_right_db: 0.0,
-            effects: Vec::new(),
-            video_effects: Vec::new(),
-            transform: nle_timeline::ClipTransform::default(),
-            fade_in: Fade::default(),
-            fade_out: Fade::default(),
+        .map(|id| {
+            Clip::new(ClipData {
+                id: nle_timeline::ClipId(id),
+                media: MediaId(1),
+                track_id: video_track.id,
+                link_id: None,
+                enabled: true,
+                // One millisecond clip followed by one millisecond of empty timeline. This keeps
+                // the source nonoverlapping and makes the wide view a genuine 50,000-clip case.
+                start: Tick(i64::from(id - 1) * 2_000),
+                duration: Tick(1_000),
+                source_in: Tick(0),
+                gain_db: 0.0,
+                gain_left_db: 0.0,
+                gain_right_db: 0.0,
+                effects: Vec::new(),
+                video_effects: Vec::new(),
+                transform: nle_timeline::ClipTransform::default(),
+                fade_in: Fade::default(),
+                fade_out: Fade::default(),
+            })
         })
         .collect();
     Timeline::from_snapshot(TimelineSnapshot {
@@ -114,23 +116,25 @@ fn add_twenty_thousand_bars_behind_real_media(state: &mut EditorState) {
         .expect("default timeline includes a second video track");
     let start = state.timeline_end().0.saturating_add(1_000_000);
     stress_track.clips = (0..COMBINED_CLIP_COUNT)
-        .map(|index| Clip {
-            id: nle_timeline::ClipId(max_clip_id + index + 1),
-            media: MediaId(1),
-            track_id: stress_track.id,
-            link_id: None,
-            enabled: true,
-            start: Tick(start + i64::from(index) * 2_000),
-            duration: Tick(1_000),
-            source_in: Tick(0),
-            gain_db: 0.0,
-            gain_left_db: 0.0,
-            gain_right_db: 0.0,
-            effects: Vec::new(),
-            video_effects: Vec::new(),
-            transform: nle_timeline::ClipTransform::default(),
-            fade_in: Fade::default(),
-            fade_out: Fade::default(),
+        .map(|index| {
+            Clip::new(ClipData {
+                id: nle_timeline::ClipId(max_clip_id + index + 1),
+                media: MediaId(1),
+                track_id: stress_track.id,
+                link_id: None,
+                enabled: true,
+                start: Tick(start + i64::from(index) * 2_000),
+                duration: Tick(1_000),
+                source_in: Tick(0),
+                gain_db: 0.0,
+                gain_left_db: 0.0,
+                gain_right_db: 0.0,
+                effects: Vec::new(),
+                video_effects: Vec::new(),
+                transform: nle_timeline::ClipTransform::default(),
+                fade_in: Fade::default(),
+                fade_out: Fade::default(),
+            })
         })
         .collect();
     state.timeline = Timeline::from_snapshot(TimelineSnapshot {

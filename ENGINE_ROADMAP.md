@@ -196,6 +196,22 @@ Exit gate:
       capture/release tail work; see `docs/timeline-relocation-performance.md`. The preceding
       parallel workspace run also exposed a decoder-fixture cleanup sharing violation that
       did not recur in the serial run; deterministic teardown remains to be repaired.
+      The next shared-clip checkpoint passes the local release history gate in all ten trials:
+      press p95 0.3481 ms and edit/release p95 0.9921 ms, with unchanged 2 ms thresholds and
+      undo/redo checks. Snapshots now share immutable clip records and edits copy only touched
+      records; flat project JSON is unchanged. Dense wide/detail/playhead CPU p95 is
+      0.4656/0.3434/0.3489 ms; cache rebuild plus banding is 0.8655 ms. Eight integration tests
+      cover snapshot/effect isolation, normalization, JSON, equality, 50k move/probe detachment,
+      and history. Decoder teardown now waits for actor/session retirement before fixture
+      deletion; ten focused release trials passed. These source-tree CPU checks do not renew
+      packaged/live, cross-hardware, or soak evidence; the broader gate remains open.
+      See `docs/timeline-relocation-performance.md` for retained results and ownership tradeoffs.
+      Final serial release verification passed 715 tests and strict all-target Clippy passed.
+      A parallel rerun nevertheless stalled during a two-second equal-power audio crossfade
+      export, emitting non-monotonic AAC timestamps until its exact FFmpeg child was stopped.
+      The same test passed before and after that run. Preserve and diagnose this intermittent
+      failure using `artifacts/phase1-multisource/shared-clip-export-stall/`; do not treat the
+      serial pass as closure of the export reliability gate.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope

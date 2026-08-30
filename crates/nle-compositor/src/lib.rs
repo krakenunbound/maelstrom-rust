@@ -4,6 +4,8 @@
 //! quads and source UVs to their own renderer. Layers occupy fixed slots in
 //! bottom-to-top order, so a renderer never has to infer z-order.
 
+#[cfg(test)]
+use nle_timeline::ClipData;
 use nle_timeline::{Clip, ClipId, ClipSizingMode, ClipTransform, Fade, Tick};
 
 /// The maximum concurrently composited video layers supported by the preview.
@@ -471,7 +473,7 @@ mod tests {
         assert_eq!(video_fade_opacity(0.0), 0.0);
         assert_eq!(video_fade_opacity(1.0), 1.0);
 
-        let clip = Clip {
+        let clip = Clip::new(ClipData {
             id: ClipId(1),
             media: nle_timeline::MediaId(1),
             track_id: nle_timeline::TrackId(1),
@@ -488,7 +490,7 @@ mod tests {
             transform: ClipTransform::default(),
             fade_in: positive,
             fade_out: positive,
-        };
+        });
         assert_eq!(video_opacity_at(&clip, Tick(0)), 0.0);
         assert_eq!(video_opacity_at(&clip, Tick(2_000_000)), 1.0);
         assert_eq!(video_opacity_at(&clip, Tick(4_000_000)), 0.0);
