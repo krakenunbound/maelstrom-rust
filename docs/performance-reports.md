@@ -1,8 +1,9 @@
 # Performance reports
 
-Maelstrom's existing surface-submission probe writes a schema-version 3 JSON report when
-`MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. It measures a fixed 120-frame window;
-report serialization and disk IO remain on the existing one-shot worker.
+Maelstrom's existing surface-submission probe writes a schema-version 4 JSON report when
+`MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. Its timing samples measure a fixed
+120-frame window; report serialization and disk IO remain on the existing one-shot, off-thread
+worker.
 
 The report records:
 
@@ -25,6 +26,12 @@ The report records:
 - native audio output-callback CPU timing at `audio_stage_timings.output_callback_cpu`, with sample
   count, total, mean, and maximum milliseconds (no p95). It covers callback CPU through lock retry,
   mix, effects, conversion, and meter work, or the silence fallback when the callback cannot mix.
+- a nested `runtime_diagnostics` snapshot containing cumulative
+  `monitor_requests`, `monitor_completed_frames`, `monitor_presented_frames`,
+  `monitor_dropped_frames`, `monitor_hold_events`, `monitor_late_frames`, `monitor_errors`,
+  `native_viewer_uploads`, `fallback_viewer_uploads`, `audio_underrun_frames`,
+  `audio_callback_lock_failures`, and `audio_late_discarded_frames`. These counters are cumulative
+  since process/session start and are not scoped to the fixed 120-frame timing window.
 
 This is CPU and submission-cadence evidence. It does not claim scanout, GPU-completion, or end-to-end
 display latency. The timing stages likewise end at their named CPU boundaries; the audio callback
@@ -40,8 +47,11 @@ rather than hardware guesses. Project files never contain this session-only meta
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
 `"Unknown"` are not used as hidden unavailable-value sentinels.
 
-Windows packaging validates that the full report includes real CPU/RAM, renderer, media backend,
-preview, cache, and display data when available before accepting the build. The retained report is
+Windows packaging performs structural and exercised-path validation: it checks the packaged report
+shape and confirms the full report includes real CPU/RAM, renderer, media backend, preview, cache,
+display, and exercised runtime-counter data when available before accepting the build. Existing
+CPU/cadence package limits remain in force; counter-rate and long-session health thresholds remain
+in the dedicated playback-soak and sustained-soak runners. The retained report is
 `dist/last-surface-submission-smoke.json`.
 
 ## Opt-in packaged playback soak

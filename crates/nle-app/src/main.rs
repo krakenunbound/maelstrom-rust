@@ -1922,6 +1922,7 @@ struct SurfaceSubmissionReport {
     decoder_stage_timings: DecoderStageTimingsReport,
     viewer_stage_timings: ViewerStageTimingsReport,
     audio_stage_timings: AudioStageTimingsReport,
+    runtime_diagnostics: RuntimeDiagnosticsReport,
 }
 
 /// CPU/API submission timing only; it does not measure GPU completion or scanout.
@@ -2114,6 +2115,7 @@ struct SurfaceReportEnvironment {
     decoder_stage_timings: DecoderStageTimingsReport,
     viewer_stage_timings: ViewerStageTimingsReport,
     audio_stage_timings: AudioStageTimingsReport,
+    runtime_diagnostics: RuntimeDiagnosticsReport,
 }
 
 fn surface_report_backends_ready(
@@ -2176,7 +2178,7 @@ struct SurfaceSubmissionProbe {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
-struct PlaybackSoakRuntimeDiagnostics {
+struct RuntimeDiagnosticsReport {
     monitor_requests: u64,
     monitor_completed_frames: u64,
     monitor_presented_frames: u64,
@@ -2191,7 +2193,7 @@ struct PlaybackSoakRuntimeDiagnostics {
     audio_late_discarded_frames: u64,
 }
 
-impl PlaybackSoakRuntimeDiagnostics {
+impl RuntimeDiagnosticsReport {
     fn delta_since(self, baseline: Self) -> Self {
         Self {
             monitor_requests: self
@@ -2232,7 +2234,7 @@ impl PlaybackSoakRuntimeDiagnostics {
     }
 }
 
-impl From<RuntimeDiagnostics> for PlaybackSoakRuntimeDiagnostics {
+impl From<RuntimeDiagnostics> for RuntimeDiagnosticsReport {
     fn from(diagnostics: RuntimeDiagnostics) -> Self {
         Self {
             monitor_requests: diagnostics.monitor_requests,
@@ -2324,13 +2326,13 @@ struct PlaybackSoakReport {
     audio_transport_healthy_at_completion: bool,
     audio_fault_observed: bool,
     unexpected_playback_stop_observed: bool,
-    runtime_diagnostics_delta: PlaybackSoakRuntimeDiagnostics,
+    runtime_diagnostics_delta: RuntimeDiagnosticsReport,
 }
 
 struct PlaybackSoakProbe {
     requested_duration: Duration,
     started_at: Option<Instant>,
-    baseline_diagnostics: Option<PlaybackSoakRuntimeDiagnostics>,
+    baseline_diagnostics: Option<RuntimeDiagnosticsReport>,
     loop_count: u64,
     audio_fault_observed: bool,
     unexpected_playback_stop_observed: bool,
@@ -2441,7 +2443,7 @@ impl PlaybackSoakProbe {
                 && !self.unexpected_playback_stop_observed,
             audio_fault_observed: self.audio_fault_observed,
             unexpected_playback_stop_observed: self.unexpected_playback_stop_observed,
-            runtime_diagnostics_delta: PlaybackSoakRuntimeDiagnostics::from(diagnostics)
+            runtime_diagnostics_delta: RuntimeDiagnosticsReport::from(diagnostics)
                 .delta_since(self.baseline_diagnostics.unwrap_or_default()),
         })
     }
@@ -2572,7 +2574,7 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 3,
+            schema_version: 4,
             samples: metrics.samples,
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
@@ -2598,6 +2600,7 @@ impl SurfaceSubmissionProbe {
             decoder_stage_timings: environment.decoder_stage_timings,
             viewer_stage_timings: environment.viewer_stage_timings,
             audio_stage_timings: environment.audio_stage_timings,
+            runtime_diagnostics: environment.runtime_diagnostics,
         };
         tx.try_send(report).is_ok()
     }
@@ -3515,6 +3518,7 @@ impl App {
             decoder_stage_timings,
             viewer_stage_timings,
             audio_stage_timings,
+            runtime_diagnostics: RuntimeDiagnosticsReport::from(self.runtime_diagnostics()),
         };
         let published = self
             .surface_submission_probe
@@ -7400,6 +7404,20 @@ mod tests {
             assert_eq!(keep_running, frame < FRAME_TIME_SAMPLE_COUNT);
         }
         assert!(report_rx.try_recv().is_err());
+        let runtime_diagnostics = RuntimeDiagnosticsReport {
+            monitor_requests: 11,
+            monitor_completed_frames: 12,
+            monitor_presented_frames: 13,
+            monitor_dropped_frames: 14,
+            monitor_hold_events: 15,
+            monitor_late_frames: 16,
+            monitor_errors: 17,
+            native_viewer_uploads: 18,
+            fallback_viewer_uploads: 19,
+            audio_underrun_frames: 20,
+            audio_callback_lock_failures: 21,
+            audio_late_discarded_frames: 22,
+        };
         assert!(
             probe.publish(SurfaceReportEnvironment {
                 renderer: RendererReport {
@@ -7451,10 +7469,11 @@ mod tests {
                     }
                     .into(),
                 },
+                runtime_diagnostics,
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 3);
+        assert_eq!(report.schema_version, 4);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
@@ -7473,6 +7492,7 @@ mod tests {
             3.0
         );
         assert_eq!(report.audio_stage_timings.output_callback_cpu.samples, 2);
+        assert_eq!(report.runtime_diagnostics, runtime_diagnostics);
         assert!(
             (report.audio_stage_timings.output_callback_cpu.total_ms - 5.0).abs() < f64::EPSILON
         );
@@ -7491,6 +7511,14 @@ mod tests {
         assert_eq!(
             json.pointer("/audio_stage_timings/output_callback_cpu/max_ms"),
             Some(&serde_json::Value::from(4.0))
+        );
+        assert_eq!(
+            json.pointer("/runtime_diagnostics/monitor_dropped_frames"),
+            Some(&serde_json::Value::from(14))
+        );
+        assert_eq!(
+            json.pointer("/runtime_diagnostics/audio_underrun_frames"),
+            Some(&serde_json::Value::from(20))
         );
     }
 
@@ -10409,7 +10437,7 @@ mod tests {
         let mut app = phase1_multisource_app(&sources, MONITOR_LAYER_COUNT);
         app.editor.set_preview_quality(PreviewQuality::Full);
         app.editor.set_paused_preview_quality(PreviewQuality::Full);
-        let baseline_diagnostics = PlaybackSoakRuntimeDiagnostics::from(app.runtime_diagnostics());
+        let baseline_diagnostics = RuntimeDiagnosticsReport::from(app.runtime_diagnostics());
         let started_at = Instant::now();
         let deadline = started_at + Duration::from_secs(requested_duration_seconds);
         let mut submissions_us = Vec::new();
@@ -10514,7 +10542,7 @@ mod tests {
             cycles += 1;
         }
 
-        let diagnostics_delta = PlaybackSoakRuntimeDiagnostics::from(app.runtime_diagnostics())
+        let diagnostics_delta = RuntimeDiagnosticsReport::from(app.runtime_diagnostics())
             .delta_since(baseline_diagnostics);
         let expected_requests = cycles * MONITOR_LAYER_COUNT as u64;
         let monitor_dropped_frame_limit = phase1_sustained_dropped_frame_limit(expected_requests);
@@ -11058,7 +11086,7 @@ mod tests {
         input_to_submit_us: Phase1LatencyDistribution,
         frame_ready_samples_ms: Vec<u128>,
         frame_ready_ms: Phase1LatencyDistribution,
-        runtime_diagnostics_delta: PlaybackSoakRuntimeDiagnostics,
+        runtime_diagnostics_delta: RuntimeDiagnosticsReport,
         monitor_resources: PlaybackSoakMonitorResources,
         observed_decoder_backends: Vec<String>,
         post_drop_active_sessions: usize,

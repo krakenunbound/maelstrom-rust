@@ -255,14 +255,19 @@ The same report also carries fixed atomic aggregates from the bounded monitor de
 cache lookup, demux packet retrieval, decoder send/receive/flush, hardware-to-CPU transfer, scaler,
 RGBA copy plus letterbox, and whole worker request. Each has sample count, total/mean/max CPU
 milliseconds. Software decode has zero hardware-transfer samples by design. These spans do not
-claim GPU upload/compositing completion, scanout, or audio callback timing; those remain separate
-measurement work.
+claim GPU upload/compositing completion or scanout. A separate audio timing sub-object reports the
+whole output-callback CPU boundary without claiming device/DAC latency.
 
 Its viewer timing sub-object records CPU/API submission only: successful native RGBA uploads,
 changed-composition command encoding, and the `frame.present()` call handoff. All three use bounded
 120-sample windows and are deliberately separate from GPU execution, GPU completion, and scanout;
 the package full-media smoke waits for at least one successful upload and one actual composition
 encode before publishing this evidence.
+
+Schema 4 also snapshots the existing cumulative runtime counters for monitor request/completion/
+presentation/drop/hold/late/error outcomes, native/fallback viewer uploads, and audio underrun,
+callback-lock, and late-discard faults. This snapshot covers process/session lifetime rather than
+the fixed 120-frame timing window and adds no per-frame logging or persistent project state.
 
 The opt-in Phase 0 scenario matrix is a finite integration check, not a steady-state benchmark. It
 uses generated media and the existing public decoder/App/export paths to verify latest-wins reverse

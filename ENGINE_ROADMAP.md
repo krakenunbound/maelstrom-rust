@@ -105,8 +105,13 @@ Build the evidence harness before adding engine complexity.
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,
       scale, RGBA packing, and the active worker request. Viewer upload, changed-composition encode,
-      presentation-call CPU boundaries, and audio output-callback timing are also reported. This
-      item remains open for GPU completion/scanout.
+      presentation-call CPU boundaries, and audio output-callback timing are also reported. The
+      schema-4 surface report now carries a nested cumulative `runtime_diagnostics` snapshot for
+      monitor drop/hold/late/error and audio underrun/lock/late-discard counters; these counters
+      cover process/session lifetime rather than the fixed 120-frame timing window. Windows package
+      validation exercises report structure and required evidence, while numeric thresholds remain
+      in the dedicated soak gates. This item remains open for GPU completion/scanout and split
+      audio-mix timing.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
 
 Exit gate:
@@ -114,6 +119,10 @@ Exit gate:
 - [ ] The same report can be produced on integrated and discrete Windows hardware.
 - [ ] Existing foundation gates remain green.
 - [ ] A failing codec, driver, or stage is identifiable from one report without guessing.
+
+The report's CPU boundaries do not prove GPU completion/scanout, and the current evidence does not
+yet provide split audio-mix timing or cross-hardware proof. These gaps intentionally keep the
+stage-timing and exit-gate checkboxes open; soak thresholds remain owned by their dedicated runners.
 
 ### Phase 1 — Multi-source playback and adaptive preview
 

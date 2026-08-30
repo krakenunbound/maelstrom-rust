@@ -243,7 +243,7 @@ try {
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
         'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings',
-        'viewer_stage_timings', 'audio_stage_timings'
+        'viewer_stage_timings', 'audio_stage_timings', 'runtime_diagnostics'
     )) {
         if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
             throw "Surface submission probe omitted $property."
@@ -252,8 +252,29 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 3) {
+    if ($surfaceSubmission.schema_version -ne 4) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
+    }
+    foreach ($property in @(
+        'monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames',
+        'monitor_dropped_frames', 'monitor_hold_events', 'monitor_late_frames',
+        'monitor_errors', 'native_viewer_uploads', 'fallback_viewer_uploads',
+        'audio_underrun_frames', 'audio_callback_lock_failures', 'audio_late_discarded_frames'
+    )) {
+        if ($surfaceSubmission.runtime_diagnostics.PSObject.Properties.Name -notcontains $property -or
+            -not (Test-JsonIntegerValue $surfaceSubmission.runtime_diagnostics.$property) -or
+            $surfaceSubmission.runtime_diagnostics.$property -lt 0) {
+            throw "Surface submission runtime diagnostics returned invalid unsigned integer ${property}."
+        }
+    }
+    foreach ($property in @('monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames', 'native_viewer_uploads')) {
+        if ($surfaceSubmission.runtime_diagnostics.$property -lt 1) {
+            throw "Full media smoke did not exercise runtime diagnostic $property."
+        }
+    }
+    if (($surfaceSubmission.runtime_diagnostics.native_viewer_uploads + $surfaceSubmission.runtime_diagnostics.fallback_viewer_uploads) -ne
+        $surfaceSubmission.runtime_diagnostics.monitor_presented_frames) {
+        throw 'Surface submission runtime diagnostics reported inconsistent viewer uploads and presented frames.'
     }
     if ($surfaceSubmission.cpu_p95_ms -lt 0 -or $surfaceSubmission.cpu_p95_ms -gt 8.0) {
         throw "Packaged editor CPU p95 regressed to $($surfaceSubmission.cpu_p95_ms) ms."
