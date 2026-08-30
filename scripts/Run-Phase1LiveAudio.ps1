@@ -84,7 +84,7 @@ try {
     $submittedMonitorRequests = [int64]$report.monitor_request_count * 4
     $minimumMonitorRequests = [int64]$report.minimum_monitor_request_count * 4
     $minimumNonzeroMeterObservations = [Math]::Ceiling([int64]$report.meter_observation_count * 0.9)
-    if ($report.schema_version -ne 1 -or $report.status -ne 'passed' -or
+    if ($report.schema_version -ne 2 -or $report.status -ne 'passed' -or
         $report.source_count -ne 4 -or -not $videoProvenanceValid -or -not $audioProvenanceValid -or
         $report.audio_target_count -ne 1 -or
         $report.max_meter -le 0 -or $report.final_meter -le 0 -or
@@ -97,6 +97,18 @@ try {
         $report.clock_drift_us -gt $report.clock_drift_limit_us -or
         $report.clock_drift_limit_us -ne 250000 -or
         $report.monitor_request_count -lt $report.minimum_monitor_request_count -or
+        $report.slow_layer -ne 3 -or
+        $report.slow_request_id -le 0 -or
+        $report.requested_blocked_duration_ms -ne 750 -or
+        $report.actual_blocked_duration_ms -lt $report.minimum_actual_blocked_duration_ms -or
+        $report.minimum_actual_blocked_duration_ms -ne 750 -or
+        $report.ready_source_presentations_during_block -lt $report.minimum_ready_source_presentations_during_block -or
+        $report.minimum_ready_source_presentations_during_block -ne 2 -or
+        $report.audio_tick_delta_during_block -lt $report.minimum_audio_tick_delta_during_block -or
+        $report.minimum_audio_tick_delta_during_block -ne 500000 -or
+        $report.slow_source_presentations_after_release -lt $report.minimum_slow_source_presentations_after_release -or
+        $report.minimum_slow_source_presentations_after_release -ne 1 -or
+        -not $report.slow_source_recovered -or
         @($report.source_exercise_counts).Count -ne 4 -or
         @($report.source_exercise_counts | Where-Object { $_ -lt $report.minimum_presentations_per_source }).Count -ne 0 -or
         $report.max_device_clock_stall_ms -gt $report.max_device_clock_stall_limit_ms -or

@@ -127,7 +127,7 @@ Finish holes. Do not replace working crates.
 
 ### Incomplete — finish, don’t replace
 
-1. **Multi-source scheduler.** Immutable multi-source requests, shared source actors, hard caps, and speculative-prewarm-first priority/recency eviction now exist. Visible reverse-scrub work is protected from speculative release. The remaining gate is UI-present/cross-hardware proof that four 1080p sources do not hitch the timeline and a slow source does not stall the clock.
+1. **Multi-source scheduler.** Immutable multi-source requests, shared source actors, hard caps, and speculative-prewarm-first priority/recency eviction now exist. Visible reverse-scrub work is protected from speculative release. A bounded real-media/native-audio gate now proves a 750 ms delayed source does not stall ready sources or the playback clock. The remaining gate is UI-present/cross-hardware proof that four 1080p sources do not hitch the timeline.
 2. **VFR / rational rates.** Runtime mapping now uses a bounded decoded best-effort timestamp index
    across trim, slip, reverse, and 30000/1001 project rates. Export now preserves keyframe preroll
    and has a real irregular-frame trim/slip identity gate at 30 and 30000/1001. Broad
@@ -189,10 +189,11 @@ Done-ish: adaptive preview, manual quality, per-source slots. The Inspector now 
 per-layer source kind, decoder backend, selected/resolved scale and dimensions, and structured
 fallback state in EN/JA; cache hits remain explicitly unobserved rather than inheriting unrelated
 session provenance.
-Open: UI-present/cross-hardware multi-source proof, optional user proxies/optimized media, and broad
-VFR/cross-backend proof. A bounded local headless gate now proves real-default-device audio clock
-and consumed-PCM continuity under four concurrent Full-1080p Software decode sources; cross-hardware
-and UI-present audio proof remain open. Bounded speculative-prewarm-first priority/recency session
+Open: UI-present/cross-hardware multi-source proof, later proxy queues/persistent attachment/multiple
+profiles, and broad VFR/cross-backend proof. A bounded local headless gate now proves real-default-device
+audio clock and consumed-PCM continuity under four concurrent Full-1080p Software decode sources,
+including a deterministic 750 ms topmost-source hold with ready-source progress and delayed-source
+recovery; cross-hardware and UI-present audio proof remain open. Bounded speculative-prewarm-first priority/recency session
 eviction is implemented; strict priority has no age-based fairness guarantee.
 
 Gate: four 1080p sources requested at once; timeline latency unchanged; slow source cannot stall the clock.

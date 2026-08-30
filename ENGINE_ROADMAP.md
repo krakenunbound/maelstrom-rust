@@ -347,12 +347,20 @@ Exit gate:
       and presented layer frames (97 per source), 153 us scheduler p95, nonzero meter evidence in
       all 1,632 measured observations including the final sample, zero post-warmup underruns,
       callback lock failures, late audio discards, or monitor errors, and zero post-drop sessions.
+      The schema-2 gate now also stalls the exact next topmost real-media decoder request for 750 ms
+      while its worker remains live. Its 2026-08-30 rerun recorded 45 ready-source presentations and
+      750,000 us of native audio-clock advance during the hold, then 82 delayed-source presentations
+      after release; it completed 373 monitor presentations with 1,688 us clock drift, a 22 ms maximum
+      progress interval, zero monitor/audio faults, and zero post-drop sessions. The deterministic
+      barrier is compiled only by the test-only `nle-decode/test-hooks` feature.
       The exit remains open for realtime UI-present and cross-hardware proof; see
       `docs/phase1-sustained-soak.md` and `docs/phase1-live-audio.md`.
-- [ ] A deliberately slow source cannot delay a ready source or the playback clock.
-      A deterministic test-only decoder barrier proves an independently scheduled ready source can
-      complete while another decoder worker is blocked; this is not yet a real-media latency or
-      playback-clock measurement.
+- [x] A deliberately slow source cannot delay a ready source or the playback clock. The bounded
+      schema-2 live-audio gate now combines four independent Full-1080p real sources, the native
+      default audio device, and a requested 750 ms topmost-source worker hold. Other real sources keep
+      presenting, the device clock keeps advancing with nonzero consumed PCM and no underruns, and
+      the delayed source recovers after release. This is local Software-backend evidence; the
+      separate four-source UI-present/cross-hardware exit gate remains open.
 - [ ] Rapid layer enable/disable and backward scrubbing publish only the latest generation.
       A deterministic app sequence covers forward/backward scrub, disable, re-enable, and newest
       re-enabled generation/request presentation while an unaffected layer remains retained;

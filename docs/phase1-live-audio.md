@@ -24,10 +24,24 @@ final sample, wall-clock/device-clock drift and maximum stall (250 ms), a sustai
 minimum request/presentation rate for every video source, zero monitor errors,
 input submission p95 (1,000 µs), zero post-warmup audio underruns/lock
 failures/late discards, fixture path/size provenance, and zero sessions after
-teardown. Startup callbacks are excluded only after the native callback, mix,
-source clock, and audible meter have all been observed. The JSON report is
-local-only and ignored.
+teardown. It also holds the exact next request for the topmost real 1080p source
+at the decoder worker boundary for 750 ms. During that hold, the gate requires
+other sources to keep presenting and the native audio clock to advance by at
+least 500,000 µs; after release it requires the delayed source to present again.
+The delay hook is compiled only for tests and is absent from normal production
+builds. Startup callbacks are excluded only after the native callback, mix,
+source clock, and audible meter have all been observed. The schema-2 JSON report
+is local-only and ignored.
 
-This is a bounded local default-device proof. It is not a GUI proof, a
-cross-hardware claim, or the authoritative Phase 1 exit gate; broader VFR,
-cross-backend, UI-present, proxy, and cross-hardware coverage remains separate.
+The 2026-08-30 local Software-backend run recorded a 750 ms topmost-source hold,
+45 ready-source presentations, and 750,000 µs of audio-clock
+advance during the hold, then recorded 82 delayed-source presentations after
+release. It completed 373 monitor presentations with zero monitor errors, audio
+underruns, callback lock failures, or late discards; clock drift was 1,688 µs,
+the maximum clock-progress interval was 22 ms, and no decoder session survived
+teardown.
+
+This is a bounded local default-device proof. It closes the local real-media
+slow-source/playback-clock isolation gate, but it is not a GUI or cross-hardware
+claim. The broader four-source UI-present/cross-hardware exit gate, VFR
+cross-backend qualification, and later proxy extensions remain separate.

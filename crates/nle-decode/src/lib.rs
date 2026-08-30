@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 use std::sync::{Condvar, MutexGuard};
 
 use ffmpeg::{
@@ -47,9 +47,9 @@ const MAX_CACHE_STREAM_STATES: usize = 4_096;
 const MAX_SOURCE_ACTOR_CLIENTS: usize = 64;
 pub const DEFAULT_FRAME_CACHE_BYTES: usize = 1024 * 1024 * 1024;
 
-// Kept entirely out of production builds. This stops one exact request at the worker boundary
+// Kept out of normal production builds. This stops one exact request at the worker boundary
 // without adding a runtime hook or timing dependency to the decoder.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 struct TestDecodeBarrier {
     request_id: u64,
     path: PathBuf,
@@ -57,13 +57,14 @@ struct TestDecodeBarrier {
     released: (Mutex<bool>, Condvar),
 }
 
-#[cfg(test)]
-struct TestDecodeBarrierGuard {
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestDecodeBarrierGuard {
     barrier: Arc<TestDecodeBarrier>,
     _serial: MutexGuard<'static, ()>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl Drop for TestDecodeBarrierGuard {
     fn drop(&mut self) {
         *test_decode_barrier_slot()
@@ -73,20 +74,21 @@ impl Drop for TestDecodeBarrierGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn test_decode_barrier_slot() -> &'static Mutex<Option<Arc<TestDecodeBarrier>>> {
     static SLOT: OnceLock<Mutex<Option<Arc<TestDecodeBarrier>>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn test_decode_barrier_serial() -> &'static Mutex<()> {
     static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
     SERIAL.get_or_init(|| Mutex::new(()))
 }
 
-#[cfg(test)]
-fn install_test_decode_barrier(request_id: u64, path: PathBuf) -> TestDecodeBarrierGuard {
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn install_test_decode_barrier(request_id: u64, path: PathBuf) -> TestDecodeBarrierGuard {
     let serial = test_decode_barrier_serial()
         .lock()
         .expect("test decode barrier serial lock");
@@ -105,9 +107,20 @@ fn install_test_decode_barrier(request_id: u64, path: PathBuf) -> TestDecodeBarr
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl TestDecodeBarrierGuard {
-    fn wait_until_blocked(&self) {
+    #[doc(hidden)]
+    pub fn is_blocked(&self) -> bool {
+        *self
+            .barrier
+            .started
+            .0
+            .lock()
+            .expect("test decode barrier start lock")
+    }
+
+    #[doc(hidden)]
+    pub fn wait_until_blocked(&self) {
         let (started, wake) = &self.barrier.started;
         let started = started.lock().expect("test decode barrier start lock");
         let (started, _) = wake
@@ -116,14 +129,15 @@ impl TestDecodeBarrierGuard {
         assert!(*started, "decoder did not reach deterministic test barrier");
     }
 
-    fn release(&self) {
+    #[doc(hidden)]
+    pub fn release(&self) {
         let (released, wake) = &self.barrier.released;
         *released.lock().expect("test decode barrier release lock") = true;
         wake.notify_all();
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn block_test_decode_request(request: &DecodeRequest) {
     let barrier = test_decode_barrier_slot()
         .lock()
@@ -2117,7 +2131,7 @@ fn monitor_scheduler_loop(
         }
 
         let request = pending.take().expect("pending monitor request");
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&stage_timings.worker_request);
         let progress_events = Arc::clone(&events);
@@ -2242,7 +2256,7 @@ fn source_lane_actor_loop(
         let Some(MonitorCommand::Request(request)) = command else {
             continue;
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&endpoint.stage_timings.worker_request);
         let progress_events = Arc::clone(&endpoint.events);
@@ -4013,6 +4027,19 @@ mod tests {
         assert!((1..=MAX_DIMENSION).contains(&height));
         assert!(bytes <= MAX_FRAME_BYTES);
         assert_eq!(bounded_dimensions(0, 0), (1, 1, 4));
+    }
+
+    #[test]
+    fn test_decode_barrier_reports_when_a_request_is_blocked() {
+        let path = PathBuf::from("test-barrier-source");
+        let request = request(path.clone(), 1);
+        let barrier = install_test_decode_barrier(request.request_id, path);
+        assert!(!barrier.is_blocked());
+        let worker = thread::spawn(move || block_test_decode_request(&request));
+        barrier.wait_until_blocked();
+        assert!(barrier.is_blocked());
+        barrier.release();
+        worker.join().expect("test barrier worker join");
     }
 
     #[test]

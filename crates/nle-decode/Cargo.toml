@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Supervised FFmpeg monitor-frame decoding for Maelstrom."
 
+[features]
+test-hooks = []
+
 [dependencies]
 ffmpeg-next.workspace = true
 nle-cache = { path = "../nle-cache" }

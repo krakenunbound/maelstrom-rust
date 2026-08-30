@@ -13206,6 +13206,15 @@ mod tests {
         const CLOCK_DRIFT_LIMIT_US: i64 = 250_000;
         const MIN_MONITOR_REQUESTS_PER_SECOND: u64 = 8;
         const MIN_PRESENTATIONS_PER_SOURCE_PER_SECOND: u64 = 4;
+        // Contributing layers are admitted topmost-first. Selecting the top layer makes the next
+        // request ID deterministic and proves a delayed high-priority source cannot hide ready
+        // lower layers.
+        const SLOW_LAYER: usize = MONITOR_LAYER_COUNT - 1;
+        const REQUESTED_BLOCKED_DURATION: Duration = Duration::from_millis(750);
+        const MINIMUM_ACTUAL_BLOCKED_DURATION: Duration = REQUESTED_BLOCKED_DURATION;
+        const MINIMUM_READY_SOURCE_PRESENTATIONS_DURING_BLOCK: u64 = 2;
+        const MINIMUM_AUDIO_TICK_DELTA_DURING_BLOCK: i64 = 500_000;
+        const MINIMUM_SLOW_SOURCE_PRESENTATIONS_AFTER_RELEASE: u64 = 1;
 
         let sources = phase1_multisource_sources().expect("validate four Phase 1 source fixtures");
         let audio_source = phase1_live_audio_source()
@@ -13329,6 +13338,17 @@ mod tests {
         let mut meter_observation_count = 0_u64;
         let mut nonzero_meter_observation_count = 0_u64;
         let mut transport_lost = false;
+        // The app allocates monitor request IDs in layer order. Install this before submitting
+        // the next four-layer request so precisely the selected source stops at its worker edge.
+        let mut slow_barrier = None;
+        let mut slow_request_id = 0_u64;
+        let mut slow_block_started_at = None;
+        let mut slow_block_started_source_tick = None;
+        let mut actual_blocked_duration = Duration::ZERO;
+        let mut audio_tick_delta_during_block = 0_i64;
+        let mut ready_source_presentations_during_block = 0_u64;
+        let mut slow_source_presentations_after_release = 0_u64;
+        let mut slow_barrier_released = false;
 
         while Instant::now() < measured_deadline {
             app.sync_audio_transport();
@@ -13367,6 +13387,13 @@ mod tests {
                     }
                     assert_eq!(request.selected_quality, PreviewQuality::Full);
                     assert_eq!(request.resolved_quality, PreviewQuality::Full);
+                    if slow_barrier.is_none() {
+                        slow_request_id = app.monitor_next_request_id;
+                        slow_barrier = Some(nle_decode::install_test_decode_barrier(
+                            slow_request_id,
+                            sources[SLOW_LAYER].path.clone(),
+                        ));
+                    }
                     let submitted_at = Instant::now();
                     app.submit_monitor_decode_request(request);
                     input_to_submit_us.push(submitted_at.elapsed().as_micros());
@@ -13374,6 +13401,25 @@ mod tests {
                 }
             } else {
                 transport_lost = true;
+            }
+            if let Some(barrier) = slow_barrier.as_ref()
+                && !slow_barrier_released
+                && barrier.is_blocked()
+            {
+                if slow_block_started_at.is_none() {
+                    slow_block_started_at = Some(now);
+                    slow_block_started_source_tick = source_tick;
+                }
+                if let Some(block_started_at) = slow_block_started_at
+                    && now.duration_since(block_started_at) >= REQUESTED_BLOCKED_DURATION
+                {
+                    actual_blocked_duration = now.duration_since(block_started_at);
+                    audio_tick_delta_during_block = source_tick
+                        .unwrap_or(last_clock_tick)
+                        .saturating_sub(slow_block_started_source_tick.unwrap_or(last_clock_tick));
+                    barrier.release();
+                    slow_barrier_released = true;
+                }
             }
             app.poll_monitor_decoder();
             for layer in 0..MONITOR_LAYER_COUNT {
@@ -13384,9 +13430,28 @@ mod tests {
                 {
                     last_presented_source_ticks[layer] = frame.source_tick.map(|tick| tick.0);
                     source_exercise_counts[layer] += 1;
+                    if slow_block_started_at.is_some()
+                        && !slow_barrier_released
+                        && layer != SLOW_LAYER
+                    {
+                        ready_source_presentations_during_block =
+                            ready_source_presentations_during_block.saturating_add(1);
+                    }
+                    if slow_barrier_released && layer == SLOW_LAYER {
+                        slow_source_presentations_after_release =
+                            slow_source_presentations_after_release.saturating_add(1);
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(2));
+        }
+        // A failed or shortened measurement must never leave a worker blocked while App drops
+        // and joins its decoder sessions. Keep `slow_barrier_released` false here so the report
+        // still records that the requested completed block/recovery was not observed.
+        if let Some(barrier) = slow_barrier.as_ref()
+            && !slow_barrier_released
+        {
+            barrier.release();
         }
         max_device_clock_stall =
             max_device_clock_stall.max(Instant::now().duration_since(last_clock_advance_at));
@@ -13450,6 +13515,8 @@ mod tests {
             meter_observation_count.saturating_mul(9).div_ceil(10);
         let resources_bounded = phase1_live_audio_resources_are_bounded(&final_resources);
         let audio_error = app.audio_engine_error.clone();
+        let slow_source_recovered = slow_source_presentations_after_release
+            >= MINIMUM_SLOW_SOURCE_PRESENTATIONS_AFTER_RELEASE;
         let passed_before_drop = actual_duration_seconds >= requested_duration_seconds as f64
             && monitor_request_count >= minimum_monitor_request_count
             && source_exercise_counts
@@ -13481,7 +13548,15 @@ mod tests {
                 >= minimum_presentations_per_source.saturating_mul(MONITOR_LAYER_COUNT as u64)
             && runtime_diagnostics_delta.monitor_errors == 0
             && !observed_decoder_backends.is_empty()
-            && resources_bounded;
+            && resources_bounded
+            && slow_request_id != 0
+            && slow_block_started_at.is_some()
+            && slow_barrier_released
+            && actual_blocked_duration >= MINIMUM_ACTUAL_BLOCKED_DURATION
+            && ready_source_presentations_during_block
+                >= MINIMUM_READY_SOURCE_PRESENTATIONS_DURING_BLOCK
+            && audio_tick_delta_during_block >= MINIMUM_AUDIO_TICK_DELTA_DURING_BLOCK
+            && slow_source_recovered;
 
         // This is deliberately a pause, not an editor/playhead reset: the release check must not
         // disguise a transport discontinuity by seeking before decoder workers are torn down.
@@ -13503,7 +13578,7 @@ mod tests {
         };
         let passed = passed_before_drop && post_drop_active_sessions == 0;
         let report = Phase1LiveAudioReport {
-            schema_version: 1,
+            schema_version: 2,
             status: if passed { "passed" } else { "failed" },
             requested_duration_seconds,
             actual_duration_seconds,
@@ -13513,6 +13588,20 @@ mod tests {
             clip_duration_ticks,
             audio_target_count: 1,
             source_exercise_counts,
+            slow_layer: SLOW_LAYER,
+            slow_request_id,
+            requested_blocked_duration_ms: REQUESTED_BLOCKED_DURATION.as_millis(),
+            actual_blocked_duration_ms: actual_blocked_duration.as_millis(),
+            minimum_actual_blocked_duration_ms: MINIMUM_ACTUAL_BLOCKED_DURATION.as_millis(),
+            ready_source_presentations_during_block,
+            minimum_ready_source_presentations_during_block:
+                MINIMUM_READY_SOURCE_PRESENTATIONS_DURING_BLOCK,
+            audio_tick_delta_during_block,
+            minimum_audio_tick_delta_during_block: MINIMUM_AUDIO_TICK_DELTA_DURING_BLOCK,
+            slow_source_presentations_after_release,
+            minimum_slow_source_presentations_after_release:
+                MINIMUM_SLOW_SOURCE_PRESENTATIONS_AFTER_RELEASE,
+            slow_source_recovered,
             source_tick_start,
             source_tick_end,
             source_tick_delta,
@@ -13547,9 +13636,15 @@ mod tests {
             .expect("atomically write Phase 1 live-audio report");
         assert!(
             passed,
-            "four-source live-audio gate failed: duration={:.3}s sources={:?} tick_delta={} callback_delta={} mix_delta={} meter={} stall={}ms p95={}us transport_lost={} audio_error={:?} audio_delta={:?} resources={:?} post_drop={}; report written to {}",
+            "four-source live-audio gate failed: duration={:.3}s sources={:?} slow_layer={} slow_request={} blocked={}ms ready_during_block={} audio_tick_delta_during_block={} recovered={} tick_delta={} callback_delta={} mix_delta={} meter={} stall={}ms p95={}us transport_lost={} audio_error={:?} audio_delta={:?} resources={:?} post_drop={}; report written to {}",
             report.actual_duration_seconds,
             report.source_exercise_counts,
+            report.slow_layer,
+            report.slow_request_id,
+            report.actual_blocked_duration_ms,
+            report.ready_source_presentations_during_block,
+            report.audio_tick_delta_during_block,
+            report.slow_source_recovered,
             report
                 .source_tick_end
                 .saturating_sub(report.source_tick_start),
@@ -14041,6 +14136,18 @@ mod tests {
         clip_duration_ticks: i64,
         audio_target_count: usize,
         source_exercise_counts: [u64; MONITOR_LAYER_COUNT],
+        slow_layer: usize,
+        slow_request_id: u64,
+        requested_blocked_duration_ms: u128,
+        actual_blocked_duration_ms: u128,
+        minimum_actual_blocked_duration_ms: u128,
+        ready_source_presentations_during_block: u64,
+        minimum_ready_source_presentations_during_block: u64,
+        audio_tick_delta_during_block: i64,
+        minimum_audio_tick_delta_during_block: i64,
+        slow_source_presentations_after_release: u64,
+        minimum_slow_source_presentations_after_release: u64,
+        slow_source_recovered: bool,
         source_tick_start: i64,
         source_tick_end: i64,
         source_tick_delta: i64,
