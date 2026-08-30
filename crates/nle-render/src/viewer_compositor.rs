@@ -2,7 +2,10 @@
 
 use std::{
     fmt,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Instant,
 };
 
@@ -12,6 +15,130 @@ use nle_compositor::{CompositeQuad, MAX_COMPOSITE_LAYERS, PixelSize, Uv};
 const VIEWER_SHADER: &str = include_str!("viewer_compositor.wgsl");
 const VERTICES_PER_LAYER: usize = 6;
 const COMPOSITOR_TIMING_SAMPLE_COUNT: usize = 120;
+const TIMESTAMP_QUERY_COUNT: u32 = 2;
+const TIMESTAMP_RESULT_BYTES: u64 = 16;
+const TIMESTAMP_RESOLVE_BYTES: u64 = 256;
+
+/// Isolated GPU execution time for the viewer compositor compose pass.
+///
+/// `supported` reports whether the current device enabled timestamp queries;
+/// it is intentionally independent of whether any changed composition has yet
+/// produced a sample.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewerCompositorGpuTiming {
+    pub supported: bool,
+    pub samples: usize,
+    pub p95_ms: f32,
+    pub max_ms: f32,
+}
+
+#[derive(Debug)]
+struct GpuTimestampWindow {
+    samples: [f32; COMPOSITOR_TIMING_SAMPLE_COUNT],
+    len: usize,
+    next: usize,
+}
+
+impl Default for GpuTimestampWindow {
+    fn default() -> Self {
+        Self {
+            samples: [0.0; COMPOSITOR_TIMING_SAMPLE_COUNT],
+            len: 0,
+            next: 0,
+        }
+    }
+}
+
+impl GpuTimestampWindow {
+    fn push(&mut self, milliseconds: f32) {
+        self.samples[self.next] = milliseconds;
+        self.next = (self.next + 1) % COMPOSITOR_TIMING_SAMPLE_COUNT;
+        self.len = (self.len + 1).min(COMPOSITOR_TIMING_SAMPLE_COUNT);
+    }
+
+    fn snapshot(&self, supported: bool) -> ViewerCompositorGpuTiming {
+        if self.len == 0 {
+            return ViewerCompositorGpuTiming {
+                supported,
+                ..Default::default()
+            };
+        }
+        let mut ordered = self.samples;
+        ordered[..self.len].sort_unstable_by(f32::total_cmp);
+        let p95_index = self.len.saturating_mul(95).div_ceil(100).saturating_sub(1);
+        ViewerCompositorGpuTiming {
+            supported,
+            samples: self.len,
+            p95_ms: ordered[p95_index],
+            max_ms: ordered[self.len - 1],
+        }
+    }
+}
+
+/// A mapped readback is exclusively owned by the render thread. The callback
+/// only changes this state, keeping device polling inexpensive.
+#[derive(Debug, Default)]
+struct GpuTimestampMailbox {
+    // 0 = idle, 1 = mapping scheduled, 2 = mapped readback, 3 = map failed.
+    state: AtomicU8,
+}
+
+impl GpuTimestampMailbox {
+    fn reserve(&self) -> bool {
+        self.state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn complete(&self, success: bool) {
+        self.state
+            .store(if success { 2 } else { 3 }, Ordering::Release);
+    }
+
+    fn pending(&self) -> bool {
+        self.state.load(Ordering::Acquire) != 0
+    }
+
+    fn take_completed(&self) -> Option<bool> {
+        match self
+            .state
+            .compare_exchange(2, 0, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => Some(true),
+            Err(3) => self
+                .state
+                .compare_exchange(3, 0, Ordering::AcqRel, Ordering::Acquire)
+                .ok()
+                .map(|_| false),
+            Err(_) => None,
+        }
+    }
+}
+
+struct GpuTimestampResources {
+    query_set: wgpu::QuerySet,
+    resolve_buffer: wgpu::Buffer,
+    readback_buffer: wgpu::Buffer,
+    mailbox: Arc<GpuTimestampMailbox>,
+    timing: GpuTimestampWindow,
+}
+
+fn timestamp_sample_ms(bytes: &[u8], timestamp_period_ns: f32) -> Option<f32> {
+    let start = u64::from_ne_bytes(bytes.get(..8)?.try_into().ok()?);
+    let end = u64::from_ne_bytes(
+        bytes
+            .get(8..TIMESTAMP_RESULT_BYTES as usize)?
+            .try_into()
+            .ok()?,
+    );
+    let ticks = end.checked_sub(start)?;
+    if ticks == 0 || !timestamp_period_ns.is_finite() || timestamp_period_ns <= 0.0 {
+        return None;
+    }
+    let milliseconds = ticks as f64 * timestamp_period_ns as f64 / 1_000_000.0;
+    (milliseconds.is_finite() && milliseconds > 0.0 && milliseconds <= f32::MAX as f64)
+        .then_some(milliseconds as f32)
+}
 
 /// CPU time spent encoding a changed project-monitor composition.
 ///
@@ -410,6 +537,8 @@ pub struct ViewerCompositorRenderer {
     input_generation: u64,
     applied_input_generation: u64,
     applied_frame_generation: u64,
+    gpu_timing_enabled: bool,
+    gpu_timestamps: Option<GpuTimestampResources>,
 }
 
 impl ViewerCompositorRenderer {
@@ -472,6 +601,69 @@ impl ViewerCompositorRenderer {
             input_generation: 0,
             applied_input_generation: u64::MAX,
             applied_frame_generation: u64::MAX,
+            gpu_timing_enabled: false,
+            gpu_timestamps: device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+                .then(|| GpuTimestampResources {
+                    query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                        label: Some("viewer compositor timestamps"),
+                        ty: wgpu::QueryType::Timestamp,
+                        count: TIMESTAMP_QUERY_COUNT,
+                    }),
+                    // Query resolves require a 256-byte-aligned destination.
+                    resolve_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("viewer compositor timestamp resolve"),
+                        size: TIMESTAMP_RESOLVE_BYTES,
+                        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    }),
+                    readback_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("viewer compositor timestamp readback"),
+                        size: TIMESTAMP_RESULT_BYTES,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    mailbox: Arc::new(GpuTimestampMailbox::default()),
+                    timing: GpuTimestampWindow::default(),
+                }),
+        }
+    }
+
+    pub fn set_gpu_timing_enabled(&mut self, enabled: bool) {
+        self.gpu_timing_enabled = enabled;
+    }
+
+    pub fn gpu_timing(&self) -> ViewerCompositorGpuTiming {
+        match &self.gpu_timestamps {
+            Some(timestamps) => timestamps.timing.snapshot(true),
+            None => ViewerCompositorGpuTiming::default(),
+        }
+    }
+
+    pub fn gpu_timing_pending(&self) -> bool {
+        self.gpu_timestamps
+            .as_ref()
+            .is_some_and(|timestamps| timestamps.mailbox.pending())
+    }
+
+    /// Drains a previously mapped pass timestamp after a nonblocking device poll.
+    pub fn drain_gpu_timing(&mut self, queue: &wgpu::Queue) {
+        let Some(timestamps) = &mut self.gpu_timestamps else {
+            return;
+        };
+        let Some(mapped) = timestamps.mailbox.take_completed() else {
+            return;
+        };
+        if !mapped {
+            return;
+        }
+        let bytes = timestamps.readback_buffer.slice(..).get_mapped_range();
+        let sample = timestamp_sample_ms(&bytes, queue.get_timestamp_period());
+        drop(bytes);
+        timestamps.readback_buffer.unmap();
+        if let Some(milliseconds) = sample {
+            timestamps.timing.push(milliseconds);
         }
     }
 
@@ -589,6 +781,11 @@ impl ViewerCompositorRenderer {
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         queue.write_buffer(&self.matte_vertex_buffer, 0, bytemuck::cast_slice(&mattes));
         let outputs = self.outputs.as_ref().expect("output targets allocated");
+        let record_gpu_timing = self.gpu_timing_enabled
+            && self
+                .gpu_timestamps
+                .as_ref()
+                .is_some_and(|timestamps| timestamps.mailbox.reserve());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("viewer compositor compose pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -601,7 +798,17 @@ impl ViewerCompositorRenderer {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: record_gpu_timing.then(|| {
+                let timestamps = self
+                    .gpu_timestamps
+                    .as_ref()
+                    .expect("timing resources reserved");
+                wgpu::RenderPassTimestampWrites {
+                    query_set: &timestamps.query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }
+            }),
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -636,6 +843,32 @@ impl ViewerCompositorRenderer {
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         }
         drop(pass);
+        if record_gpu_timing {
+            let timestamps = self
+                .gpu_timestamps
+                .as_ref()
+                .expect("timing resources reserved");
+            encoder.resolve_query_set(
+                &timestamps.query_set,
+                0..TIMESTAMP_QUERY_COUNT,
+                &timestamps.resolve_buffer,
+                0,
+            );
+            encoder.copy_buffer_to_buffer(
+                &timestamps.resolve_buffer,
+                0,
+                &timestamps.readback_buffer,
+                0,
+                TIMESTAMP_RESULT_BYTES,
+            );
+            let mailbox = Arc::clone(&timestamps.mailbox);
+            encoder.map_buffer_on_submit(
+                &timestamps.readback_buffer,
+                wgpu::MapMode::Read,
+                0..TIMESTAMP_RESULT_BYTES,
+                move |result| mailbox.complete(result.is_ok()),
+            );
+        }
         self.front_output = back;
         self.applied_frame_generation = frame_generation;
         self.applied_input_generation = self.input_generation;
@@ -1381,6 +1614,60 @@ mod tests {
     use nle_compositor::{Point, Uv};
     use nle_timeline::ClipId;
 
+    #[test]
+    fn gpu_timestamp_window_reports_supported_without_samples_and_bounded_p95() {
+        let mut window = GpuTimestampWindow::default();
+        assert_eq!(
+            window.snapshot(true),
+            ViewerCompositorGpuTiming {
+                supported: true,
+                ..Default::default()
+            }
+        );
+        for milliseconds in 1..=COMPOSITOR_TIMING_SAMPLE_COUNT as u32 + 5 {
+            window.push(milliseconds as f32);
+        }
+        assert_eq!(
+            window.snapshot(true),
+            ViewerCompositorGpuTiming {
+                supported: true,
+                samples: COMPOSITOR_TIMING_SAMPLE_COUNT,
+                p95_ms: 119.0,
+                max_ms: 125.0,
+            }
+        );
+    }
+
+    #[test]
+    fn timestamp_samples_reject_wrapped_zero_and_invalid_periods() {
+        let sample = |start: u64, end: u64, period: f32| {
+            let mut bytes = [0_u8; TIMESTAMP_RESULT_BYTES as usize];
+            bytes[..8].copy_from_slice(&start.to_ne_bytes());
+            bytes[8..].copy_from_slice(&end.to_ne_bytes());
+            timestamp_sample_ms(&bytes, period)
+        };
+        assert_eq!(sample(10, 10, 1.0), None);
+        assert_eq!(sample(10, 9, 1.0), None);
+        assert_eq!(sample(10, 20, 0.0), None);
+        assert_eq!(sample(10, 20, f32::NAN), None);
+        assert_eq!(sample(10, 1_000_010, 1.0), Some(1.0));
+    }
+
+    #[test]
+    fn gpu_timestamp_mailbox_allows_one_mapping_and_drains_once() {
+        let mailbox = GpuTimestampMailbox::default();
+        assert!(mailbox.reserve());
+        assert!(!mailbox.reserve());
+        assert!(mailbox.pending());
+        mailbox.complete(true);
+        assert_eq!(mailbox.take_completed(), Some(true));
+        assert!(!mailbox.pending());
+        assert_eq!(mailbox.take_completed(), None);
+        assert!(mailbox.reserve());
+        mailbox.complete(false);
+        assert_eq!(mailbox.take_completed(), Some(false));
+    }
+
     fn full_test_quad(id: u32) -> CompositeQuad {
         CompositeQuad {
             clip_id: ClipId(id),
@@ -1839,9 +2126,21 @@ mod tests {
             force_fallback_adapter: false,
         }))
         .expect("viewer GPU adapter");
+        let timestamp_query_supported =
+            adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        if std::env::var_os("MAELSTROM_REQUIRE_GPU_TIMESTAMP_QUERY").is_some() {
+            assert!(
+                timestamp_query_supported,
+                "selected adapter must support TIMESTAMP_QUERY for the explicit timing gate"
+            );
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("viewer GPU test device"),
-            required_features: wgpu::Features::empty(),
+            required_features: if timestamp_query_supported {
+                wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -1849,6 +2148,7 @@ mod tests {
         }))
         .expect("viewer GPU device");
         let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        renderer.set_gpu_timing_enabled(timestamp_query_supported);
         renderer
             .upload_layer_rgba(&device, &queue, 0, 4, 4, &[255, 0, 0, 255].repeat(16))
             .expect("red input");
@@ -1966,6 +2266,14 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("readback callback")
             .expect("mapped output");
+        renderer.drain_gpu_timing(&queue);
+        let gpu_timing = renderer.gpu_timing();
+        assert_eq!(gpu_timing.supported, timestamp_query_supported);
+        if timestamp_query_supported {
+            assert_eq!(gpu_timing.samples, 1);
+            assert!(gpu_timing.p95_ms > 0.0);
+            assert_eq!(gpu_timing.max_ms, gpu_timing.p95_ms);
+        }
         let pixels = readback.slice(..).get_mapped_range();
         assert!(
             (125..=130).contains(&pixels[0])
@@ -1973,5 +2281,29 @@ mod tests {
                 && (125..=130).contains(&pixels[2]),
             "opaque boundary-one matte must cover the lower media before the 50% white upper layer"
         );
+        drop(pixels);
+        readback.unmap();
+
+        if timestamp_query_supported {
+            let mut second_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            assert!(renderer.prepare(
+                &device,
+                &queue,
+                &mut second_encoder,
+                Some(frame),
+                2,
+                PixelSize::new(4, 4),
+            ));
+            let second_submission = queue.submit([second_encoder.finish()]);
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(second_submission),
+                    timeout: Some(Duration::from_secs(2)),
+                })
+                .expect("second viewer GPU timing completion");
+            renderer.drain_gpu_timing(&queue);
+            assert_eq!(renderer.gpu_timing().samples, 2);
+        }
     }
 }

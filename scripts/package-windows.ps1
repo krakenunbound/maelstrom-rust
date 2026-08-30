@@ -372,7 +372,7 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 6) {
+    if ($surfaceSubmission.schema_version -ne 7) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     foreach ($property in @(
@@ -508,7 +508,39 @@ try {
             throw "Full media smoke did not exercise viewer timing stage $stageName."
         }
     }
-    $gpuCompletion = $surfaceSubmission.gpu_stage_timings.submission_to_completion_elapsed
+    $gpuStages = $surfaceSubmission.gpu_stage_timings
+    foreach ($property in @('timestamp_query_supported', 'composite_pass_gpu', 'submission_to_completion_elapsed')) {
+        if ($gpuStages.PSObject.Properties.Name -notcontains $property) {
+            throw "Surface submission probe omitted GPU timing field $property."
+        }
+    }
+    if (-not ($gpuStages.timestamp_query_supported -is [bool])) {
+        throw 'GPU timestamp-query support must be a boolean.'
+    }
+    $gpuComposite = $gpuStages.composite_pass_gpu
+    if ($gpuStages.timestamp_query_supported) {
+        if ($null -eq $gpuComposite) {
+            throw 'Timestamp-query hardware omitted isolated compositor-pass timing.'
+        }
+        foreach ($property in @('samples', 'p95_ms', 'max_ms')) {
+            if ($gpuComposite.PSObject.Properties.Name -notcontains $property) {
+                throw "GPU compositor-pass timing omitted $property."
+            }
+            if ($property -eq 'samples') {
+                if (-not (Test-JsonIntegerValue $gpuComposite.$property) -or $gpuComposite.$property -lt 1) {
+                    throw "GPU compositor-pass timing returned invalid sample count $($gpuComposite.$property)."
+                }
+            } elseif (-not (Test-JsonFiniteNumber $gpuComposite.$property) -or $gpuComposite.$property -lt 0) {
+                throw "GPU compositor-pass timing returned invalid numeric ${property}: $($gpuComposite.$property)."
+            }
+        }
+        if ($gpuComposite.max_ms -lt $gpuComposite.p95_ms) {
+            throw 'GPU compositor-pass timing has max below p95.'
+        }
+    } elseif ($null -ne $gpuComposite) {
+        throw 'GPU compositor-pass timing must be null when timestamp queries are unsupported.'
+    }
+    $gpuCompletion = $gpuStages.submission_to_completion_elapsed
     if ($null -eq $gpuCompletion) {
         throw 'Surface submission probe omitted GPU submission-to-completion timing.'
     }

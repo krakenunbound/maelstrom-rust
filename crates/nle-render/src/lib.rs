@@ -31,8 +31,9 @@ pub use texture_renderer::{
 };
 pub use viewer_compositor::{
     MAX_COLOR_CORRECTIONS_PER_LAYER, ViewerColorCorrection, ViewerColorCurve,
-    ViewerCompositorCallbackHandle, ViewerCompositorEncodeTiming, ViewerCompositorRenderer,
-    ViewerFrame, ViewerLayerPrimitive, ViewerRgbCurves, ViewerUploadError,
+    ViewerCompositorCallbackHandle, ViewerCompositorEncodeTiming, ViewerCompositorGpuTiming,
+    ViewerCompositorRenderer, ViewerFrame, ViewerLayerPrimitive, ViewerRgbCurves,
+    ViewerUploadError,
 };
 
 const GPU_COMPLETION_SAMPLE_WINDOW: usize = 120;
@@ -171,6 +172,18 @@ impl HubRenderer {
     /// Snapshot CPU command-encoding time for changed viewer compositions only.
     pub fn viewer_compositor_encode_timing(&self) -> ViewerCompositorEncodeTiming {
         self.viewer_compositor.compositor_encode_timing()
+    }
+
+    /// Snapshot isolated GPU execution time for the viewer compositor compose pass.
+    ///
+    /// This is only populated by [`Self::render_with_gpu_completion_measurement`]
+    /// on devices that enabled `TIMESTAMP_QUERY`.
+    pub fn viewer_compositor_gpu_timing(&self) -> ViewerCompositorGpuTiming {
+        self.renderer
+            .callback_resources
+            .get::<ViewerCompositorRenderer>()
+            .expect("viewer compositor renderer is registered")
+            .gpu_timing()
     }
 
     /// Snapshot bounded submission-to-GPU-completion timing samples.
@@ -329,13 +342,28 @@ impl HubRenderer {
         pass_label: &'static str,
         measure_gpu_completion: bool,
     ) {
-        if measure_gpu_completion {
+        let compositor_gpu_timing_pending = self
+            .renderer
+            .callback_resources
+            .get::<ViewerCompositorRenderer>()
+            .expect("viewer compositor renderer is registered")
+            .gpu_timing_pending();
+        if measure_gpu_completion || compositor_gpu_timing_pending {
             // Poll, never wait: callbacks are serviced opportunistically without
             // stalling the interactive render path.
             let _ = device.poll(wgpu::PollType::Poll);
+        }
+        if measure_gpu_completion {
             if let Some(elapsed_nanos) = self.gpu_completion_mailbox.drain_completed() {
                 self.gpu_completion_timing.push(elapsed_nanos);
             }
+        }
+        if measure_gpu_completion || compositor_gpu_timing_pending {
+            self.renderer
+                .callback_resources
+                .get_mut::<ViewerCompositorRenderer>()
+                .expect("viewer compositor renderer is registered")
+                .drain_gpu_timing(queue);
         }
         for (id, delta) in &textures_delta.set {
             self.renderer.update_texture(device, queue, *id, delta);
@@ -343,6 +371,11 @@ impl HubRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some(encoder_label),
         });
+        self.renderer
+            .callback_resources
+            .get_mut::<ViewerCompositorRenderer>()
+            .expect("viewer compositor renderer is registered")
+            .set_gpu_timing_enabled(measure_gpu_completion);
         self.renderer
             .update_buffers(device, queue, &mut encoder, primitives, &screen);
         {

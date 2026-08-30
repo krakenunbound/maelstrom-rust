@@ -1,6 +1,6 @@
 # Performance reports
 
-Maelstrom's existing surface-submission probe writes a schema-version 6 JSON report when
+Maelstrom's existing surface-submission probe writes a schema-version 7 JSON report when
 `MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. Frame/submission and bounded viewer
 timing samples measure a fixed 120-frame window; decoder-worker and audio timing aggregates are
 cumulative at publication. Report serialization and disk IO remain on the existing one-shot,
@@ -24,6 +24,13 @@ The report records:
   `viewer_stage_timings.compositor_encode_cpu` times only callbacks that actually encode changed
   composition work. Each has a fixed 120-sample p95/max snapshot. `surface_present_call_cpu_p95_ms`
   brackets only the `frame.present()` API call; the existing `cpu_p95_ms` ends before that call.
+- optional isolated viewer-compositor GPU execution timing at
+  `gpu_stage_timings.composite_pass_gpu`. `timestamp_query_supported` states whether the selected
+  adapter enabled wgpu timestamp queries; unsupported adapters serialize the pass timing as JSON
+  `null` and continue normally. Supported adapters bracket only the changed-composition render pass,
+  convert the two device timestamps with wgpu's timestamp period, and retain a fixed 120-sample
+  p95/maximum window. One asynchronous readback may be in flight; later samples are skipped rather
+  than blocking or reusing mapped memory.
 - GPU submission-completion timing at
   `gpu_stage_timings.submission_to_completion_elapsed`. This is CPU monotonic elapsed time from
   immediately before `queue.submit` until wgpu reports that all GPU work through that submission
@@ -49,14 +56,15 @@ The report records:
   `audio_callback_lock_failures`, and `audio_late_discarded_frames`. These counters are cumulative
   since process/session start and are not scoped to the fixed 120-frame timing window.
 
-This is CPU, submission-cadence, and GPU-completion evidence. It does not claim isolated GPU-pass
-execution time, DWM composition, physical scanout, or end-to-end display latency. The other timing
-stages likewise end at their named CPU boundaries; the audio callback
+This is CPU, submission-cadence, isolated compositor-pass GPU, and whole-submission completion
+evidence. It does not claim DWM composition, physical scanout, or end-to-end display latency. The
+other timing stages likewise end at their named CPU boundaries; the audio callback
 timing excludes device/DAC work and GPU/display completion. A standalone
 cadence probe may report an empty decoder list and `encoder_backend: "not_observed"` when that run
 did not exercise media. The full package media smoke defers the report until a decoder has produced
 a frame, all applicable decoder timing stages have completed samples, successful native viewer
 upload and changed-composition samples exist, at least one measured GPU submission has completed,
+an isolated compositor GPU sample exists when timestamp queries are supported,
 both native audio timing boundaries have completed samples, and an encoder process has actually
 started. Its backend and timing fields are therefore
 evidence rather than hardware guesses. Project files never contain this session-only metadata.

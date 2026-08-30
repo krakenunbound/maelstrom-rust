@@ -2068,11 +2068,12 @@ struct ViewerStageTimingsReport {
     compositor_encode_cpu: ViewerStageTimingReport,
 }
 
-/// CPU wall-clock elapsed from queue submission until wgpu reports that submission completed
-/// on the GPU. This includes queueing and driver scheduling; it is not pass-duration,
-/// presentation, DWM, or physical scanout timing.
+/// GPU timing availability plus isolated compositor-pass and whole-submission observations.
+/// Neither metric is presentation, DWM, or physical scanout timing.
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
 struct GpuStageTimingsReport {
+    timestamp_query_supported: bool,
+    composite_pass_gpu: Option<ViewerStageTimingReport>,
     submission_to_completion_elapsed: ViewerStageTimingReport,
 }
 
@@ -2093,6 +2094,37 @@ impl From<nle_render::GpuSubmissionCompletionTiming> for ViewerStageTimingReport
             p95_ms: timing.p95_ms,
             max_ms: timing.max_ms,
         }
+    }
+}
+
+impl From<nle_render::ViewerCompositorGpuTiming> for ViewerStageTimingReport {
+    fn from(timing: nle_render::ViewerCompositorGpuTiming) -> Self {
+        Self {
+            samples: timing.samples,
+            p95_ms: timing.p95_ms,
+            max_ms: timing.max_ms,
+        }
+    }
+}
+
+impl GpuStageTimingsReport {
+    fn from_snapshots(
+        composite: nle_render::ViewerCompositorGpuTiming,
+        submission: nle_render::GpuSubmissionCompletionTiming,
+    ) -> Self {
+        Self {
+            timestamp_query_supported: composite.supported,
+            composite_pass_gpu: composite.supported.then_some(composite.into()),
+            submission_to_completion_elapsed: submission.into(),
+        }
+    }
+
+    fn fully_observed(&self) -> bool {
+        self.submission_to_completion_elapsed.samples > 0
+            && (!self.timestamp_query_supported
+                || self
+                    .composite_pass_gpu
+                    .is_some_and(|timing| timing.samples > 0))
     }
 }
 
@@ -2293,7 +2325,7 @@ fn surface_report_gpu_stage_timings_ready(
     full_media_smoke: bool,
     timings: GpuStageTimingsReport,
 ) -> bool {
-    !full_media_smoke || timings.submission_to_completion_elapsed.samples > 0
+    !full_media_smoke || timings.fully_observed()
 }
 
 fn surface_report_audio_stage_timings_ready(
@@ -2730,7 +2762,7 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 6,
+            schema_version: 7,
             samples: metrics.samples,
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
@@ -3545,9 +3577,15 @@ impl App {
             driver: adapter_info.driver.clone(),
             driver_info: adapter_info.driver_info.clone(),
         });
+        let timestamp_query = wgpu::Features::TIMESTAMP_QUERY;
+        let optional_renderer_features = if adapter.features().contains(timestamp_query) {
+            timestamp_query
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Maelstrom splash device"),
-            required_features: wgpu::Features::empty(),
+            required_features: optional_renderer_features,
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -3641,14 +3679,16 @@ impl App {
         if !surface_report_viewer_stage_timings_ready(full_media_smoke, viewer_stage_timings) {
             return;
         }
-        let gpu_stage_timings = GpuStageTimingsReport {
-            submission_to_completion_elapsed: self
-                .hub_renderer
-                .as_ref()
-                .map(HubRenderer::gpu_submission_completion_timing)
-                .unwrap_or_default()
-                .into(),
-        };
+        let gpu_stage_timings = self
+            .hub_renderer
+            .as_ref()
+            .map(|renderer| {
+                GpuStageTimingsReport::from_snapshots(
+                    renderer.viewer_compositor_gpu_timing(),
+                    renderer.gpu_submission_completion_timing(),
+                )
+            })
+            .unwrap_or_default();
         if !surface_report_gpu_stage_timings_ready(full_media_smoke, gpu_stage_timings) {
             return;
         }
@@ -7773,6 +7813,12 @@ mod tests {
                     },
                 },
                 gpu_stage_timings: GpuStageTimingsReport {
+                    timestamp_query_supported: true,
+                    composite_pass_gpu: Some(ViewerStageTimingReport {
+                        samples: 1,
+                        p95_ms: 1.5,
+                        max_ms: 1.5,
+                    }),
                     submission_to_completion_elapsed: ViewerStageTimingReport {
                         samples: 2,
                         p95_ms: 4.0,
@@ -7797,7 +7843,7 @@ mod tests {
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 6);
+        assert_eq!(report.schema_version, 7);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
@@ -7815,6 +7861,15 @@ mod tests {
             report.viewer_stage_timings.compositor_encode_cpu.max_ms,
             3.0
         );
+        assert_eq!(
+            report
+                .gpu_stage_timings
+                .composite_pass_gpu
+                .expect("timestamp-supported report includes composite pass")
+                .p95_ms,
+            1.5
+        );
+        assert!(report.gpu_stage_timings.timestamp_query_supported);
         assert_eq!(
             report
                 .gpu_stage_timings
@@ -7844,6 +7899,10 @@ mod tests {
         assert_eq!(
             json.pointer("/viewer_stage_timings/upload_cpu/samples"),
             Some(&serde_json::Value::from(2))
+        );
+        assert_eq!(
+            json.pointer("/gpu_stage_timings/composite_pass_gpu/p95_ms"),
+            Some(&serde_json::Value::from(1.5))
         );
         assert_eq!(
             json.pointer("/gpu_stage_timings/submission_to_completion_elapsed/p95_ms"),
@@ -7925,8 +7984,50 @@ mod tests {
                     samples: 1,
                     ..Default::default()
                 },
+                ..Default::default()
             }
         ));
+        assert!(!surface_report_gpu_stage_timings_ready(
+            true,
+            GpuStageTimingsReport {
+                timestamp_query_supported: true,
+                composite_pass_gpu: Some(ViewerStageTimingReport::default()),
+                submission_to_completion_elapsed: ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+            }
+        ));
+        assert!(surface_report_gpu_stage_timings_ready(
+            true,
+            GpuStageTimingsReport {
+                timestamp_query_supported: true,
+                composite_pass_gpu: Some(ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                }),
+                submission_to_completion_elapsed: ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+            }
+        ));
+        let unsupported = GpuStageTimingsReport::from_snapshots(
+            nle_render::ViewerCompositorGpuTiming::default(),
+            nle_render::GpuSubmissionCompletionTiming {
+                samples: 1,
+                p95_ms: 2.0,
+                max_ms: 2.0,
+            },
+        );
+        assert!(!unsupported.timestamp_query_supported);
+        assert!(unsupported.composite_pass_gpu.is_none());
+        assert!(surface_report_gpu_stage_timings_ready(true, unsupported));
+        let unsupported_json = serde_json::to_value(unsupported).expect("GPU timings serialize");
+        assert_eq!(
+            unsupported_json.pointer("/composite_pass_gpu"),
+            Some(&serde_json::Value::Null)
+        );
 
         let empty = AudioStageTimingsReport::default();
         assert!(surface_report_audio_stage_timings_ready(false, empty));

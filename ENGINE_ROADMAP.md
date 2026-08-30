@@ -117,8 +117,11 @@ Build the evidence harness before adding engine complexity.
       scale, RGBA packing, and the active worker request. Viewer upload, changed-composition encode,
       presentation-call CPU boundaries, and whole audio output-callback plus successful-lock
       mix/render timing are also reported. A bounded, single-in-flight, non-blocking queue callback
-      now reports submit-to-GPU-completion elapsed time without claiming isolated pass duration or
-      physical scanout. The schema-6 surface report also carries a nested cumulative
+      reports submit-to-GPU-completion elapsed time. Optional wgpu pass-boundary timestamps now
+      isolate changed viewer-compositor GPU execution with one asynchronous sample in flight;
+      unsupported adapters retain the existing path and serialize the stage as unavailable rather
+      than zero. Neither GPU metric claims presentation or physical scanout. The schema-7 surface
+      report also carries a nested cumulative
       `runtime_diagnostics` snapshot for
       monitor drop/hold/late/error and audio underrun/lock/late-discard counters; these counters
       cover process/session lifetime rather than the fixed 120-frame timing window. Windows package
@@ -133,9 +136,10 @@ Exit gate:
 - [ ] Existing foundation gates remain green.
 - [ ] A failing codec, driver, or stage is identifiable from one report without guessing.
 
-The report's CPU boundaries do not prove GPU completion or scanout. Its separate queue callback
-proves completion of submitted GPU work as observed by wgpu, but not isolated pass execution, DWM
-composition, or physical scanout. Physical scanout and cross-hardware proof remain open and keep
+The report's CPU boundaries do not prove GPU completion or scanout. Its optional pass timestamps
+measure isolated viewer-compositor execution, and the separate queue callback proves completion of
+submitted GPU work as observed by wgpu; neither proves DWM composition or physical scanout.
+Physical scanout and cross-hardware proof remain open and keep
 the stage-timing and exit-gate checkboxes incomplete; soak thresholds remain owned by their
 dedicated runners.
 
