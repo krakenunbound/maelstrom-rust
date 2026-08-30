@@ -419,7 +419,17 @@ Exit gate:
       post-drop session/source/actor ownership. This is headless correctness evidence, not
       Full-1080p output, UI latency, audio continuity, ten-minute soak, or cross-hardware proof.
       See `docs/phase1-generation-stress.md`.
-- [ ] Cache/session memory remains inside its configured hard limit during a ten-minute stress run.
+- [x] Cache/session memory remains inside its configured hard limit during a ten-minute stress run.
+      The current-source 2026-08-30 local Software-backend gate passed for 600.042 seconds:
+      15,933 four-source Full-1080p cycles, 63,732 requests, 54 us scheduler p95, zero current
+      decode errors, and twelve stale rejections within a 64-event bound. Exact cache peak
+      was 215,654,400 bytes under 1 GiB; exact session peak was five under eight, with zero
+      active sessions after app drop. Raw distributions, counts, limits, working-set samples,
+      and fixture/binary/report hashes were independently checked. Sampled working-set growth
+      was 43,008,000 bytes under a diagnostic 1.5 GiB allowance, not a whole-app RAM hard cap.
+      This closes the configured cache/session limits for the local headless workload, not
+      UI-present/cross-hardware/audio qualification or continuous/post-drop actor accounting.
+      See `docs/phase1-sustained-soak.md` for exact evidence and limitations.
 
 ### Phase 2 — Real-time GPU compositor
 
