@@ -9374,22 +9374,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires four explicit dynamic 1920x1080 MPEG-4 fixtures and MAELSTROM_PHASE1_MULTISOURCE_REPORT"]
     fn supplied_media_four_video_layers_decode_independently() {
-        let (Some(path), Some(second_path), Some(third_path), Some(fourth_path)) = (
-            std::env::var_os("MAELSTROM_TEST_MEDIA"),
-            std::env::var_os("MAELSTROM_TEST_MEDIA_SECOND"),
-            std::env::var_os("MAELSTROM_TEST_MEDIA_THIRD"),
-            std::env::var_os("MAELSTROM_TEST_MEDIA_FOURTH"),
-        ) else {
-            return;
-        };
-        let path = PathBuf::from(path);
-        let second_path = PathBuf::from(second_path);
-        let third_path = PathBuf::from(third_path);
-        let fourth_path = PathBuf::from(fourth_path);
+        let sources = phase1_multisource_sources().expect("validate four Phase 1 source fixtures");
+        let report_path =
+            phase1_multisource_report_path().expect("validate MAELSTROM_PHASE1_MULTISOURCE_REPORT");
         let mut app = App::new_with_catalog(false, None);
         app.editor
-            .add_media_paths([path, second_path, third_path, fourth_path]);
+            .add_media_paths(sources.iter().map(|source| source.path.clone()));
         let mut video_tracks = app
             .editor
             .timeline
@@ -9397,13 +9389,16 @@ mod tests {
             .iter()
             .filter(|track| track.kind == nle_timeline::TrackKind::Video)
             .map(|track| track.id)
-            .take(MONITOR_LAYER_COUNT)
             .collect::<Vec<_>>();
-        video_tracks.push(
-            app.editor
-                .timeline
-                .add_track(nle_timeline::TrackKind::Video),
-        );
+        while video_tracks.len() < MONITOR_LAYER_COUNT {
+            video_tracks.push(
+                app.editor
+                    .timeline
+                    .add_track(nle_timeline::TrackKind::Video),
+            );
+        }
+        video_tracks.truncate(MONITOR_LAYER_COUNT);
+        assert_eq!(video_tracks.len(), MONITOR_LAYER_COUNT);
         for (track, media_id) in video_tracks.into_iter().zip(1..=MONITOR_LAYER_COUNT as u32) {
             app.editor
                 .timeline
@@ -9416,10 +9411,31 @@ mod tests {
                 )
                 .unwrap();
         }
-        app.editor.set_playhead(nle_timeline::Tick(500_000));
-        app.editor.set_preview_quality(PreviewQuality::Half);
-        let expected_size = app.editor.monitor_decode_size_hint();
-        app.sync_monitor_decode();
+        const REQUESTED_SOURCE_TICK: i64 = 1_500_000;
+        let expected_size = (1920, 1080);
+        app.editor
+            .set_playhead(nle_timeline::Tick(REQUESTED_SOURCE_TICK));
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+        let mut preview = preview_request(&app.editor);
+        assert_eq!(preview.output_size, [640, 360]);
+        assert_eq!(preview.selected_quality, PreviewQuality::Full);
+        assert_eq!(preview.resolved_quality, PreviewQuality::Full);
+        assert!(
+            preview.sources.iter().flatten().all(|source| {
+                source.source_tick == REQUESTED_SOURCE_TICK && source.media_id > 0
+            })
+        );
+        // This gate measures the app's immutable-request submission path at real 1080p output
+        // dimensions. Decode remains asynchronous; no FFmpeg work is allowed inside this call.
+        preview.output_size = [expected_size.0, expected_size.1];
+        let submitted_at = Instant::now();
+        app.submit_monitor_decode_request(preview);
+        let submission_us = submitted_at.elapsed().as_micros();
+        assert!(
+            submission_us < 20_000,
+            "paused four-source preview submission took {submission_us} us; expected less than 20000 us"
+        );
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline
@@ -9429,21 +9445,103 @@ mod tests {
             app.poll_monitor_decoder();
             thread::sleep(Duration::from_millis(5));
         }
+        let all_frames_ms = submitted_at.elapsed().as_millis();
 
-        let decoded_media = (0..MONITOR_LAYER_COUNT)
+        let decoded_frames = (0..MONITOR_LAYER_COUNT)
             .map(|layer| {
                 app.editor
                     .monitor_frame_for_layer(layer)
-                    .and_then(|frame| frame.media_id)
+                    .expect("validated monitor frame")
             })
             .collect::<Vec<_>>();
+        let decoded_media = decoded_frames
+            .iter()
+            .map(|frame| frame.media_id)
+            .collect::<Vec<_>>();
         assert_eq!(decoded_media, [Some(1), Some(2), Some(3), Some(4)]);
-        for layer in 0..MONITOR_LAYER_COUNT {
-            let frame = app.editor.monitor_frame_for_layer(layer).unwrap();
+        for frame in &decoded_frames {
             assert_eq!((frame.width, frame.height), expected_size);
+            assert!(
+                frame
+                    .source_tick
+                    .is_some_and(|tick| tick.0 >= REQUESTED_SOURCE_TICK),
+                "decoded source tick {:?} preceded requested mid-GOP tick {REQUESTED_SOURCE_TICK}",
+                frame.source_tick
+            );
         }
         assert!(app.monitor_latest_request_ids.iter().all(|id| *id > 0));
         assert!(app.monitor_requests_in_flight.iter().all(|active| !active));
+
+        let pool_deadline = Instant::now() + Duration::from_secs(5);
+        let pool_diagnostics = loop {
+            let diagnostics = app.monitor_session_pool.diagnostics();
+            if diagnostics.active_foreground_sessions == 4
+                && diagnostics.active_background_sessions == 3
+                && diagnostics.peak_sticky_sessions == 7
+                && diagnostics.session_cap == 8
+            {
+                break diagnostics;
+            }
+            assert!(
+                Instant::now() < pool_deadline,
+                "four-source paused prewarm did not establish the expected 4 foreground + 3 background session pool: {diagnostics:?}"
+            );
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(pool_diagnostics.active_sticky_sessions, 7);
+        assert_eq!(pool_diagnostics.foreground_session_cap, 4);
+        assert_eq!(pool_diagnostics.background_session_cap, 4);
+        assert!(
+            !app.observed_decoder_backends.is_empty(),
+            "final monitor frames did not report a decoder backend"
+        );
+        let observed_decoder_backends = app.observed_decoder_backends.clone();
+
+        let monitor_session_pool = app.monitor_session_pool.clone();
+        drop(app);
+        let release_deadline = Instant::now() + Duration::from_secs(5);
+        let post_drop_active_sessions = loop {
+            let active = monitor_session_pool.diagnostics().active_sticky_sessions;
+            if active == 0 {
+                break active;
+            }
+            assert!(
+                Instant::now() < release_deadline,
+                "monitor decoder sessions remained active after App drop: {active}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        let report = Phase1MultisourceReport {
+            schema_version: 1,
+            status: "passed",
+            source_count: sources.len(),
+            sources,
+            decoded_media_ids: decoded_media
+                .into_iter()
+                .map(|media_id| media_id.expect("validated decoded media id"))
+                .collect(),
+            requested_source_tick: REQUESTED_SOURCE_TICK,
+            decoded_source_ticks: decoded_frames
+                .iter()
+                .map(|frame| frame.source_tick.expect("validated decoded source tick").0)
+                .collect(),
+            observed_decoder_backends,
+            output_size: [expected_size.0, expected_size.1],
+            submission_us,
+            all_frames_ms,
+            active_sticky_sessions: pool_diagnostics.active_sticky_sessions,
+            peak_sticky_sessions: pool_diagnostics.peak_sticky_sessions,
+            session_cap: pool_diagnostics.session_cap,
+            active_foreground_sessions: pool_diagnostics.active_foreground_sessions,
+            foreground_session_cap: pool_diagnostics.foreground_session_cap,
+            active_background_sessions: pool_diagnostics.active_background_sessions,
+            background_session_cap: pool_diagnostics.background_session_cap,
+            post_drop_active_sessions,
+        };
+        phase1_multisource_write_report(&report_path, &report)
+            .expect("atomically write Phase 1 multisource report");
     }
 
     #[test]
@@ -9778,6 +9876,35 @@ mod tests {
         scenarios: Vec<Phase0ScenarioReport>,
     }
 
+    #[derive(Serialize)]
+    struct Phase1MultisourceSource {
+        path: PathBuf,
+        size_bytes: u64,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1MultisourceReport {
+        schema_version: u32,
+        status: &'static str,
+        source_count: usize,
+        sources: Vec<Phase1MultisourceSource>,
+        decoded_media_ids: Vec<u32>,
+        requested_source_tick: i64,
+        decoded_source_ticks: Vec<i64>,
+        observed_decoder_backends: Vec<String>,
+        output_size: [u32; 2],
+        submission_us: u128,
+        all_frames_ms: u128,
+        active_sticky_sessions: usize,
+        peak_sticky_sessions: usize,
+        session_cap: usize,
+        active_foreground_sessions: usize,
+        foreground_session_cap: usize,
+        active_background_sessions: usize,
+        background_session_cap: usize,
+        post_drop_active_sessions: usize,
+    }
+
     fn phase0_required_absolute_path(name: &str) -> Result<PathBuf, String> {
         let path = std::env::var_os(name)
             .map(PathBuf::from)
@@ -9794,6 +9921,77 @@ mod tests {
             return Err(format!("{name} does not name a file: {}", path.display()));
         }
         Ok(path)
+    }
+
+    fn phase1_multisource_sources() -> Result<Vec<Phase1MultisourceSource>, String> {
+        [
+            "MAELSTROM_TEST_MEDIA",
+            "MAELSTROM_TEST_MEDIA_SECOND",
+            "MAELSTROM_TEST_MEDIA_THIRD",
+            "MAELSTROM_TEST_MEDIA_FOURTH",
+        ]
+        .into_iter()
+        .map(|name| {
+            let path = phase0_required_absolute_file(name)?
+                .canonicalize()
+                .map_err(|error| format!("could not canonicalize {name}: {error}"))?;
+            let size_bytes = fs::metadata(&path)
+                .map_err(|error| format!("could not stat {name}: {error}"))?
+                .len();
+            if size_bytes == 0 {
+                return Err(format!("{name} names an empty source: {}", path.display()));
+            }
+            Ok(Phase1MultisourceSource { path, size_bytes })
+        })
+        .collect()
+    }
+
+    fn phase1_multisource_report_path() -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path("MAELSTROM_PHASE1_MULTISOURCE_REPORT")?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE1_MULTISOURCE_REPORT must end in .json".to_owned());
+        }
+        let parent = path.parent().ok_or_else(|| {
+            "MAELSTROM_PHASE1_MULTISOURCE_REPORT has no parent directory".to_owned()
+        })?;
+        if !parent.is_dir() {
+            return Err(format!(
+                "MAELSTROM_PHASE1_MULTISOURCE_REPORT parent does not exist: {}",
+                parent.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    fn phase1_multisource_write_report(
+        path: &Path,
+        report: &Phase1MultisourceReport,
+    ) -> Result<(), String> {
+        let encoded = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
+        let temporary = path.with_extension(format!(
+            "{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&encoded)
+                .map_err(|error| error.to_string())?;
+            file.flush().map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            nle_project_io::replace_file(&temporary, path).map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     fn phase0_report_path() -> Result<PathBuf, String> {

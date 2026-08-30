@@ -137,7 +137,12 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
 Exit gate:
 
 - [ ] Four independent 1080p sources can be requested concurrently without timeline latency
-      regression.
+      regression. A preliminary opt-in local gate now creates four dynamic independent 1080p30
+      MPEG-4 sources, submits one explicit Full-output request in under 20 ms, requires all four
+      source frames within five seconds, and proves the exact shared 4 foreground + 3 speculative
+      background / 8-cap session state with full post-drop release. It is not a timeline-latency
+      regression baseline, p95, sustained, or cross-hardware proof. See
+      `docs/phase1-multisource.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
 - [ ] Rapid layer enable/disable and backward scrubbing publish only the latest generation.
 - [ ] Cache/session memory remains inside its configured hard limit during a ten-minute stress run.
