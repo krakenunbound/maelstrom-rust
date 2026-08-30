@@ -141,8 +141,12 @@ Exit gate:
       MPEG-4 sources, submits one explicit Full-output request in under 20 ms, requires all four
       source frames within five seconds, and proves the exact shared 4 foreground + 3 speculative
       background / 8-cap session state with full post-drop release. It is not a timeline-latency
-      regression baseline, p95, sustained, or cross-hardware proof. See
-      `docs/phase1-multisource.md`.
+      regression baseline, p95, sustained, or cross-hardware proof. A second opt-in local gate
+      now compares 20 isolated one-source and four-source Full-1080p trials, records nearest-rank
+      p50/p95/max scheduler and matching-frame timings, and enforces only a 1 ms headless
+      input-to-submit scheduler p95. It remains local Software-backend evidence rather than sustained, UI-present,
+      or cross-hardware completion. See `docs/phase1-multisource.md` and
+      `docs/phase1-latency-comparison.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
 - [ ] Rapid layer enable/disable and backward scrubbing publish only the latest generation.
 - [ ] Cache/session memory remains inside its configured hard limit during a ten-minute stress run.

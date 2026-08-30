@@ -9545,6 +9545,74 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires four explicit dynamic 1920x1080 MPEG-4 fixtures and MAELSTROM_PHASE1_LATENCY_REPORT"]
+    fn supplied_media_latency_comparison_uses_isolated_full_quality_trials() {
+        const TRIALS_PER_SCENARIO: usize = 20;
+        const INPUT_TO_SUBMIT_P95_US_LIMIT: u128 = 1_000;
+        // Every value is deliberately inside a GOP, never on the one-second MPEG-4 keyframe.
+        const MID_GOP_TICKS: [i64; 5] = [1_117_000, 1_283_000, 1_449_000, 1_617_000, 1_783_000];
+
+        let sources = phase1_multisource_sources().expect("validate four Phase 1 source fixtures");
+        let report_path =
+            phase1_latency_report_path().expect("validate MAELSTROM_PHASE1_LATENCY_REPORT");
+        let mut one_source_samples = Vec::with_capacity(TRIALS_PER_SCENARIO);
+        let mut four_source_samples = Vec::with_capacity(TRIALS_PER_SCENARIO);
+        let mut sequence_index = 0;
+        for trial in 0..TRIALS_PER_SCENARIO {
+            let tick = MID_GOP_TICKS[trial % MID_GOP_TICKS.len()];
+            // Alternate which scenario receives the first cold start while retaining strict raw
+            // sequence evidence in the report.
+            for source_count in if trial % 2 == 0 { [1, 4] } else { [4, 1] } {
+                let sample =
+                    phase1_latency_trial(&sources, trial, sequence_index, source_count, tick);
+                if source_count == 1 {
+                    one_source_samples.push(sample);
+                } else {
+                    four_source_samples.push(sample);
+                }
+                sequence_index += 1;
+            }
+        }
+
+        let one_source = phase1_latency_summary(&one_source_samples);
+        let four_source = phase1_latency_summary(&four_source_samples);
+        let passed = four_source.input_to_submit_us.p95 <= INPUT_TO_SUBMIT_P95_US_LIMIT;
+        let comparison = Phase1LatencyComparison {
+            input_to_submit_p95_delta_us: four_source.input_to_submit_us.p95 as i128
+                - one_source.input_to_submit_us.p95 as i128,
+            input_to_submit_p95_ratio: phase1_latency_ratio(
+                four_source.input_to_submit_us.p95,
+                one_source.input_to_submit_us.p95,
+            ),
+            frame_ready_p95_delta_ms: four_source.frame_ready_ms.p95 as i128
+                - one_source.frame_ready_ms.p95 as i128,
+            frame_ready_p95_ratio: phase1_latency_ratio(
+                four_source.frame_ready_ms.p95,
+                one_source.frame_ready_ms.p95,
+            ),
+        };
+        let report = Phase1LatencyReport {
+            schema_version: 1,
+            status: if passed { "passed" } else { "failed" },
+            trial_count_per_scenario: TRIALS_PER_SCENARIO,
+            input_to_submit_p95_us_limit: INPUT_TO_SUBMIT_P95_US_LIMIT,
+            sources,
+            output_size: [1920, 1080],
+            one_source,
+            four_source,
+            comparison,
+        };
+        phase1_multisource_write_report(&report_path, &report)
+            .expect("atomically write Phase 1 latency report");
+        assert!(
+            passed,
+            "four-source input-to-submit p95 was {} us; expected no more than {INPUT_TO_SUBMIT_P95_US_LIMIT} us; report written to {}",
+            report.four_source.input_to_submit_us.p95,
+            report_path.display(),
+        );
+    }
+
+    #[test]
     fn supplied_media_missing_upper_layer_does_not_block_ready_lower_layer() {
         let Some(path) = std::env::var_os("MAELSTROM_TEST_MEDIA") else {
             return;
@@ -9905,6 +9973,60 @@ mod tests {
         post_drop_active_sessions: usize,
     }
 
+    #[derive(Clone, Serialize)]
+    struct Phase1LatencySample {
+        trial: usize,
+        sequence_index: usize,
+        source_count: usize,
+        requested_source_tick: i64,
+        decoded_source_ticks: Vec<i64>,
+        decoded_media_ids: Vec<u32>,
+        output_size: [u32; 2],
+        observed_decoder_backends: Vec<String>,
+        input_to_submit_us: u128,
+        frame_ready_ms: u128,
+        active_sticky_sessions: usize,
+        peak_sticky_sessions: usize,
+        session_cap: usize,
+        post_drop_active_sessions: usize,
+    }
+
+    #[derive(Clone, Copy, Serialize)]
+    struct Phase1LatencyDistribution {
+        p50: u128,
+        p95: u128,
+        max: u128,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1LatencyScenario {
+        source_count: usize,
+        samples: Vec<Phase1LatencySample>,
+        input_to_submit_us: Phase1LatencyDistribution,
+        frame_ready_ms: Phase1LatencyDistribution,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1LatencyComparison {
+        input_to_submit_p95_delta_us: i128,
+        input_to_submit_p95_ratio: Option<f64>,
+        frame_ready_p95_delta_ms: i128,
+        frame_ready_p95_ratio: Option<f64>,
+    }
+
+    #[derive(Serialize)]
+    struct Phase1LatencyReport {
+        schema_version: u32,
+        status: &'static str,
+        trial_count_per_scenario: usize,
+        input_to_submit_p95_us_limit: u128,
+        sources: Vec<Phase1MultisourceSource>,
+        output_size: [u32; 2],
+        one_source: Phase1LatencyScenario,
+        four_source: Phase1LatencyScenario,
+        comparison: Phase1LatencyComparison,
+    }
+
     fn phase0_required_absolute_path(name: &str) -> Result<PathBuf, String> {
         let path = std::env::var_os(name)
             .map(PathBuf::from)
@@ -9963,9 +10085,207 @@ mod tests {
         Ok(path)
     }
 
-    fn phase1_multisource_write_report(
+    fn phase1_latency_report_path() -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path("MAELSTROM_PHASE1_LATENCY_REPORT")?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE1_LATENCY_REPORT must end in .json".to_owned());
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "MAELSTROM_PHASE1_LATENCY_REPORT has no parent directory".to_owned())?;
+        if !parent.is_dir() {
+            return Err(format!(
+                "MAELSTROM_PHASE1_LATENCY_REPORT parent does not exist: {}",
+                parent.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    fn phase1_latency_trial(
+        sources: &[Phase1MultisourceSource],
+        trial: usize,
+        sequence_index: usize,
+        source_count: usize,
+        requested_source_tick: i64,
+    ) -> Phase1LatencySample {
+        assert!((1..=MONITOR_LAYER_COUNT).contains(&source_count));
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths(
+            sources
+                .iter()
+                .take(source_count)
+                .map(|source| source.path.clone()),
+        );
+        let mut video_tracks = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        while video_tracks.len() < source_count {
+            video_tracks.push(
+                app.editor
+                    .timeline
+                    .add_track(nle_timeline::TrackKind::Video),
+            );
+        }
+        for (track, media_id) in video_tracks.into_iter().zip(1..=source_count as u32) {
+            app.editor
+                .timeline
+                .insert_clip(
+                    track,
+                    nle_timeline::MediaId(media_id),
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(2_000_000),
+                    nle_timeline::Tick(0),
+                )
+                .expect("insert Phase 1 latency fixture clip");
+        }
+
+        // A fresh App per trial prevents a prior scenario's sticky sessions or frame cache from
+        // making the one- and four-source scheduler paths incomparable.
+        let input_started_at = Instant::now();
+        app.editor
+            .set_playhead(nle_timeline::Tick(requested_source_tick));
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+        let mut preview = preview_request(&app.editor);
+        assert_eq!(preview.selected_quality, PreviewQuality::Full);
+        assert_eq!(preview.resolved_quality, PreviewQuality::Full);
+        assert_eq!(preview.playhead_tick, requested_source_tick);
+        preview.output_size = [1920, 1080];
+        app.submit_monitor_decode_request(preview);
+        let input_to_submit_us = input_started_at.elapsed().as_micros();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && (0..source_count).any(|layer| app.editor.monitor_frame_for_layer(layer).is_none())
+        {
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(5));
+        }
+        let frame_ready_ms = input_started_at.elapsed().as_millis();
+        let frames = (0..source_count)
+            .map(|layer| {
+                app.editor
+                    .monitor_frame_for_layer(layer)
+                    .expect("matching monitor frame")
+            })
+            .collect::<Vec<_>>();
+        let decoded_media_ids = frames
+            .iter()
+            .map(|frame| frame.media_id.expect("matching decoded media ID"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decoded_media_ids,
+            (1..=source_count as u32).collect::<Vec<_>>(),
+            "trial decoded unrelated media IDs"
+        );
+        let decoded_source_ticks = frames
+            .iter()
+            .map(|frame| {
+                assert_eq!((frame.width, frame.height), (1920, 1080));
+                let tick = frame.source_tick.expect("matching decoded source tick").0;
+                assert!(
+                    tick >= requested_source_tick,
+                    "decoded source tick {tick} preceded requested mid-GOP tick {requested_source_tick}"
+                );
+                assert!(
+                    tick <= requested_source_tick + 33_334,
+                    "decoded source tick {tick} exceeded one 30fps frame after requested tick {requested_source_tick}"
+                );
+                tick
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            app.monitor_latest_request_ids[..source_count]
+                .iter()
+                .all(|id| *id > 0)
+        );
+        assert!(
+            app.monitor_requests_in_flight[..source_count]
+                .iter()
+                .all(|active| !active)
+        );
+        assert!(!app.observed_decoder_backends.is_empty());
+        let observed_decoder_backends = app.observed_decoder_backends.clone();
+        let diagnostics = app.monitor_session_pool.diagnostics();
+        let monitor_session_pool = app.monitor_session_pool.clone();
+        drop(app);
+        let release_deadline = Instant::now() + Duration::from_secs(5);
+        let post_drop_active_sessions = loop {
+            let active = monitor_session_pool.diagnostics().active_sticky_sessions;
+            if active == 0 {
+                break active;
+            }
+            assert!(
+                Instant::now() < release_deadline,
+                "monitor decoder sessions remained active after latency trial App drop: {active}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        Phase1LatencySample {
+            trial,
+            sequence_index,
+            source_count,
+            requested_source_tick,
+            decoded_source_ticks,
+            decoded_media_ids,
+            output_size: [1920, 1080],
+            observed_decoder_backends,
+            input_to_submit_us,
+            frame_ready_ms,
+            active_sticky_sessions: diagnostics.active_sticky_sessions,
+            peak_sticky_sessions: diagnostics.peak_sticky_sessions,
+            session_cap: diagnostics.session_cap,
+            post_drop_active_sessions,
+        }
+    }
+
+    fn phase1_latency_distribution(
+        values: impl Iterator<Item = u128>,
+    ) -> Phase1LatencyDistribution {
+        let mut values = values.collect::<Vec<_>>();
+        assert!(!values.is_empty(), "latency distribution requires samples");
+        values.sort_unstable();
+        let nearest_rank = |percent: usize| values[(values.len() * percent).div_ceil(100) - 1];
+        Phase1LatencyDistribution {
+            p50: nearest_rank(50),
+            p95: nearest_rank(95),
+            max: *values.last().expect("nonempty sorted samples"),
+        }
+    }
+
+    fn phase1_latency_summary(samples: &[Phase1LatencySample]) -> Phase1LatencyScenario {
+        assert!(!samples.is_empty());
+        let source_count = samples[0].source_count;
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.source_count == source_count)
+        );
+        Phase1LatencyScenario {
+            source_count,
+            samples: samples.to_vec(),
+            input_to_submit_us: phase1_latency_distribution(
+                samples.iter().map(|sample| sample.input_to_submit_us),
+            ),
+            frame_ready_ms: phase1_latency_distribution(
+                samples.iter().map(|sample| sample.frame_ready_ms),
+            ),
+        }
+    }
+
+    fn phase1_latency_ratio(numerator: u128, denominator: u128) -> Option<f64> {
+        (denominator != 0).then(|| numerator as f64 / denominator as f64)
+    }
+
+    fn phase1_multisource_write_report<T: Serialize>(
         path: &Path,
-        report: &Phase1MultisourceReport,
+        report: &T,
     ) -> Result<(), String> {
         let encoded = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
         let temporary = path.with_extension(format!(

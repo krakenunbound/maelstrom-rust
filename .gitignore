@@ -6,6 +6,7 @@
 /artifacts/phase0-scenarios/
 /artifacts/phase0-playback-soak/
 /artifacts/phase1-multisource/
+/artifacts/phase1-latency/
 
 # Local AI weights and model packages are never public source. Keep only the
 # registry contract and its licensing guidance in Git.
