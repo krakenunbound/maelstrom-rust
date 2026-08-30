@@ -105,6 +105,72 @@ fn monitor_cache_bytes_from_args(args: impl IntoIterator<Item = String>) -> usiz
         .saturating_mul(1024 * 1024)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Phase0SurfaceAdapterClass {
+    IntegratedGpu,
+    DiscreteGpu,
+}
+
+impl Phase0SurfaceAdapterClass {
+    fn device_type(self) -> wgpu::DeviceType {
+        match self {
+            Self::IntegratedGpu => wgpu::DeviceType::IntegratedGpu,
+            Self::DiscreteGpu => wgpu::DeviceType::DiscreteGpu,
+        }
+    }
+}
+
+fn parse_phase0_surface_adapter_class(value: &str) -> Result<Phase0SurfaceAdapterClass, String> {
+    match value {
+        "IntegratedGpu" => Ok(Phase0SurfaceAdapterClass::IntegratedGpu),
+        "DiscreteGpu" => Ok(Phase0SurfaceAdapterClass::DiscreteGpu),
+        _ => Err(format!(
+            "MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS must be IntegratedGpu or DiscreteGpu, got {value:?}"
+        )),
+    }
+}
+
+fn phase0_surface_adapter_class_from_environment()
+-> Result<Option<Phase0SurfaceAdapterClass>, String> {
+    match std::env::var("MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS") {
+        Ok(value) => parse_phase0_surface_adapter_class(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS must be valid Unicode".to_owned())
+        }
+    }
+}
+
+fn select_phase0_surface_adapter(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+    class: Phase0SurfaceAdapterClass,
+) -> Result<wgpu::Adapter, String> {
+    let required_type = class.device_type();
+    let power_preference = match class {
+        Phase0SurfaceAdapterClass::IntegratedGpu => wgpu::PowerPreference::LowPower,
+        Phase0SurfaceAdapterClass::DiscreteGpu => wgpu::PowerPreference::HighPerformance,
+    };
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference,
+        compatible_surface: Some(surface),
+        force_fallback_adapter: false,
+    }))
+    .map_err(|error| {
+        format!(
+            "MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS={class:?} could not request a surface-compatible DX12 adapter: {error}"
+        )
+    })?;
+    let info = adapter.get_info();
+    if info.device_type != required_type {
+        return Err(format!(
+            "MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS={class:?} requires DX12 {required_type:?}, but wgpu selected {} (vendor=0x{:04X}, device=0x{:04X}, type={:?}, driver={}); refusing fallback",
+            info.name, info.vendor, info.device, info.device_type, info.driver
+        ));
+    }
+    Ok(adapter)
+}
+
 fn logical_cursor_position(
     screen_x: i32,
     screen_y: i32,
@@ -2033,6 +2099,7 @@ struct SurfaceSubmissionReport {
     renderer_gpu_name: String,
     renderer_vendor_id: u32,
     renderer_device_id: u32,
+    renderer_device_type: String,
     renderer_backend: String,
     renderer_driver: String,
     renderer_driver_info: String,
@@ -2276,6 +2343,7 @@ struct RendererReport {
     name: String,
     vendor_id: u32,
     device_id: u32,
+    device_type: String,
     backend: String,
     driver: String,
     driver_info: String,
@@ -2771,6 +2839,7 @@ impl SurfaceSubmissionProbe {
             renderer_gpu_name: environment.renderer.name,
             renderer_vendor_id: environment.renderer.vendor_id,
             renderer_device_id: environment.renderer.device_id,
+            renderer_device_type: environment.renderer.device_type,
             renderer_backend: environment.renderer.backend,
             renderer_driver: environment.renderer.driver,
             renderer_driver_info: environment.renderer.driver_info,
@@ -3550,22 +3619,33 @@ impl App {
     }
 
     fn create_gpu(&mut self, window: Arc<Window>) {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let phase0_adapter_class = phase0_surface_adapter_class_from_environment()
+            .unwrap_or_else(|error| panic!("invalid Phase 0 surface adapter selection: {error}"));
+        let mut instance_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        if phase0_adapter_class.is_some() {
+            instance_descriptor.backends = wgpu::Backends::DX12;
+        }
+        let instance = wgpu::Instance::new(instance_descriptor);
         let surface = instance
             .create_surface(window.clone())
             .expect("create splash surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("find graphics adapter");
+        let adapter = match phase0_adapter_class {
+            Some(class) => select_phase0_surface_adapter(&instance, &surface, class)
+                .unwrap_or_else(|error| panic!("select Phase 0 surface adapter: {error}")),
+            None => pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            }))
+            .expect("find graphics adapter"),
+        };
         let adapter_info = adapter.get_info();
         tracing::info!(
             target: "maelstrom::gpu",
             name = %adapter_info.name,
             vendor = adapter_info.vendor,
             device = adapter_info.device,
+            device_type = ?adapter_info.device_type,
             backend = ?adapter_info.backend,
             "selected renderer adapter"
         );
@@ -3573,6 +3653,7 @@ impl App {
             name: adapter_info.name.clone(),
             vendor_id: adapter_info.vendor,
             device_id: adapter_info.device,
+            device_type: format!("{:?}", adapter_info.device_type),
             backend: format!("{:?}", adapter_info.backend),
             driver: adapter_info.driver.clone(),
             driver_info: adapter_info.driver_info.clone(),
@@ -7200,6 +7281,25 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn phase0_surface_adapter_class_parses_supported_values() {
+        assert_eq!(
+            parse_phase0_surface_adapter_class("IntegratedGpu"),
+            Ok(Phase0SurfaceAdapterClass::IntegratedGpu)
+        );
+        assert_eq!(
+            parse_phase0_surface_adapter_class("DiscreteGpu"),
+            Ok(Phase0SurfaceAdapterClass::DiscreteGpu)
+        );
+        assert_eq!(
+            parse_phase0_surface_adapter_class("Cpu"),
+            Err(
+                "MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS must be IntegratedGpu or DiscreteGpu, got \"Cpu\""
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
     fn native_viewer_maps_basic_correction_whites_and_blacks() {
         let correction =
             viewer_color_correction(nle_timeline::EvaluatedVideoEffect::BrightnessContrast(
@@ -7775,6 +7875,7 @@ mod tests {
                     name: "Test GPU".to_owned(),
                     vendor_id: 1,
                     device_id: 2,
+                    device_type: "DiscreteGpu".to_owned(),
                     backend: "Test".to_owned(),
                     driver: "driver".to_owned(),
                     driver_info: "1.0".to_owned(),
@@ -7851,6 +7952,7 @@ mod tests {
         assert!((report.average_submission_fps - 62.5).abs() < 0.01);
         assert_eq!(report.decoder_backends, ["Software"]);
         assert_eq!(report.encoder_backend, "libopenh264");
+        assert_eq!(report.renderer_device_type, "DiscreteGpu");
         assert_eq!(report.resolved_preview_quality, "Half");
         assert_eq!(report.monitor_cache_cap_bytes, 512 * 1024 * 1024);
         assert_eq!(report.decoder_stage_timings.worker_request.samples, 2);
@@ -7911,6 +8013,10 @@ mod tests {
         assert_eq!(
             json.pointer("/surface_present_call_cpu_p95_ms"),
             Some(&serde_json::Value::from(1.0))
+        );
+        assert_eq!(
+            json.pointer("/renderer_device_type"),
+            Some(&serde_json::Value::from("DiscreteGpu"))
         );
         assert_eq!(
             json.pointer("/audio_stage_timings/output_callback_cpu/max_ms"),

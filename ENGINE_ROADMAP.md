@@ -126,28 +126,31 @@ Build the evidence harness before adding engine complexity.
       monitor drop/hold/late/error and audio underrun/lock/late-discard counters; these counters
       cover process/session lifetime rather than the fixed 120-frame timing window. Windows package
       validation exercises report structure and required evidence, while numeric thresholds remain
-      in the dedicated soak gates. A schema-1 headless DX12 `ViewerCompositorRenderer`
-      qualification now passed on the hybrid Windows host for both Intel UHD 770 `IntegratedGpu`
-      and NVIDIA RTX 3090 `DiscreteGpu`: deterministic two-layer readback and two timestamp cycles
-      passed on each. This is compositor-only evidence; the full schema-7 surface report has not
-      been produced on both classes, and physical scanout remains unobserved. Those gaps keep this
-      item open.
+      in the dedicated soak gates. The hybrid Windows host now has both the narrower schema-1
+      headless DX12 `ViewerCompositorRenderer` proof and full schema-7 surface qualification for
+      Intel UHD 770 `IntegratedGpu` and NVIDIA RTX 3090 `DiscreteGpu`. The full runs exercised the
+      ordinary window surface, deterministic A/V import, native viewer uploads, audio callbacks,
+      GPU completion/timestamp evidence, and clean cancelled export. The retained schema-1 summary
+      SHA-256 is `d1bd17bb3c482de9c7d26c8dc507ff5096961656d0998fa4d9697ccb6541e385`.
+      Physical scanout remains unobserved, so this item stays open.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
 
 Exit gate:
 
-- [ ] The full schema-7 surface report can be produced on integrated and discrete Windows hardware.
-      The narrower schema-1 headless compositor qualification has passed on both DX12 adapter
-      classes on the hybrid host; it does not prove surface presentation or scanout.
+- [x] The full schema-7 surface report can be produced on integrated and discrete Windows hardware.
+      The retained 2026-08-30 hybrid-host qualification selected Intel UHD 770 `IntegratedGpu` and
+      NVIDIA RTX 3090 `DiscreteGpu` explicitly, rejected adapter-class fallback, and passed all
+      schema, CPU, cadence, media, audio, GPU, runtime-counter, and cancelled-export checks. It does
+      not prove DWM composition or physical scanout.
 - [ ] Existing foundation gates remain green.
 - [ ] A failing codec, driver, or stage is identifiable from one report without guessing.
 
 The report's CPU boundaries do not prove GPU completion or scanout. Its optional pass timestamps
 measure isolated viewer-compositor execution, and the separate queue callback proves completion of
 submitted GPU work as observed by wgpu; neither proves DWM composition or physical scanout.
-Physical scanout and cross-hardware proof remain open and keep
-the stage-timing and exit-gate checkboxes incomplete; soak thresholds remain owned by their
-dedicated runners.
+Physical scanout and broader cross-hardware soak proof remain open and keep the stage-timing item
+and remaining Phase 0 exit gates incomplete; soak thresholds remain owned by their dedicated
+runners.
 
 ### Phase 1 — Multi-source playback and adaptive preview
 

@@ -167,10 +167,12 @@ Follow `ENGINE_ROADMAP.md`.
 - Versioned fixture manifest (codec, rate, GOP, expected failure)
 - Soak: 10 min play plus a separate repeated native matrix for reverse scrub, project switch,
   offline media, cache pressure, and export cancel. The timed matrix has a retained authoritative
-  600-second local result; integrated/discrete cross-hardware evidence remains open.
+  600-second local result; broader cross-hardware soak evidence remains open.
 - Per-stage timers and drop/hold/late/underrun counters on the HUD
 
-Gate: one report on integrated Intel and one on discrete GPU. Foundation 50k + package gates stay green.
+Gate update: full schema-7 surface reports now pass on integrated Intel and discrete NVIDIA GPUs on
+the hybrid Windows host. Physical scanout and broader cross-hardware soak proof remain open.
+Foundation 50k + package gates must stay green.
 
 ### Then — Phase 1 holes
 

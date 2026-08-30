@@ -359,6 +359,7 @@ try {
         'schema_version', 'samples', 'cpu_p95_ms', 'surface_submission_interval_p95_ms',
         'surface_present_call_cpu_p95_ms',
         'average_submission_fps', 'renderer_gpu_name', 'renderer_vendor_id', 'renderer_device_id',
+        'renderer_device_type',
         'renderer_backend', 'renderer_driver', 'renderer_driver_info', 'decoder_backends',
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
@@ -409,6 +410,7 @@ try {
     }
     if ([string]::IsNullOrWhiteSpace($surfaceSubmission.renderer_gpu_name) -or
         [string]::IsNullOrWhiteSpace($surfaceSubmission.renderer_backend) -or
+        $surfaceSubmission.renderer_device_type -notin @('IntegratedGpu', 'DiscreteGpu', 'VirtualGpu', 'Cpu', 'Other') -or
         [string]::IsNullOrWhiteSpace($surfaceSubmission.cpu_identity) -or
         $surfaceSubmission.logical_cpu_count -lt 1 -or
         $surfaceSubmission.total_physical_memory_bytes -lt 1 -or

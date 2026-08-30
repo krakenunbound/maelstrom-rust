@@ -95,6 +95,36 @@ The schema-1 file is retained success evidence only; adapter discovery, device c
 execution failures can terminate before publication and remain visible in the Cargo diagnostic
 output. Machine-readable failed-run evidence is still an open qualification-harness improvement.
 
+## Phase 0 cross-adapter full surface qualification
+
+The opt-in full-surface runner complements the headless compositor proof. It launches the exact
+packaged editor path once on a compatible DX12 `IntegratedGpu` and once on a compatible DX12
+`DiscreteGpu`, using the ordinary window surface, media import, native viewer upload, audio
+callback, and cancelled Quick Export acceptance path. Each run must produce a complete
+schema-version 7 report with exercised decoder, viewer, GPU, audio, and runtime-diagnostic fields
+while retaining the foundation CPU and surface-cadence limits. Normal editor startup remains
+unchanged; the adapter-class override exists only through the explicit
+`MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS` qualification seam and fails rather than falling back to a
+different adapter type.
+
+Run it only against the full absolute packaged path:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Run-Phase0CrossAdapterSurface.ps1' `
+  -ExecutablePath 'H:\Maelstrom Rust\dist\Maelstrom-Windows-x64\Maelstrom.exe'
+```
+
+The ignored `artifacts/phase0-cross-adapter-surface` directory retains the two schema-7 surface
+reports, startup reports, media-acceptance reports, and a schema-version 1 summary containing the
+exact executable hash plus every child-report hash. The summary deliberately records
+`physical_scanout_observed: false`: a successful surface present and wgpu completion still do not
+prove DWM composition or physical scanout.
+
+The retained 2026-08-30 hybrid-host run passed on Intel UHD 770 `IntegratedGpu` and NVIDIA RTX 3090
+`DiscreteGpu`. Its schema-version 1 summary SHA-256 is
+`d1bd17bb3c482de9c7d26c8dc507ff5096961656d0998fa4d9697ccb6541e385`; the qualified packaged
+executable SHA-256 is `0f81e9e9df349c9f3b3254cdcf6d891b9cf0fc6faf91f33f4236557df3a44ad0`.
+
 Windows packaging performs structural and exercised-path validation: it checks the packaged report
 shape and confirms the full report includes real CPU/RAM, renderer, media backend, preview, cache,
 display, and exercised runtime-counter data when available before accepting the build. Existing
