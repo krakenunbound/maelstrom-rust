@@ -256,7 +256,12 @@ cache lookup, demux packet retrieval, decoder send/receive/flush, hardware-to-CP
 RGBA copy plus letterbox, and whole worker request. Each has sample count, total/mean/max CPU
 milliseconds. Software decode has zero hardware-transfer samples by design. These spans do not
 claim GPU upload/compositing completion or scanout. A separate audio timing sub-object reports the
-whole output-callback CPU boundary without claiming device/DAC latency.
+whole output-callback CPU boundary and a successful-lock mix/render CPU boundary. The latter
+includes lane mix/fades/effects, output conversion, meter accumulation/store, device-clock
+advancement, and underrun bookkeeping; lock-failure fallback callbacks do not produce a mix/render
+sample, while acquired paused callbacks count. Neither boundary claims device/DAC latency.
+Both audio fields are monotonic elapsed-time measurements around CPU-side work, not per-thread CPU
+accounting, so scheduler preemption may be included.
 
 Its viewer timing sub-object records CPU/API submission only: successful native RGBA uploads,
 changed-composition command encoding, and the `frame.present()` call handoff. All three use bounded
@@ -264,7 +269,7 @@ changed-composition command encoding, and the `frame.present()` call handoff. Al
 the package full-media smoke waits for at least one successful upload and one actual composition
 encode before publishing this evidence.
 
-Schema 4 also snapshots the existing cumulative runtime counters for monitor request/completion/
+Schema 5 also snapshots the existing cumulative runtime counters for monitor request/completion/
 presentation/drop/hold/late/error outcomes, native/fallback viewer uploads, and audio underrun,
 callback-lock, and late-discard faults. This snapshot covers process/session lifetime rather than
 the fixed 120-frame timing window and adds no per-frame logging or persistent project state.

@@ -1,9 +1,10 @@
 # Performance reports
 
-Maelstrom's existing surface-submission probe writes a schema-version 4 JSON report when
-`MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. Its timing samples measure a fixed
-120-frame window; report serialization and disk IO remain on the existing one-shot, off-thread
-worker.
+Maelstrom's existing surface-submission probe writes a schema-version 5 JSON report when
+`MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. Frame/submission and bounded viewer
+timing samples measure a fixed 120-frame window; decoder-worker and audio timing aggregates are
+cumulative at publication. Report serialization and disk IO remain on the existing one-shot,
+off-thread worker.
 
 The report records:
 
@@ -24,8 +25,13 @@ The report records:
   composition work. Each has a fixed 120-sample p95/max snapshot. `surface_present_call_cpu_p95_ms`
   brackets only the `frame.present()` API call; the existing `cpu_p95_ms` ends before that call.
 - native audio output-callback CPU timing at `audio_stage_timings.output_callback_cpu`, with sample
-  count, total, mean, and maximum milliseconds (no p95). It covers callback CPU through lock retry,
-  mix, effects, conversion, and meter work, or the silence fallback when the callback cannot mix.
+  count, total, mean, and maximum milliseconds (no p95), retaining the whole callback boundary.
+- native audio mix/render CPU timing at `audio_stage_timings.mix_render_cpu`, with the same fields.
+  This starts after a successful mixer-state lock and includes lane mix/fades/effects, output sample
+  conversion, meter accumulation/store, device-clock advancement, and underrun bookkeeping. A lock-
+  failure silence fallback produces no mix/render sample; an acquired paused callback counts.
+  Both audio fields use monotonic elapsed time around CPU-side work, so scheduler preemption may be
+  included; they are not per-thread CPU-accounting measurements.
 - a nested `runtime_diagnostics` snapshot containing cumulative
   `monitor_requests`, `monitor_completed_frames`, `monitor_presented_frames`,
   `monitor_dropped_frames`, `monitor_hold_events`, `monitor_late_frames`, `monitor_errors`,
@@ -40,9 +46,9 @@ upload/compositing completion, GPU execution, or presentation/scanout. A standal
 cadence probe may report an empty decoder list and `encoder_backend: "not_observed"` when that run
 did not exercise media. The full package media smoke defers the report until a decoder has produced
 a frame, all applicable decoder timing stages have completed samples, successful native viewer
-upload and changed-composition samples exist, native audio output callbacks have completed samples,
-and an encoder process has actually started. Its backend and timing fields are therefore evidence
-rather than hardware guesses. Project files never contain this session-only metadata.
+upload and changed-composition samples exist, both native audio timing boundaries have completed
+samples, and an encoder process has actually started. Its backend and timing fields are therefore
+evidence rather than hardware guesses. Project files never contain this session-only metadata.
 
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
 `"Unknown"` are not used as hidden unavailable-value sentinels.

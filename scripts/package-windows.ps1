@@ -372,7 +372,7 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 4) {
+    if ($surfaceSubmission.schema_version -ne 5) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     foreach ($property in @(
@@ -450,7 +450,7 @@ try {
             }
         }
     }
-    foreach ($stageName in @('output_callback_cpu')) {
+    foreach ($stageName in @('output_callback_cpu', 'mix_render_cpu')) {
         $stage = $surfaceSubmission.audio_stage_timings.$stageName
         if ($null -eq $stage) { throw "Surface submission probe omitted audio stage $stageName." }
         foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {

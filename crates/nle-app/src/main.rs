@@ -2083,11 +2083,12 @@ impl From<nle_audio::AudioCallbackCpuTiming> for AudioStageTimingReport {
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
 struct AudioStageTimingsReport {
     output_callback_cpu: AudioStageTimingReport,
+    mix_render_cpu: AudioStageTimingReport,
 }
 
 impl AudioStageTimingsReport {
     fn fully_observed(&self) -> bool {
-        self.output_callback_cpu.samples > 0
+        self.output_callback_cpu.samples > 0 && self.mix_render_cpu.samples > 0
     }
 }
 
@@ -2574,7 +2575,7 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 4,
+            schema_version: 5,
             samples: metrics.samples,
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
@@ -3482,14 +3483,14 @@ impl App {
         if !surface_report_viewer_stage_timings_ready(full_media_smoke, viewer_stage_timings) {
             return;
         }
+        let audio_diagnostics = self
+            .audio_engine
+            .as_ref()
+            .map(nle_audio::AudioEngine::runtime_diagnostics)
+            .unwrap_or_default();
         let audio_stage_timings = AudioStageTimingsReport {
-            output_callback_cpu: self
-                .audio_engine
-                .as_ref()
-                .map(nle_audio::AudioEngine::runtime_diagnostics)
-                .unwrap_or_default()
-                .output_callback_cpu_timing
-                .into(),
+            output_callback_cpu: audio_diagnostics.output_callback_cpu_timing.into(),
+            mix_render_cpu: audio_diagnostics.mix_render_cpu_timing.into(),
         };
         if !surface_report_audio_stage_timings_ready(full_media_smoke, audio_stage_timings) {
             return;
@@ -3518,7 +3519,9 @@ impl App {
             decoder_stage_timings,
             viewer_stage_timings,
             audio_stage_timings,
-            runtime_diagnostics: RuntimeDiagnosticsReport::from(self.runtime_diagnostics()),
+            runtime_diagnostics: RuntimeDiagnosticsReport::from(
+                self.runtime_diagnostics_with_audio(audio_diagnostics),
+            ),
         };
         let published = self
             .surface_submission_probe
@@ -3535,6 +3538,13 @@ impl App {
             .as_ref()
             .map(nle_audio::AudioEngine::runtime_diagnostics)
             .unwrap_or_default();
+        self.runtime_diagnostics_with_audio(audio)
+    }
+
+    fn runtime_diagnostics_with_audio(
+        &self,
+        audio: nle_audio::AudioRuntimeDiagnostics,
+    ) -> RuntimeDiagnostics {
         self.monitor_runtime_metrics.diagnostics(
             audio.underrun_device_frames,
             audio.callback_lock_failures,
@@ -7468,12 +7478,18 @@ mod tests {
                         max_nanos: 4_000_000,
                     }
                     .into(),
+                    mix_render_cpu: nle_audio::AudioCallbackCpuTiming {
+                        samples: 2,
+                        total_nanos: 3_000_000,
+                        max_nanos: 2_000_000,
+                    }
+                    .into(),
                 },
                 runtime_diagnostics,
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 4);
+        assert_eq!(report.schema_version, 5);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
@@ -7492,6 +7508,7 @@ mod tests {
             3.0
         );
         assert_eq!(report.audio_stage_timings.output_callback_cpu.samples, 2);
+        assert_eq!(report.audio_stage_timings.mix_render_cpu.samples, 2);
         assert_eq!(report.runtime_diagnostics, runtime_diagnostics);
         assert!(
             (report.audio_stage_timings.output_callback_cpu.total_ms - 5.0).abs() < f64::EPSILON
@@ -7499,6 +7516,8 @@ mod tests {
         assert!(
             (report.audio_stage_timings.output_callback_cpu.mean_ms - 2.5).abs() < f64::EPSILON
         );
+        assert!((report.audio_stage_timings.mix_render_cpu.total_ms - 3.0).abs() < f64::EPSILON);
+        assert!((report.audio_stage_timings.mix_render_cpu.mean_ms - 1.5).abs() < f64::EPSILON);
         let json = serde_json::to_value(&report).expect("surface report serializes");
         assert_eq!(
             json.pointer("/viewer_stage_timings/upload_cpu/samples"),
@@ -7511,6 +7530,10 @@ mod tests {
         assert_eq!(
             json.pointer("/audio_stage_timings/output_callback_cpu/max_ms"),
             Some(&serde_json::Value::from(4.0))
+        );
+        assert_eq!(
+            json.pointer("/audio_stage_timings/mix_render_cpu/max_ms"),
+            Some(&serde_json::Value::from(2.0))
         );
         assert_eq!(
             json.pointer("/runtime_diagnostics/monitor_dropped_frames"),
@@ -7569,10 +7592,34 @@ mod tests {
         let empty = AudioStageTimingsReport::default();
         assert!(surface_report_audio_stage_timings_ready(false, empty));
         assert!(!surface_report_audio_stage_timings_ready(true, empty));
+        assert!(!surface_report_audio_stage_timings_ready(
+            true,
+            AudioStageTimingsReport {
+                output_callback_cpu: AudioStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        ));
+        assert!(!surface_report_audio_stage_timings_ready(
+            true,
+            AudioStageTimingsReport {
+                mix_render_cpu: AudioStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        ));
         assert!(surface_report_audio_stage_timings_ready(
             true,
             AudioStageTimingsReport {
                 output_callback_cpu: AudioStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+                mix_render_cpu: AudioStageTimingReport {
                     samples: 1,
                     ..Default::default()
                 },
