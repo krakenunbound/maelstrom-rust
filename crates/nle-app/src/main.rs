@@ -13246,8 +13246,8 @@ mod tests {
                     let sessions = app.monitor_session_pool.diagnostics();
                     let sources = app.monitor_source_coordinator.diagnostics();
                     if cache.capacity_bytes != CACHE_CAP_BYTES
-                        || cache.current_bytes > CACHE_CAP_BYTES
-                        || cache.peak_bytes > CACHE_CAP_BYTES
+                        || cache.current_bytes != CACHE_CAP_BYTES
+                        || cache.peak_bytes != CACHE_CAP_BYTES
                         || cache.eviction_count < 1
                     {
                         return Err(format!("cache-pressure decoded-frame cache diagnostics were {cache:?}, expected exact capacity {CACHE_CAP_BYTES} with at least one eviction"));
@@ -13302,6 +13302,199 @@ mod tests {
                             sources.source_group_cap,
                             sources.live_lane_actors,
                             sources.lane_actor_cap,
+                        ),
+                    ))
+                })();
+                for copy in &copies {
+                    let _ = fs::remove_file(copy);
+                }
+                result
+            },
+        ));
+        scenarios.push(phase0_run_scenario(
+            "multi_source_pressure_and_idle_retirement",
+            12,
+            Some(Phase0BackendRole::Decoder),
+            || {
+                const SOURCE_COUNT: usize = 12;
+                const BATCH_COUNT: usize = 3;
+                const LANES_PER_BATCH: usize = SOURCE_COUNT / BATCH_COUNT;
+                const FRAME_WIDTH: u32 = 160;
+                const FRAME_HEIGHT: u32 = 90;
+                const FRAME_BYTES: usize = FRAME_WIDTH as usize * FRAME_HEIGHT as usize * 4;
+                const CACHE_CAP_BYTES: usize = FRAME_BYTES * 3;
+                const SESSION_FOREGROUND_CAP: usize = 4;
+                const SESSION_BACKGROUND_CAP: usize = 0;
+                const SOURCE_GROUP_CAP: usize = 4;
+                let artifact_root = report_path.parent().expect("validated Phase 0 artifact root");
+                let copy_nonce = format!(
+                    "{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                let copies: [PathBuf; SOURCE_COUNT] = std::array::from_fn(|index| {
+                    artifact_root.join(format!("phase0-idle-pressure-{copy_nonce}-{index}.mp4"))
+                });
+                let result = (|| {
+                    for copy in &copies {
+                        fs::copy(&media, copy).map_err(|error| error.to_string())?;
+                    }
+                    let cache_pool = nle_decode::MonitorFrameCachePool::new(CACHE_CAP_BYTES);
+                    let session_pool = nle_decode::MonitorSessionPool::new(
+                        SESSION_FOREGROUND_CAP,
+                        SESSION_BACKGROUND_CAP,
+                    );
+                    let source_coordinator = nle_decode::MonitorSourceCoordinator::new(
+                        SOURCE_GROUP_CAP,
+                        session_pool.clone(),
+                    );
+                    let mut observed_backend = None;
+                    let mut peak_sessions = 0usize;
+                    let mut peak_groups = 0usize;
+                    let mut peak_actors = 0usize;
+                    let mut idle_release_cycles = 0usize;
+                    for batch in 0..BATCH_COUNT {
+                        let decoders: Vec<nle_decode::MonitorDecoder> = (0..LANES_PER_BATCH)
+                            .map(|_| {
+                                nle_decode::MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+                                    || {},
+                                    cache_pool.clone(),
+                                    source_coordinator.clone(),
+                                )
+                            })
+                            .collect();
+                        for (lane, decoder) in decoders.iter().enumerate() {
+                            let source_index = batch * LANES_PER_BATCH + lane;
+                            decoder
+                                .request(nle_decode::DecodeRequest {
+                                    project_epoch: 1,
+                                    cache_epoch: 1,
+                                    request_id: (source_index + 1) as u64,
+                                    media_id: (source_index + 1) as u32,
+                                    path: copies[source_index].clone(),
+                                    source_tick: 300_000,
+                                    width: FRAME_WIDTH,
+                                    height: FRAME_HEIGHT,
+                                    is_scrubbing: false,
+                                    prewarm_scrub_workers: false,
+                                    high_quality_scaling: false,
+                                    progressive_scrub_frames: false,
+                                    source_frame_duration_tick: Some(33_367),
+                                    acceleration: nle_decode::AccelerationPreference::Software,
+                                })
+                                .map_err(|error| error.to_string())?;
+                        }
+                        for (lane, decoder) in decoders.iter().enumerate() {
+                            let source_index = batch * LANES_PER_BATCH + lane;
+                            match phase0_wait_for_monitor_event(decoder, (source_index + 1) as u64)? {
+                                nle_decode::DecodeEvent::Frame(frame)
+                                    if frame.media_id == (source_index + 1) as u32
+                                        && (frame.width, frame.height) == (FRAME_WIDTH, FRAME_HEIGHT) =>
+                                {
+                                    let backend = frame.backend.map(|backend| backend.display_name().to_owned()).ok_or_else(|| {
+                                        format!("idle-retirement source {source_index} did not expose a decoder backend")
+                                    })?;
+                                    observed_backend.get_or_insert(backend);
+                                }
+                                nle_decode::DecodeEvent::Frame(frame) => {
+                                    return Err(format!(
+                                        "idle-retirement source {source_index} decoded media {} at {}x{}, expected media {} at {}x{}",
+                                        frame.media_id,
+                                        frame.width,
+                                        frame.height,
+                                        source_index + 1,
+                                        FRAME_WIDTH,
+                                        FRAME_HEIGHT,
+                                    ));
+                                }
+                                nle_decode::DecodeEvent::Error(error) => {
+                                    return Err(format!("idle-retirement source {source_index} failed to decode: {}", error.message));
+                                }
+                            }
+                        }
+                        let sessions = session_pool.diagnostics();
+                        let sources = source_coordinator.diagnostics();
+                        peak_sessions = peak_sessions.max(sessions.peak_sticky_sessions);
+                        peak_groups = peak_groups.max(sources.live_source_groups);
+                        peak_actors = peak_actors.max(sources.live_lane_actors);
+                        if sessions.active_sticky_sessions != LANES_PER_BATCH
+                            || sessions.active_foreground_sessions != LANES_PER_BATCH
+                            || sessions.active_background_sessions != 0
+                            || sessions.session_cap != SESSION_FOREGROUND_CAP
+                            || sessions.peak_sticky_sessions > sessions.session_cap
+                            || sources.live_source_groups != LANES_PER_BATCH
+                            || sources.live_lane_actors != LANES_PER_BATCH
+                            || sources.retiring_lane_actors != 0
+                            || sources.source_group_cap != SOURCE_GROUP_CAP
+                            || sources.live_source_groups > sources.source_group_cap
+                            || sources.live_lane_actors + sources.retiring_lane_actors > sources.lane_actor_cap
+                        {
+                            return Err(format!(
+                                "idle-retirement batch {batch} ownership was not exactly four bounded foreground sources: sessions={sessions:?} sources={sources:?}"
+                            ));
+                        }
+                        for decoder in &decoders {
+                            decoder.release_live_sessions().map_err(|error| error.to_string())?;
+                        }
+                        idle_release_cycles += 1;
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        loop {
+                            let sessions = session_pool.diagnostics();
+                            let sources = source_coordinator.diagnostics();
+                            if sessions.active_sticky_sessions == 0
+                                && sources.live_source_groups == 0
+                                && sources.live_lane_actors == 0
+                                && sources.retiring_lane_actors == 0
+                            {
+                                break;
+                            }
+                            if Instant::now() >= deadline {
+                                return Err(format!(
+                                    "idle-retirement batch {batch} did not reach zero ownership before deadline: sessions={sessions:?} sources={sources:?}"
+                                ));
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        drop(decoders);
+                    }
+                    let cache = cache_pool.diagnostics();
+                    let sessions = session_pool.diagnostics();
+                    let sources = source_coordinator.diagnostics();
+                    let minimum_evictions = (SOURCE_COUNT - 3) as u64;
+                    if cache.capacity_bytes != CACHE_CAP_BYTES
+                        || cache.current_bytes > CACHE_CAP_BYTES
+                        || cache.peak_bytes > CACHE_CAP_BYTES
+                        || cache.eviction_count < minimum_evictions
+                        || peak_sessions != LANES_PER_BATCH
+                        || peak_groups != LANES_PER_BATCH
+                        || peak_actors != LANES_PER_BATCH
+                        || sessions.active_sticky_sessions != 0
+                        || sources.live_source_groups != 0
+                        || sources.live_lane_actors != 0
+                        || sources.retiring_lane_actors != 0
+                    {
+                        return Err(format!(
+                            "idle-retirement final cache/ownership diagnostics were cache={cache:?} sessions={sessions:?} sources={sources:?} peaks=({peak_sessions}, {peak_groups}, {peak_actors}), expected at least {minimum_evictions} real LRU evictions and zero final ownership"
+                        ));
+                    }
+                    Ok((
+                        observed_backend,
+                        format!(
+                            "source_count={SOURCE_COUNT} batch_count={BATCH_COUNT} lanes_per_batch={LANES_PER_BATCH} frame_bytes={FRAME_BYTES} cache_current_bytes={} cache_peak_bytes={} cache_cap_bytes={} cache_eviction_count={} peak_sessions={peak_sessions} session_cap={} peak_source_groups={peak_groups} source_group_cap={} peak_lane_actors={peak_actors} lane_actor_cap={} idle_release_cycles={idle_release_cycles} final_sessions={} final_source_groups={} final_live_lane_actors={} final_retiring_lane_actors={}",
+                            cache.current_bytes,
+                            cache.peak_bytes,
+                            cache.capacity_bytes,
+                            cache.eviction_count,
+                            sessions.session_cap,
+                            sources.source_group_cap,
+                            sources.lane_actor_cap,
+                            sessions.active_sticky_sessions,
+                            sources.live_source_groups,
+                            sources.live_lane_actors,
+                            sources.retiring_lane_actors,
                         ),
                     ))
                 })();
@@ -13403,7 +13596,7 @@ mod tests {
 
         let passed = scenarios.iter().all(|scenario| scenario.passed);
         let report = Phase0Report {
-            schema_version: 3,
+            schema_version: 4,
             status: if passed { "passed" } else { "failed" },
             scenario_count: scenarios.len(),
             scenarios,

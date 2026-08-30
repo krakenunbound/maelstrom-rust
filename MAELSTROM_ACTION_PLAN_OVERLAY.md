@@ -165,9 +165,10 @@ Follow `ENGINE_ROADMAP.md`.
 ### Now — Phase 0 (measurement)
 
 - Versioned fixture manifest (codec, rate, GOP, expected failure)
-- Soak: 10 min play plus a separate repeated native matrix for reverse scrub, project switch,
-  offline media, cache pressure, and export cancel. The timed matrix has a retained authoritative
-  600-second local result; broader cross-hardware soak evidence remains open.
+- Soak: 10 min play plus a separate seven-scenario native matrix for reverse scrub, project switch,
+  offline media, cache pressure, twelve-source pressure/eager idle release, and export cancel. The
+  retained authoritative 600-second local result covers the prior six-scenario contract; a fresh
+  schema-4 authoritative run and broader cross-hardware soak evidence remain open.
 - Per-stage timers and drop/hold/late/underrun counters on the HUD
 
 Gate update: full schema-7 surface reports now pass on integrated Intel and discrete NVIDIA GPUs on

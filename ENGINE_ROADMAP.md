@@ -93,8 +93,11 @@ Build the evidence harness before adding engine complexity.
       280 MiB live runtime strip-cache checkpoint with per-insertion cap and exact oldest-eviction
       assertions, plus a four-source decoded-frame cache-pressure scenario using distinct fixture
       paths that forces real LRU eviction at a three-frame 160x90 RGBA cap and proves release and
-      source/session/actor bounds; broader sustained pressure remains open. The exact packaged executable passed
-      the 600-second Full/Full real A/V loop soak on 2026-08-30 with 10 loops, 18,023 native
+      source/session/actor bounds. A separate twelve-source scenario cycles three batches of four
+      concurrent decoders through the same three-frame cache, requires at least nine real LRU
+      evictions, and proves three eager idle-release cycles with zero final session/source/actor
+      ownership; idle/session LRU policy and broader cross-hardware pressure remain open. The exact
+      packaged executable passed the 600-second Full/Full real A/V loop soak on 2026-08-30 with 10 loops, 18,023 native
       uploads, zero held/late frames, zero monitor errors/fallback uploads, zero audio
       underruns/lock failures/late discards, and 12.242 ms rolling request-turnaround p95. Its
       schema-5 resource evidence reported a 1,071,555,584-byte peak decoded-frame cache below the
@@ -104,16 +107,19 @@ Build the evidence harness before adding engine complexity.
       bound. This combined item remains open for broader multi-source memory-pressure coverage,
       including idle/session LRU and cross-hardware proof. See
       `docs/phase0-scenarios.md` and `docs/performance-reports.md`. A separate timed Phase 0
-      orchestrator now repeatedly executes the full six-scenario native matrix and writes one
+      orchestrator now repeatedly executes the full seven-scenario native matrix and writes one
       versioned report with all available child evidence, aggregate scenario totals, machine/FFmpeg
       identity, and preserved failure details. Runs below 600 seconds are harness checks only; a
-      retained authoritative local 2026-08-30 run passed for 600.343 seconds, excluding 1.357
-      seconds of setup, with 563 complete matrix runs, 3,378 scenario executions, and 14,075
-      declared work iterations. All child reports were hashed and passed; the Software decoder and
+      retained authoritative local 2026-08-30 run passed the prior schema-3 six-scenario contract
+      for 600.343 seconds, excluding 1.357 seconds of setup, with 563 complete matrix runs, 3,378
+      scenario executions, and 14,075 declared work iterations. All child reports were hashed and
+      passed; the Software decoder and
       `h264_mf` encoder were recorded in separate fields with no mixed-role observations. The
       retained local report SHA-256 is
-      `92ab2cf8cfe464932e1cd0f65aa334f766129c6df2c5207102c7998a58a2006d`. Cross-hardware proof
-      remains open.
+      `92ab2cf8cfe464932e1cd0f65aa334f766129c6df2c5207102c7998a58a2006d`. A fresh authoritative
+      schema-4 seven-scenario run is required before carrying that checkpoint forward. A 15-second
+      schema-4 harness check passed 13 complete runs (91 scenario executions), including 156
+      declared iterations of the new twelve-source scenario. Cross-hardware proof remains open.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,

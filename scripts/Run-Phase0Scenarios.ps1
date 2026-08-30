@@ -96,7 +96,7 @@ try {
         throw "Phase 0 scenario matrix exited with code $testExitCode without writing its report."
     }
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw | ConvertFrom-Json
-    if ($report.schema_version -ne 3 -or @('passed', 'failed') -notcontains $report.status -or [int]$report.scenario_count -ne 6 -or @($report.scenarios).Count -ne 6) {
+    if ($report.schema_version -ne 4 -or @('passed', 'failed') -notcontains $report.status -or [int]$report.scenario_count -ne 7 -or @($report.scenarios).Count -ne 7) {
         throw 'Phase 0 scenario report has an unexpected schema, status, or scenario count.'
     }
     foreach ($scenario in @($report.scenarios)) {
@@ -141,6 +141,23 @@ try {
     }
     if ($decodedValues.source_count -ne 4 -or $decodedValues.frame_bytes -ne 57600 -or $decodedValues.cap_bytes -ne 172800 -or $decodedValues.current_bytes -gt $decodedValues.cap_bytes -or $decodedValues.peak_bytes -gt $decodedValues.cap_bytes -or $decodedValues.eviction_count -lt 1 -or $decodedValues.peak_sessions -lt $decodedValues.source_count -or $decodedValues.peak_sessions -gt $decodedValues.session_cap -or $decodedValues.source_groups -ne $decodedValues.source_count -or $decodedValues.source_groups -gt $decodedValues.source_group_cap -or $decodedValues.lane_actors -ne $decodedValues.source_count -or $decodedValues.lane_actors -gt $decodedValues.lane_actor_cap -or $decodedValues.post_release_sessions -ne 0 -or $decodedValues.post_release_groups -ne 0 -or $decodedValues.post_release_actors -ne 0) {
         throw "Phase 0 decoded-frame cache-pressure evidence is outside required bounds: $decodedEvidence"
+    }
+    $idlePressure = @($report.scenarios | Where-Object { $_.name -eq 'multi_source_pressure_and_idle_retirement' })
+    if ($idlePressure.Count -ne 1 -or [int]$idlePressure[0].iterations -ne 12) {
+        throw 'Phase 0 multi-source idle-retirement scenario is missing or has an unexpected iteration count.'
+    }
+    $idleEvidence = [string]$idlePressure[0].evidence
+    $idlePattern = '(?=.*\bsource_count=(?<source_count>\d+)\b)(?=.*\bbatch_count=(?<batch_count>\d+)\b)(?=.*\blanes_per_batch=(?<lanes_per_batch>\d+)\b)(?=.*\bframe_bytes=(?<frame_bytes>\d+)\b)(?=.*\bcache_current_bytes=(?<cache_current_bytes>\d+)\b)(?=.*\bcache_peak_bytes=(?<cache_peak_bytes>\d+)\b)(?=.*\bcache_cap_bytes=(?<cache_cap_bytes>\d+)\b)(?=.*\bcache_eviction_count=(?<cache_eviction_count>\d+)\b)(?=.*\bpeak_sessions=(?<peak_sessions>\d+)\b)(?=.*\bsession_cap=(?<session_cap>\d+)\b)(?=.*\bpeak_source_groups=(?<peak_source_groups>\d+)\b)(?=.*\bsource_group_cap=(?<source_group_cap>\d+)\b)(?=.*\bpeak_lane_actors=(?<peak_lane_actors>\d+)\b)(?=.*\blane_actor_cap=(?<lane_actor_cap>\d+)\b)(?=.*\bidle_release_cycles=(?<idle_release_cycles>\d+)\b)(?=.*\bfinal_sessions=(?<final_sessions>\d+)\b)(?=.*\bfinal_source_groups=(?<final_source_groups>\d+)\b)(?=.*\bfinal_live_lane_actors=(?<final_live_lane_actors>\d+)\b)(?=.*\bfinal_retiring_lane_actors=(?<final_retiring_lane_actors>\d+)\b)'
+    $idleMatch = [regex]::Match($idleEvidence, $idlePattern)
+    if (-not $idleMatch.Success) {
+        throw "Phase 0 multi-source idle-retirement evidence is missing required fields: $idleEvidence"
+    }
+    $idleValues = @{}
+    foreach ($field in @('source_count','batch_count','lanes_per_batch','frame_bytes','cache_current_bytes','cache_peak_bytes','cache_cap_bytes','cache_eviction_count','peak_sessions','session_cap','peak_source_groups','source_group_cap','peak_lane_actors','lane_actor_cap','idle_release_cycles','final_sessions','final_source_groups','final_live_lane_actors','final_retiring_lane_actors')) {
+        $idleValues[$field] = [int64]$idleMatch.Groups[$field].Value
+    }
+    if ($idleValues.source_count -ne 12 -or $idleValues.batch_count -ne 3 -or $idleValues.lanes_per_batch -ne 4 -or $idleValues.frame_bytes -ne 57600 -or $idleValues.cache_cap_bytes -ne 172800 -or $idleValues.cache_current_bytes -ne $idleValues.cache_cap_bytes -or $idleValues.cache_peak_bytes -ne $idleValues.cache_cap_bytes -or $idleValues.cache_eviction_count -lt 9 -or $idleValues.peak_sessions -ne 4 -or $idleValues.session_cap -ne 4 -or $idleValues.peak_source_groups -ne 4 -or $idleValues.source_group_cap -ne 4 -or $idleValues.peak_lane_actors -ne 4 -or $idleValues.lane_actor_cap -lt 4 -or $idleValues.idle_release_cycles -ne 3 -or $idleValues.final_sessions -ne 0 -or $idleValues.final_source_groups -ne 0 -or $idleValues.final_live_lane_actors -ne 0 -or $idleValues.final_retiring_lane_actors -ne 0) {
+        throw "Phase 0 multi-source idle-retirement evidence is outside required bounds: $idleEvidence"
     }
     Write-Host "Phase 0 scenarios: PASS ($resolvedReportPath)"
 }

@@ -41,11 +41,28 @@ function Write-AtomicJson([string]$Path, $Value) {
     }
 }
 
+function Test-Phase0MultiSourceIdleRetirementEvidence($Scenario) {
+    if ([string]$Scenario.name -ne 'multi_source_pressure_and_idle_retirement' -or [int]$Scenario.iterations -ne 12) {
+        throw 'Phase 0 multi-source idle-retirement scenario is missing or has an unexpected iteration count.'
+    }
+    $evidence = [string]$Scenario.evidence
+    $pattern = '(?=.*\bsource_count=(?<source_count>\d+)\b)(?=.*\bbatch_count=(?<batch_count>\d+)\b)(?=.*\blanes_per_batch=(?<lanes_per_batch>\d+)\b)(?=.*\bframe_bytes=(?<frame_bytes>\d+)\b)(?=.*\bcache_current_bytes=(?<cache_current_bytes>\d+)\b)(?=.*\bcache_peak_bytes=(?<cache_peak_bytes>\d+)\b)(?=.*\bcache_cap_bytes=(?<cache_cap_bytes>\d+)\b)(?=.*\bcache_eviction_count=(?<cache_eviction_count>\d+)\b)(?=.*\bpeak_sessions=(?<peak_sessions>\d+)\b)(?=.*\bsession_cap=(?<session_cap>\d+)\b)(?=.*\bpeak_source_groups=(?<peak_source_groups>\d+)\b)(?=.*\bsource_group_cap=(?<source_group_cap>\d+)\b)(?=.*\bpeak_lane_actors=(?<peak_lane_actors>\d+)\b)(?=.*\blane_actor_cap=(?<lane_actor_cap>\d+)\b)(?=.*\bidle_release_cycles=(?<idle_release_cycles>\d+)\b)(?=.*\bfinal_sessions=(?<final_sessions>\d+)\b)(?=.*\bfinal_source_groups=(?<final_source_groups>\d+)\b)(?=.*\bfinal_live_lane_actors=(?<final_live_lane_actors>\d+)\b)(?=.*\bfinal_retiring_lane_actors=(?<final_retiring_lane_actors>\d+)\b)'
+    $match = [regex]::Match($evidence, $pattern)
+    if (-not $match.Success) { throw "Phase 0 multi-source idle-retirement evidence is missing required fields: $evidence" }
+    $values = @{}
+    foreach ($field in @('source_count','batch_count','lanes_per_batch','frame_bytes','cache_current_bytes','cache_peak_bytes','cache_cap_bytes','cache_eviction_count','peak_sessions','session_cap','peak_source_groups','source_group_cap','peak_lane_actors','lane_actor_cap','idle_release_cycles','final_sessions','final_source_groups','final_live_lane_actors','final_retiring_lane_actors')) {
+        $values[$field] = [int64]$match.Groups[$field].Value
+    }
+    if ($values.source_count -ne 12 -or $values.batch_count -ne 3 -or $values.lanes_per_batch -ne 4 -or $values.frame_bytes -ne 57600 -or $values.cache_cap_bytes -ne 172800 -or $values.cache_current_bytes -ne $values.cache_cap_bytes -or $values.cache_peak_bytes -ne $values.cache_cap_bytes -or $values.cache_eviction_count -lt 9 -or $values.peak_sessions -ne 4 -or $values.session_cap -ne 4 -or $values.peak_source_groups -ne 4 -or $values.source_group_cap -ne 4 -or $values.peak_lane_actors -ne 4 -or $values.lane_actor_cap -lt 4 -or $values.idle_release_cycles -ne 3 -or $values.final_sessions -ne 0 -or $values.final_source_groups -ne 0 -or $values.final_live_lane_actors -ne 0 -or $values.final_retiring_lane_actors -ne 0) {
+        throw "Phase 0 multi-source idle-retirement evidence is outside required bounds: $evidence"
+    }
+}
+
 function Read-ScenarioReport([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Phase 0 child run did not write its report: $Path" }
     $report = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-    if ($report.schema_version -ne 3 -or @('passed', 'failed') -notcontains $report.status -or
-        [int]$report.scenario_count -ne 6 -or @($report.scenarios).Count -ne 6) {
+    if ($report.schema_version -ne 4 -or @('passed', 'failed') -notcontains $report.status -or
+        [int]$report.scenario_count -ne 7 -or @($report.scenarios).Count -ne 7) {
         throw "Phase 0 child report has an unexpected schema, status, or scenario count: $Path"
     }
     foreach ($scenario in @($report.scenarios)) {
@@ -55,6 +72,9 @@ function Read-ScenarioReport([string]$Path) {
             throw "Invalid Phase 0 scenario evidence in child report: $($scenario.name)"
         }
     }
+    $idleRetirement = @($report.scenarios | Where-Object { $_.name -eq 'multi_source_pressure_and_idle_retirement' })
+    if ($idleRetirement.Count -ne 1) { throw 'Phase 0 child report is missing multi-source idle-retirement evidence.' }
+    Test-Phase0MultiSourceIdleRetirementEvidence $idleRetirement[0]
     return $report
 }
 
@@ -207,8 +227,8 @@ try {
     $totals = @($scenarioTotals.Values | Sort-Object name | ForEach-Object {
         [ordered]@{ name = $_.name; run_count = [int64]$_.run_count; passed_run_count = [int64]$_.passed_run_count; iterations = [int64]$_.iterations; elapsed_ms = [Math]::Round([double]$_.elapsed_ms, 3) }
     })
-    if ($null -eq $failure -and ($runs.Count -lt 1 -or $totals.Count -ne 6 -or $matrixStopwatch.Elapsed.TotalSeconds -lt $DurationSeconds)) {
-        $failure = "Sustained matrix ended without the required duration, run, or six-scenario evidence."
+    if ($null -eq $failure -and ($runs.Count -lt 1 -or $totals.Count -ne 7 -or $matrixStopwatch.Elapsed.TotalSeconds -lt $DurationSeconds)) {
+        $failure = "Sustained matrix ended without the required duration, run, or seven-scenario evidence."
     }
     $passed = $null -eq $failure
     $decoderBackends = @($runs | ForEach-Object { $_.scenarios } | ForEach-Object {
