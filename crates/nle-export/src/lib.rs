@@ -242,6 +242,8 @@ struct ClipTransitionPlan {
 }
 
 #[derive(Clone, Debug)]
+// Every variant describes the incoming side of a transition; the prefix keeps call sites explicit.
+#[allow(clippy::enum_variant_names)]
 enum TransitionOpacity {
     /// The existing cross-dissolve envelope begins at the expanded input's local zero.
     IncomingCross(Fade),
@@ -1416,6 +1418,10 @@ fn build_ffmpeg_job_with_title_assets(
         "192k".to_owned(),
         "-movflags".to_owned(),
         "+faststart".to_owned(),
+        // Bound the muxed output explicitly. Input `-t` options alone do not guarantee EOF when
+        // a filter graph contains generated sources or pass-through overlays.
+        "-t".to_owned(),
+        duration,
         "-progress".to_owned(),
         "pipe:1".to_owned(),
         "-nostats".to_owned(),
@@ -1528,14 +1534,16 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: f64, label: &str) -> S
     let angle = transform.rotation_degrees.to_radians();
     // Freeze exactly the first decoded image frame, then bound the generated stream again in
     // the graph. This makes local `T`, fades, and overlay lifetime match the planned clip.
-    let still_prefix = video
-        .is_still
-        .then(|| "select='eq(n\\,0)',loop=loop=-1:size=1:start=0,".to_owned())
-        .unwrap_or_default();
-    let still_trim = video
-        .is_still
-        .then(|| format!(",trim=duration={}", tick_seconds(video.input_duration)))
-        .unwrap_or_default();
+    let still_prefix = if video.is_still {
+        "select='eq(n\\,0)',loop=loop=-1:size=1:start=0,".to_owned()
+    } else {
+        String::new()
+    };
+    let still_trim = if video.is_still {
+        format!(",trim=duration={}", tick_seconds(video.input_duration))
+    } else {
+        String::new()
+    };
     format!(
         "[{input}:v]setpts=PTS-STARTPTS,{still_prefix}fps={fps:.6}{still_trim},crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},format=rgba{color},colorchannelmixer=aa={:.6}{fades}{transition},rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),setpts=PTS+{}/TB[{label}]",
         video.source_size.width as f32 * transform.crop_left,
@@ -1943,9 +1951,11 @@ fn animated_scalar_expression(value: &AnimatedScalar, source_in: Tick, time: &st
 
 fn audio_fade_expression_at(clip: &Clip, time: &str) -> String {
     let fade = combined_fade_expression(clip, time, false);
-    (fade != "1")
-        .then(|| format!(",volume='{fade}':eval=frame"))
-        .unwrap_or_default()
+    if fade != "1" {
+        format!(",volume='{fade}':eval=frame")
+    } else {
+        String::new()
+    }
 }
 
 fn audio_transition_filters(envelopes: &[AudioTransitionEnvelope]) -> String {
@@ -2090,6 +2100,8 @@ fn run_child(
     )
 }
 
+// Keep process, progress, cancellation, and notification ownership explicit at the FFmpeg boundary.
+#[allow(clippy::too_many_arguments)]
 fn run_child_with_encoder(
     ffmpeg: &Path,
     args: &[String],
@@ -2260,6 +2272,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempFiles(Vec<PathBuf>);
+
+    // The project-built FFmpeg may create many internal worker threads. Running every integration
+    // encode concurrently can exhaust Windows process resources and make a tiny finite job spin.
+    // Serialize only these external-process tests; ordinary pure-Rust tests remain parallel.
+    static REAL_FFMPEG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn real_ffmpeg_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        REAL_FFMPEG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     impl Drop for TempFiles {
         fn drop(&mut self) {
@@ -2839,6 +2862,11 @@ mod tests {
         );
         assert!(graph.contains("setpts=PTS+2.000000/TB"), "{graph}");
         assert!(graph.contains("between(t,2.000000,3.500000)"), "{graph}");
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["-t", "3.500000", "-progress"]),
+            "muxed output must be capped to the immutable plan duration: {args:?}"
+        );
     }
 
     #[test]
@@ -3582,6 +3610,7 @@ mod tests {
 
     #[test]
     fn bundled_ffmpeg_accepts_the_supported_audio_rack_contract() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -3648,6 +3677,7 @@ mod tests {
 
     #[test]
     fn audio_rack_uses_shared_cutoff_ceiling_and_zero_width_emits_mono_samples() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let ceiling = audio_effect_filters(&[AudioEffect::HighPass { hz: 96_000 }]).unwrap();
         assert_eq!(ceiling, ",highpass=f=20000:t=q:w=0.707");
 
@@ -3906,6 +3936,7 @@ mod tests {
 
     #[test]
     fn real_bundled_ffmpeg_decodes_alpha_title_assets_at_the_planned_interval() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4051,6 +4082,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_parses_and_runs_the_transformed_layer_graph() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4211,6 +4243,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_freezes_a_still_image_for_its_planned_duration() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4344,6 +4377,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_color_pixels_match_the_encoded_rgb_contract() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4484,6 +4518,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_color_stack_preserves_intermediate_clamps() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4559,6 +4594,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_vignette_darkens_edges_in_stack_order_and_skips_bypass() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4658,6 +4694,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_easing_pixels_match_timeline_evaluation() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4766,6 +4803,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_equal_power_audio_crossfade_keeps_midpoint_energy() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -4943,6 +4981,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_dip_to_black_matte_blacks_out_lower_tracks_without_saved_handles() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -5124,6 +5163,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_cross_dissolve_has_red_purple_blue_timing() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -5274,6 +5314,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_renders_new_transition_families_with_authored_curve() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };
@@ -5399,6 +5440,7 @@ mod tests {
 
     #[test]
     fn real_ffmpeg_preserves_transformed_layer_order_in_output_pixels() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
         let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
             return;
         };

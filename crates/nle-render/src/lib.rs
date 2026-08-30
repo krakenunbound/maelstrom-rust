@@ -329,6 +329,9 @@ impl HubRenderer {
         );
     }
 
+    // Keep the render inputs explicit: labels and load mode are paired with the
+    // pass they describe, and bundling them would obscure the hot-path call sites.
+    #[allow(clippy::too_many_arguments)]
     fn render_with_load(
         &mut self,
         device: &wgpu::Device,
@@ -353,10 +356,10 @@ impl HubRenderer {
             // stalling the interactive render path.
             let _ = device.poll(wgpu::PollType::Poll);
         }
-        if measure_gpu_completion {
-            if let Some(elapsed_nanos) = self.gpu_completion_mailbox.drain_completed() {
-                self.gpu_completion_timing.push(elapsed_nanos);
-            }
+        if measure_gpu_completion
+            && let Some(elapsed_nanos) = self.gpu_completion_mailbox.drain_completed()
+        {
+            self.gpu_completion_timing.push(elapsed_nanos);
         }
         if measure_gpu_completion || compositor_gpu_timing_pending {
             self.renderer

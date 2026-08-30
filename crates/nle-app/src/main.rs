@@ -85,8 +85,11 @@ const AUTO_PREVIEW_SLOW_SAMPLES: u8 = 4;
 const AUTO_PREVIEW_FAST_SAMPLES: u16 = 90;
 const DEFAULT_PLAYBACK_SOAK_SECONDS: u64 = 600;
 const MAX_PLAYBACK_SOAK_SECONDS: u64 = 3_600;
+#[cfg(test)]
 const DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 600;
+#[cfg(test)]
 const MIN_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 15;
+#[cfg(test)]
 const MAX_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 3_600;
 
 fn monitor_cache_bytes_from_args(args: impl IntoIterator<Item = String>) -> usize {
@@ -2679,6 +2682,8 @@ impl PlaybackSoakProbe {
             .is_some_and(|started_at| now.duration_since(started_at) >= self.requested_duration)
     }
 
+    // The report owns one explicit field per independently validated soak signal.
+    #[allow(clippy::too_many_arguments)]
     fn report(
         &self,
         now: Instant,
@@ -3485,6 +3490,8 @@ impl App {
         app
     }
 
+    // Startup notifiers stay separate so each background owner can wake the event loop directly.
+    #[allow(clippy::too_many_arguments)]
     fn new_with_catalog_and_notifier(
         demo_hub: bool,
         catalog_path: Option<PathBuf>,
@@ -3738,10 +3745,10 @@ impl App {
     }
 
     fn try_publish_surface_submission_report(&mut self) {
-        if !self
+        if self
             .surface_submission_probe
             .as_ref()
-            .is_some_and(|probe| probe.completed.is_some())
+            .is_none_or(|probe| probe.completed.is_none())
         {
             return;
         }
@@ -5712,8 +5719,8 @@ impl App {
             requester_identity,
         );
         let mut yielded = false;
-        for layer in 0..MONITOR_LAYER_COUNT {
-            if !selected[layer] {
+        for (layer, selected) in selected.iter().copied().enumerate() {
+            if !selected {
                 continue;
             }
             match self.monitor_decoders[layer].defer_live_sessions() {
@@ -11318,8 +11325,10 @@ mod tests {
                 nle_timeline::Tick(0),
             )
             .unwrap();
-        let mut transform = nle_timeline::ClipTransform::default();
-        transform.rotation_degrees = 12.0;
+        let transform = nle_timeline::ClipTransform {
+            rotation_degrees: 12.0,
+            ..nle_timeline::ClipTransform::default()
+        };
         app.editor
             .timeline
             .set_clip_transform(clip, transform)

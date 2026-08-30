@@ -603,6 +603,8 @@ impl Default for VignetteEffect {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// Effects remain inline so the timeline evaluation path is allocation-free.
+#[allow(clippy::large_enum_variant)]
 pub enum VideoEffectKind {
     BrightnessContrast(BrightnessContrastEffect),
     Vignette(VignetteEffect),
@@ -656,8 +658,10 @@ impl Default for EvaluatedColorCurve {
 
 impl From<&ColorCurve> for EvaluatedColorCurve {
     fn from(curve: &ColorCurve) -> Self {
-        let mut evaluated = Self::default();
-        evaluated.count = curve.points.len().min(MAX_COLOR_CURVE_POINTS) as u8;
+        let mut evaluated = Self {
+            count: curve.points.len().min(MAX_COLOR_CURVE_POINTS) as u8,
+            ..Self::default()
+        };
         evaluated.points[..usize::from(evaluated.count)]
             .copy_from_slice(&curve.points[..usize::from(evaluated.count)]);
         evaluated
@@ -739,6 +743,8 @@ impl Default for EvaluatedVignette {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+// The evaluated effect union is fixed-size and Copy by design for allocation-free frame plans.
+#[allow(clippy::large_enum_variant)]
 pub enum EvaluatedVideoEffect {
     BrightnessContrast(EvaluatedBrightnessContrast),
     Vignette(EvaluatedVignette),
@@ -1619,6 +1625,8 @@ fn timeline_delta(
     )
 }
 
+// Keeping before/after slices explicit prevents hidden full-snapshot ownership in undo capture.
+#[allow(clippy::too_many_arguments)]
 fn timeline_state_delta(
     before_tracks: &[Track],
     before_titles: &[TitleOverlay],
@@ -6464,11 +6472,13 @@ mod tests {
             timeline.clip(clip).unwrap().transform,
             ClipTransform::default()
         );
-        let mut xf = ClipTransform::default();
-        xf.opacity = 0.5;
-        xf.scale_x = 1.5;
-        xf.pos_x = 0.25;
-        xf.flip_h = true;
+        let mut xf = ClipTransform {
+            opacity: 0.5,
+            scale_x: 1.5,
+            pos_x: 0.25,
+            flip_h: true,
+            ..ClipTransform::default()
+        };
         timeline.set_clip_transform(clip, xf).unwrap();
         assert_eq!(timeline.clip(clip).unwrap().transform.opacity, 0.5);
         xf.scale_x = 99.0;
@@ -6521,8 +6531,10 @@ mod tests {
             .set_clip_transform(clip, ClipTransform::default())
             .unwrap();
         assert_eq!(timeline.generation(), generation);
-        let mut changed = ClipTransform::default();
-        changed.rotation_degrees = 30.0;
+        let changed = ClipTransform {
+            rotation_degrees: 30.0,
+            ..ClipTransform::default()
+        };
         timeline.set_clip_transform(clip, changed).unwrap();
         assert_eq!(timeline.generation(), generation + 1);
         timeline.set_clip_transform(clip, changed).unwrap();
@@ -6536,8 +6548,10 @@ mod tests {
         let clip = timeline
             .insert_clip(track, MediaId(1), Tick(0), Tick(10), Tick(0))
             .unwrap();
-        let mut transform = ClipTransform::default();
-        transform.crop_bottom = f32::NAN;
+        let mut transform = ClipTransform {
+            crop_bottom: f32::NAN,
+            ..ClipTransform::default()
+        };
         assert_eq!(
             timeline.set_clip_transform(clip, transform),
             Err(TimelineError::NonFiniteTransform)
@@ -7653,8 +7667,10 @@ mod tests {
         assert_eq!(tight_lut[1][0], 1.0);
         assert_eq!(tight_lut[2][0], 0.0);
 
-        let mut effect = BrightnessContrastEffect::default();
-        effect.curves = curves;
+        let effect = BrightnessContrastEffect {
+            curves,
+            ..BrightnessContrastEffect::default()
+        };
         let mut encoded = serde_json::to_value(effect).unwrap();
         encoded.as_object_mut().unwrap().remove("curves");
         let legacy: BrightnessContrastEffect = serde_json::from_value(encoded).unwrap();
@@ -7820,7 +7836,7 @@ mod tests {
             VideoTransitionKind::DipToBlack
         );
 
-        let mut old = serde_json::to_value(&timeline.snapshot()).unwrap();
+        let mut old = serde_json::to_value(timeline.snapshot()).unwrap();
         old["transitions"][0]
             .as_object_mut()
             .unwrap()

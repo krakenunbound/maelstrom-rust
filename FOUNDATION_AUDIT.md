@@ -1,6 +1,6 @@
 # Blick Foundation Requirement Audit
 
-Audit date: 2026-08-24. Authority: `RUST_NLE_FOUNDATION_PLAN.md` v1.1 plus the
+Audit date: 2026-08-30. Authority: `RUST_NLE_FOUNDATION_PLAN.md` v1.1 plus the
 user-directed splash, Project Hub, bilingual UI, editor, persistence, and packaging behavior.
 
 `Proven` means current source plus a directly covering automated or packaging check supports the
@@ -137,3 +137,16 @@ Every Windows foundation requirement in the v1.1 guide and every hard user-direc
 scope has direct source, automated, packaged, or hands-on evidence above. No required Windows
 foundation item remains open. Product model artifacts, light mode, Linux packaging, effects,
 multiple timelines, and AI features are later product work rather than incomplete foundation work.
+
+The foundation was requalified on 2026-08-30 after the Phase 0 playback work. Workspace tests and
+strict all-target Clippy passed. Release evidence measured 0.472 ms wide-frame, 0.268 ms
+detail-frame, 0.307 ms playhead, and 0.499 ms combined real-H.264/20,002-bar p95 CPU latency; RTX
+3090 timeline GPU execution measured 0.119 ms p95. The fresh package presented in 698.862 ms,
+sustained 149.90 surface submissions/s with 0.993 ms CPU p95, completed native A/V acceptance and
+clean export cancellation, and passed the full-path launcher verification with all 12 adjacent
+runtime DLLs. Packaged `Maelstrom.exe` SHA-256:
+`19859AB6534223B968E236048A7593C9CD4ABFACFD00C3F6CC872A9B842F2348`. The retained local startup,
+surface, and media-acceptance report SHA-256 values are respectively
+`98DF6D247E75CEF41D3EFFD689552554A2FC083F1316FB454F022EE18EB18676`,
+`902CEE1A2B5042BDB99215575BBCB5AB7F1A904469B288E1F15B44BD43C8DC87`, and
+`5022F8778A16D5E0F582B06A0AD355273DB9A18C2CD67CF9342A4404E8D5535F`.

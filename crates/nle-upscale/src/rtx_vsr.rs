@@ -320,63 +320,85 @@ impl Session {
 
     unsafe fn alloc_gpu(&mut self) -> Result<(), String> {
         self.api.check(
-            (self.api.image_alloc)(
-                &mut self.input_gpu,
-                self.src_width,
-                self.src_height,
-                NVCV_RGBA,
-                NVCV_U8,
-                NVCV_CHUNKY,
-                NVCV_GPU,
-                GPU_ROW_ALIGNMENT,
-            ),
+            // SAFETY: dimensions and image storage belong to this session; the loaded API
+            // function is retained by `self.api` for the allocation's lifetime.
+            unsafe {
+                (self.api.image_alloc)(
+                    &mut self.input_gpu,
+                    self.src_width,
+                    self.src_height,
+                    NVCV_RGBA,
+                    NVCV_U8,
+                    NVCV_CHUNKY,
+                    NVCV_GPU,
+                    GPU_ROW_ALIGNMENT,
+                )
+            },
             "allocating RTX VSR input on the GPU",
         )?;
         self.api.check(
-            (self.api.image_alloc)(
-                &mut self.output_gpu,
-                self.plan.vsr_width,
-                self.plan.vsr_height,
-                NVCV_RGBA,
-                NVCV_U8,
-                NVCV_CHUNKY,
-                NVCV_GPU,
-                GPU_ROW_ALIGNMENT,
-            ),
+            // SAFETY: output dimensions and storage are session-owned and valid for the FFI call.
+            unsafe {
+                (self.api.image_alloc)(
+                    &mut self.output_gpu,
+                    self.plan.vsr_width,
+                    self.plan.vsr_height,
+                    NVCV_RGBA,
+                    NVCV_U8,
+                    NVCV_CHUNKY,
+                    NVCV_GPU,
+                    GPU_ROW_ALIGNMENT,
+                )
+            },
             "allocating RTX VSR output on the GPU",
         )
     }
 
     unsafe fn create_effect(&mut self) -> Result<(), String> {
         self.api.check(
-            (self.api.create_effect)(c"VideoSuperRes".as_ptr(), &mut self.effect),
+            // SAFETY: the effect name is NUL-terminated and `self.effect` is writable.
+            unsafe { (self.api.create_effect)(c"VideoSuperRes".as_ptr(), &mut self.effect) },
             "creating NVIDIA VideoSuperRes",
         )?;
         let result = (|| {
             self.api.check(
-                (self.api.set_u32)(self.effect, c"QualityLevel".as_ptr(), self.quality as u32),
+                // SAFETY: `self.effect` was created above and the property name is NUL-terminated.
+                unsafe {
+                    (self.api.set_u32)(self.effect, c"QualityLevel".as_ptr(), self.quality as u32)
+                },
                 "setting RTX VSR quality",
             )?;
             let _ = self.temporal;
             self.api.check(
-                (self.api.set_image)(self.effect, c"SrcImage0".as_ptr(), &mut self.input_gpu),
+                // SAFETY: the created effect accepts the initialized session input image.
+                unsafe {
+                    (self.api.set_image)(self.effect, c"SrcImage0".as_ptr(), &mut self.input_gpu)
+                },
                 "setting RTX VSR input",
             )?;
             self.api.check(
-                (self.api.set_image)(self.effect, c"DstImage0".as_ptr(), &mut self.output_gpu),
+                // SAFETY: the created effect accepts the initialized session output image.
+                unsafe {
+                    (self.api.set_image)(self.effect, c"DstImage0".as_ptr(), &mut self.output_gpu)
+                },
                 "setting RTX VSR output",
             )?;
             self.api.check(
-                (self.api.set_stream)(self.effect, c"CudaStream".as_ptr(), std::ptr::null_mut()),
+                // SAFETY: a null stream selects the API's default CUDA stream.
+                unsafe {
+                    (self.api.set_stream)(self.effect, c"CudaStream".as_ptr(), std::ptr::null_mut())
+                },
                 "setting RTX VSR CUDA stream",
             )?;
             self.api.check(
-                (self.api.load_effect)(self.effect),
+                // SAFETY: the effect and all required properties were initialized above.
+                unsafe { (self.api.load_effect)(self.effect) },
                 "loading NVIDIA VideoSuperRes",
             )
         })();
         if result.is_err() {
-            self.destroy_effect();
+            // SAFETY: this function owns the effect handle and is its sole destroyer.
+            unsafe { self.destroy_effect() };
         }
         result
     }
@@ -388,58 +410,71 @@ impl Session {
         let mut input_cpu = NvCvImage::default();
         let mut output_cpu = NvCvImage::default();
         self.api.check(
-            (self.api.image_init)(
-                &mut input_cpu,
-                source.width,
-                source.height,
-                (source.width * 4) as c_int,
-                input_rgba.as_mut_ptr().cast(),
-                NVCV_RGBA,
-                NVCV_U8,
-                NVCV_CHUNKY,
-                NVCV_CPU,
-            ),
+            // SAFETY: `input_rgba` remains allocated and has one tightly packed RGBA row per source row.
+            unsafe {
+                (self.api.image_init)(
+                    &mut input_cpu,
+                    source.width,
+                    source.height,
+                    (source.width * 4) as c_int,
+                    input_rgba.as_mut_ptr().cast(),
+                    NVCV_RGBA,
+                    NVCV_U8,
+                    NVCV_CHUNKY,
+                    NVCV_CPU,
+                )
+            },
             "initializing RTX VSR input",
         )?;
         self.api.check(
-            (self.api.image_init)(
-                &mut output_cpu,
-                self.plan.vsr_width,
-                self.plan.vsr_height,
-                (self.plan.vsr_width * 4) as c_int,
-                output_rgba.as_mut_ptr().cast(),
-                NVCV_RGBA,
-                NVCV_U8,
-                NVCV_CHUNKY,
-                NVCV_CPU,
-            ),
+            // SAFETY: `output_rgba` remains allocated and has sufficient tightly packed RGBA storage.
+            unsafe {
+                (self.api.image_init)(
+                    &mut output_cpu,
+                    self.plan.vsr_width,
+                    self.plan.vsr_height,
+                    (self.plan.vsr_width * 4) as c_int,
+                    output_rgba.as_mut_ptr().cast(),
+                    NVCV_RGBA,
+                    NVCV_U8,
+                    NVCV_CHUNKY,
+                    NVCV_CPU,
+                )
+            },
             "initializing RTX VSR output",
         )?;
         self.api.check(
-            (self.api.image_transfer)(
-                &input_cpu,
-                &mut self.input_gpu,
-                1.0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ),
+            // SAFETY: both images are initialized for the current frame and null selects default stream/event.
+            unsafe {
+                (self.api.image_transfer)(
+                    &input_cpu,
+                    &mut self.input_gpu,
+                    1.0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
             "uploading RTX VSR input",
         )?;
         self.api.check(
-            (self.api.run_effect)(self.effect, 0),
+            // SAFETY: the loaded effect references the live session GPU images.
+            unsafe { (self.api.run_effect)(self.effect, 0) },
             &format!(
                 "running NVIDIA VideoSuperRes {}×{} → {}×{}",
                 source.width, source.height, self.plan.vsr_width, self.plan.vsr_height
             ),
         )?;
         self.api.check(
-            (self.api.image_transfer)(
-                &self.output_gpu,
-                &mut output_cpu,
-                1.0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ),
+            // SAFETY: both images are initialized for the current frame and null selects default stream/event.
+            unsafe {
+                (self.api.image_transfer)(
+                    &self.output_gpu,
+                    &mut output_cpu,
+                    1.0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
             "downloading RTX VSR output",
         )?;
         unpack_rgba8(&output_rgba, self.plan.vsr_width, self.plan.vsr_height)
@@ -464,18 +499,21 @@ impl Session {
 
     unsafe fn dealloc_gpu(&mut self) {
         if !self.input_gpu.delete_ptr.is_null() {
-            (self.api.image_dealloc)(&mut self.input_gpu);
+            // SAFETY: this session owns the initialized GPU image and deallocates it once.
+            unsafe { (self.api.image_dealloc)(&mut self.input_gpu) };
             self.input_gpu = NvCvImage::default();
         }
         if !self.output_gpu.delete_ptr.is_null() {
-            (self.api.image_dealloc)(&mut self.output_gpu);
+            // SAFETY: this session owns the initialized GPU image and deallocates it once.
+            unsafe { (self.api.image_dealloc)(&mut self.output_gpu) };
             self.output_gpu = NvCvImage::default();
         }
     }
 
     unsafe fn destroy_effect(&mut self) {
         if !self.effect.is_null() {
-            (self.api.destroy_effect)(self.effect);
+            // SAFETY: this session owns the live effect handle and destroys it once.
+            unsafe { (self.api.destroy_effect)(self.effect) };
             self.effect = std::ptr::null_mut();
         }
     }
@@ -488,10 +526,6 @@ impl Drop for Session {
             self.dealloc_gpu();
         }
     }
-}
-
-fn align_down(value: f64) -> u32 {
-    align_to_down(value, ALIGNMENT)
 }
 
 fn align_to_down(value: f64, alignment: u32) -> u32 {
@@ -762,7 +796,9 @@ impl Api {
         let mut libraries = Vec::new();
         for name in DLLS {
             libraries.push(
-                Library::new(runtime.join(name))
+                // SAFETY: the runtime directory is caller-selected and every `Library` is
+                // retained in the returned `Api` for all resolved symbol lifetimes.
+                unsafe { Library::new(runtime.join(name)) }
                     .map_err(|error| format!("loading NVIDIA RTX VSR {name}: {error}"))?,
             );
         }
@@ -843,8 +879,14 @@ mod tests {
             .filter(|name| !workspace_runtime.join(name).is_file())
             .copied()
             .collect();
-        assert!(missing.is_empty(), "incomplete local RTX VSR runtime: {missing:?}");
-        assert!(available(), "complete local RTX VSR runtime was not discovered");
+        assert!(
+            missing.is_empty(),
+            "incomplete local RTX VSR runtime: {missing:?}"
+        );
+        assert!(
+            available(),
+            "complete local RTX VSR runtime was not discovered"
+        );
     }
 
     #[test]
@@ -884,7 +926,10 @@ mod tests {
         let plan = plan_output(4096, 4096, 16_384, 16_384).expect("16K hybrid");
         assert_eq!((plan.vsr_width, plan.vsr_height), (15_360, 15_360));
         assert!(plan.uses_hybrid());
-        assert_eq!(align_down(9_216.0 * 15_360.0 / 16_384.0), 8_640);
+        assert_eq!(
+            align_to_down(9_216.0 * 15_360.0 / 16_384.0, ALIGNMENT),
+            8_640
+        );
     }
 
     #[test]

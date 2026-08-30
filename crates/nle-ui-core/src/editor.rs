@@ -571,6 +571,9 @@ fn gcd_u64(mut left: u64, mut right: u64) -> u64 {
 
 /// The direction an incoming transition layer is revealed in monitor space.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// These public directional names are used throughout transition rendering; retain them to avoid
+// changing the established transition-facing API.
+#[allow(clippy::enum_variant_names)]
 pub enum TransitionReveal {
     FromLeft,
     FromRight,
@@ -2798,17 +2801,17 @@ impl EditorState {
                     let target = cut.and_then(|cut| {
                         if self.playhead < cut {
                             let half = transition.duration.0 / 2;
-                            let opacity = (half > 0)
-                                .then(|| {
-                                    fade_envelope_value(
-                                        Fade {
-                                            duration: Tick(half),
-                                            curve: transition.curve,
-                                        },
-                                        cut.0.saturating_sub(self.playhead.0) as f32 / half as f32,
-                                    )
-                                })
-                                .unwrap_or(0.0);
+                            let opacity = if half > 0 {
+                                fade_envelope_value(
+                                    Fade {
+                                        duration: Tick(half),
+                                        curve: transition.curve,
+                                    },
+                                    cut.0.saturating_sub(self.playhead.0) as f32 / half as f32,
+                                )
+                            } else {
+                                0.0
+                            };
                             self.timeline
                                 .clip(transition.left_clip)
                                 .and_then(|clip| {
@@ -2823,17 +2826,17 @@ impl EditorState {
                                 })
                         } else {
                             let half = transition.duration.0 - transition.duration.0 / 2;
-                            let opacity = (half > 0)
-                                .then(|| {
-                                    fade_envelope_value(
-                                        Fade {
-                                            duration: Tick(half),
-                                            curve: transition.curve,
-                                        },
-                                        self.playhead.0.saturating_sub(cut.0) as f32 / half as f32,
-                                    )
-                                })
-                                .unwrap_or(0.0);
+                            let opacity = if half > 0 {
+                                fade_envelope_value(
+                                    Fade {
+                                        duration: Tick(half),
+                                        curve: transition.curve,
+                                    },
+                                    self.playhead.0.saturating_sub(cut.0) as f32 / half as f32,
+                                )
+                            } else {
+                                0.0
+                            };
                             self.timeline
                                 .clip(transition.right_clip)
                                 .and_then(|clip| {
@@ -6745,8 +6748,10 @@ fn paint_composite_quad(
     content_uv: Rect,
     quad: nle_compositor::CompositeQuad,
 ) {
-    let mut mesh = egui::Mesh::default();
-    mesh.texture_id = frame.texture;
+    let mut mesh = egui::Mesh {
+        texture_id: frame.texture,
+        ..Default::default()
+    };
     let tint = Color32::from_white_alpha((quad.opacity * 255.0).round() as u8);
     for (position, uv) in quad.positions.into_iter().zip(quad.uvs) {
         let screen = Pos2::new(
@@ -8646,7 +8651,7 @@ fn video_transition_inspector(ui: &mut Ui, state: &mut EditorState, clip: &Clip,
                 let duration_response = ui.add(
                     egui::Slider::new(&mut duration, minimum..=capacity)
                         .text(t(state.language, "Duration", "長さ"))
-                        .custom_formatter(&|value, _| format!("{:.2} s", value / 1_000_000.0)),
+                        .custom_formatter(|value, _| format!("{:.2} s", value / 1_000_000.0)),
                 );
                 mixer_live_edit(state, &duration_response, |timeline| {
                     let mut replacement = transition.clone();
@@ -11444,37 +11449,33 @@ fn timeline_with_canvas_presentation(
                     show_handles: selected || hovered,
                 },
             );
-            if selected && track.kind == TrackKind::Video {
-                if let Some(effect_id) = active_color_effect_for_clip(state, clip)
-                    && let Some(node) = clip.video_effects.iter().find(|node| node.id == effect_id)
-                {
-                    color_keyframe_overlay = Some((clip_rect, clip.id, effect_id));
-                    if let Some(point) =
-                        hover_pointer.filter(|point| track_viewport.contains(*point))
-                    {
-                        hit_color_keyframe = color_keyframe_hit(
-                            clip_rect,
-                            content,
-                            view_start,
-                            visible_ticks,
-                            clip,
-                            node,
-                            point,
-                        );
-                    }
-                    if let Some(point) =
-                        press_origin.filter(|point| track_viewport.contains(*point))
-                    {
-                        press_color_keyframe = color_keyframe_hit(
-                            clip_rect,
-                            content,
-                            view_start,
-                            visible_ticks,
-                            clip,
-                            node,
-                            point,
-                        );
-                    }
+            if selected
+                && track.kind == TrackKind::Video
+                && let Some(effect_id) = active_color_effect_for_clip(state, clip)
+                && let Some(node) = clip.video_effects.iter().find(|node| node.id == effect_id)
+            {
+                color_keyframe_overlay = Some((clip_rect, clip.id, effect_id));
+                if let Some(point) = hover_pointer.filter(|point| track_viewport.contains(*point)) {
+                    hit_color_keyframe = color_keyframe_hit(
+                        clip_rect,
+                        content,
+                        view_start,
+                        visible_ticks,
+                        clip,
+                        node,
+                        point,
+                    );
+                }
+                if let Some(point) = press_origin.filter(|point| track_viewport.contains(*point)) {
+                    press_color_keyframe = color_keyframe_hit(
+                        clip_rect,
+                        content,
+                        view_start,
+                        visible_ticks,
+                        clip,
+                        node,
+                        point,
+                    );
                 }
             }
             if let Some(point) = hover_pointer.filter(|point| track_viewport.contains(*point))
@@ -12565,12 +12566,12 @@ fn timeline_with_canvas_presentation(
     }
     if response.secondary_clicked() {
         state.timeline_context_clip = hit_clip.map(|(_, clip_id)| clip_id);
-        if let Some(clip_id) = state.timeline_context_clip {
-            if state.selected_timeline_clip != Some(clip_id) || state.selected_title.is_some() {
-                state.selected_timeline_clip = Some(clip_id);
-                state.selected_title = None;
-                state.mark_durable_edit();
-            }
+        if let Some(clip_id) = state.timeline_context_clip
+            && (state.selected_timeline_clip != Some(clip_id) || state.selected_title.is_some())
+        {
+            state.selected_timeline_clip = Some(clip_id);
+            state.selected_title = None;
+            state.mark_durable_edit();
         }
     }
     response.context_menu(|ui| {
@@ -20898,8 +20899,10 @@ mod tests {
             .unwrap();
         assert_eq!(editor.quick_export_block_message(), None);
 
-        let mut transform = nle_timeline::ClipTransform::default();
-        transform.rotation_degrees = 15.0;
+        let transform = nle_timeline::ClipTransform {
+            rotation_degrees: 15.0,
+            ..nle_timeline::ClipTransform::default()
+        };
         editor.timeline.set_clip_transform(base, transform).unwrap();
         assert_eq!(editor.quick_export_block_message(), None);
 

@@ -914,9 +914,7 @@ pub fn analyze_frame_timing_cancellable(
     drop(chunks);
     let stdout_result = join_stream_stdout(stdout_worker);
     let stderr = join_stderr(stderr_worker);
-    if let Err(error) = scan {
-        return Err(error);
-    }
+    scan?;
     if let Err(source) = stdout_result {
         return Err(frame_timing_error(path, source.to_string()));
     }
@@ -969,10 +967,8 @@ fn parse_packet_pts_line(line: &[u8]) -> Result<Option<i64>, String> {
         let Some((key, value)) = field.split_once('=') else {
             return Err("FFprobe emitted malformed compact packet timing output".to_owned());
         };
-        if key == "pts_time" {
-            if pts_time.replace(value).is_some() {
-                return Err("FFprobe emitted duplicate pts_time fields".to_owned());
-            }
+        if key == "pts_time" && pts_time.replace(value).is_some() {
+            return Err("FFprobe emitted duplicate pts_time fields".to_owned());
         }
     }
     parse_pts_microseconds(
@@ -1184,7 +1180,11 @@ fn parse_nonnegative_f64(value: Option<&str>) -> Option<f64> {
 fn parse_frame_rate(value: Option<&str>) -> Option<f64> {
     let ratio = parse_frame_rate_ratio(value)?;
     let rate = ratio.numerator as f64 / ratio.denominator as f64;
-    (rate.is_finite() && rate > 0.0).then_some(rate)
+    if rate.is_finite() && rate > 0.0 {
+        Some(rate)
+    } else {
+        None
+    }
 }
 
 fn parse_frame_rate_ratio(value: Option<&str>) -> Option<FrameRate> {
@@ -1617,8 +1617,7 @@ mod tests {
 
     #[test]
     fn timing_point_retention_stops_at_the_hard_cap() {
-        let mut pts = Vec::with_capacity(MAX_FRAME_TIMING_POINTS);
-        pts.resize(MAX_FRAME_TIMING_POINTS, 0);
+        let mut pts = vec![0; MAX_FRAME_TIMING_POINTS];
         assert!(retain_frame_timing_point(&mut pts, 1).is_err());
         assert_eq!(pts.len(), MAX_FRAME_TIMING_POINTS);
     }

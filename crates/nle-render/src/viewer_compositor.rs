@@ -817,8 +817,8 @@ impl ViewerCompositorRenderer {
         pass.draw(0..VERTICES_PER_LAYER as u32, 0..1);
         pass.set_pipeline(&self.compose_pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        for layer in 0..MAX_COMPOSITE_LAYERS {
-            if layer_count[layer] == 0 {
+        for (layer, &count) in layer_count.iter().enumerate() {
+            if count == 0 {
                 pass.set_pipeline(&self.matte_pipeline);
                 pass.set_vertex_buffer(0, self.matte_vertex_buffer.slice(..));
                 pass.draw(
@@ -832,7 +832,7 @@ impl ViewerCompositorRenderer {
             let texture = self.layers[layer].as_ref().expect("checked layer texture");
             pass.set_bind_group(0, &texture.bind_group, &[]);
             let start = (layer * VERTICES_PER_LAYER) as u32;
-            pass.draw(start..start + layer_count[layer], 0..1);
+            pass.draw(start..start + count, 0..1);
             pass.set_pipeline(&self.matte_pipeline);
             pass.set_vertex_buffer(0, self.matte_vertex_buffer.slice(..));
             pass.draw(

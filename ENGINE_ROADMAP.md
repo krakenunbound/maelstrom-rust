@@ -145,7 +145,16 @@ Exit gate:
       NVIDIA RTX 3090 `DiscreteGpu` explicitly, rejected adapter-class fallback, and passed all
       schema, CPU, cadence, media, audio, GPU, runtime-counter, and cancelled-export checks. It does
       not prove DWM composition or physical scanout.
-- [ ] Existing foundation gates remain green.
+- [x] Existing foundation gates remain green.
+      Requalified on 2026-08-30 against the exact Windows package. Workspace tests and strict
+      all-target Clippy passed; the release 50,000-bar editor measured 0.472 ms wide-frame p95,
+      0.268 ms detail-frame p95, and 0.307 ms playhead p95. The combined real H.264 plus 20,002-bar
+      gate measured 0.499 ms input-to-visual p95, and the RTX 3090 timeline shader gate measured
+      0.119 ms p95. The package presented its first surface in 698.862 ms, sustained 149.90 surface
+      submissions/s with 0.993 ms CPU p95, completed native A/V acceptance and clean export
+      cancellation, and passed the full-path launcher check with all 12 adjacent runtime DLLs.
+      Packaged `Maelstrom.exe` SHA-256:
+      `19859AB6534223B968E236048A7593C9CD4ABFACFD00C3F6CC872A9B842F2348`.
 - [ ] A failing codec, driver, or stage is identifiable from one report without guessing.
 
 The report's CPU boundaries do not prove GPU completion or scanout. Its optional pass timestamps

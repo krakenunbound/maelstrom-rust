@@ -1,7 +1,7 @@
 //! Decode → RTX VSR → encode. Isolated from playback, same contract as nle-export.
 
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -300,9 +300,8 @@ fn upscale_video(
         request.quality,
         true,
     )
-    .map_err(|error| {
+    .inspect_err(|_| {
         teardown(&mut decoder, &mut encoder);
-        error
     })?;
 
     let frame_bytes = probe.width as usize * probe.height as usize * 3;

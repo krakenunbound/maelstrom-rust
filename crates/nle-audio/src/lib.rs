@@ -73,7 +73,7 @@ impl AtomicAudioCpuTiming {
     fn snapshot(&self) -> AudioCallbackCpuTiming {
         loop {
             let sequence_before = self.sequence.load(Ordering::Acquire);
-            if sequence_before % 2 != 0 {
+            if !sequence_before.is_multiple_of(2) {
                 std::hint::spin_loop();
                 continue;
             }
@@ -218,11 +218,11 @@ struct Biquad {
 
 impl Biquad {
     fn from_coefficients(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Self {
-        let normalizer = a0
-            .is_finite()
-            .then_some(a0)
-            .filter(|value| value.abs() > f32::EPSILON)
-            .unwrap_or(1.0);
+        let normalizer = if a0.is_finite() && a0.abs() > f32::EPSILON {
+            a0
+        } else {
+            1.0
+        };
         Self {
             b0: b0 / normalizer,
             b1: b1 / normalizer,
@@ -274,14 +274,14 @@ impl Biquad {
     }
 
     fn process(&mut self, input: f32) -> f32 {
-        let input = input.is_finite().then_some(input).unwrap_or_default();
+        let input = if input.is_finite() { input } else { 0.0 };
         let output = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = input;
         self.y2 = self.y1;
-        self.y1 = output.is_finite().then_some(output).unwrap_or_default();
+        self.y1 = if output.is_finite() { output } else { 0.0 };
         self.y1
     }
 }
@@ -290,7 +290,7 @@ fn filter_terms(hz: u32, sample_rate: u32, q: f32) -> (f32, f32) {
     let nyquist = sample_rate.max(2) as f32 * 0.5;
     // Keep the native processor aligned with the timeline/export 20 kHz
     // contract while retaining a final Nyquist guard for unusual devices.
-    let frequency = (hz as f32).clamp(1.0, (nyquist * 0.98).min(20_000.0).max(1.0));
+    let frequency = (hz as f32).clamp(1.0, (nyquist * 0.98).clamp(1.0, 20_000.0));
     let omega = std::f32::consts::TAU * frequency / sample_rate.max(2) as f32;
     let sine = omega.sin();
     (omega.cos(), sine / (2.0 * q.max(0.001)))
@@ -326,10 +326,11 @@ impl LaneProcessor {
                 }
             }
             AudioProcessorSpec::StereoWidth { width } => Self::StereoWidth {
-                width: width
-                    .is_finite()
-                    .then_some(width.clamp(0.0, 2.0))
-                    .unwrap_or(1.0),
+                width: if width.is_finite() {
+                    width.clamp(0.0, 2.0)
+                } else {
+                    1.0
+                },
             },
         }
     }
@@ -492,13 +493,16 @@ impl Shared {
             }
         }
         (
-            left.is_finite()
-                .then_some(left.clamp(-1.0, 1.0))
-                .unwrap_or_default(),
-            right
-                .is_finite()
-                .then_some(right.clamp(-1.0, 1.0))
-                .unwrap_or_default(),
+            if left.is_finite() {
+                left.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            },
+            if right.is_finite() {
+                right.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            },
             audible,
         )
     }

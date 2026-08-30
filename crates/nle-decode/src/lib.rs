@@ -1448,12 +1448,11 @@ impl MonitorDecoder {
                 .lock()
                 .expect("coordinator deferred request lock")
                 .clone();
-            if let Some(request) = request {
-                if let Err(error) =
+            if let Some(request) = request
+                && let Err(error) =
                     self.send_request_to(index, request.request, request.speculative)
-                {
-                    deferred = Some(error);
-                }
+            {
+                deferred = Some(error);
             }
         }
         deferred.map_or(Ok(()), Err)
@@ -2044,6 +2043,9 @@ impl MonitorFrameCache {
     }
 }
 
+// These arguments are deliberately separate shared runtime lanes. Grouping them would obscure
+// ownership and add indirection on the monitor worker path.
+#[allow(clippy::too_many_arguments)]
 fn monitor_scheduler_loop(
     wake: Receiver<()>,
     commands: Arc<Mutex<Option<MonitorCommand>>>,
@@ -2388,6 +2390,8 @@ fn same_decode_generation(left: &DecodeRequest, right: &DecodeRequest) -> bool {
         && left.acceleration == right.acceleration
 }
 
+// Keep the decode hot-path dependencies explicit instead of allocating a per-request context.
+#[allow(clippy::too_many_arguments)]
 fn decode_monitor_request(
     sessions: &mut HashMap<u32, StickyMonitor>,
     frame_cache: &Arc<Mutex<MonitorFrameCache>>,
@@ -2605,6 +2609,8 @@ fn decode_with_session(
     )
 }
 
+// Fallback must retain the exact callbacks and session ownership used by the failed request.
+#[allow(clippy::too_many_arguments)]
 fn recover_hardware_decode_failure(
     sessions: &mut HashMap<u32, StickyMonitor>,
     request: &DecodeRequest,
@@ -3117,6 +3123,8 @@ impl StickyMonitor {
     }
 }
 
+// The retained scaler state is split into fields so a frame pack never allocates a context.
+#[allow(clippy::too_many_arguments)]
 fn pack_decoded_monitor_frame(
     scaler: &mut Option<ScalingContext>,
     scaler_input: &mut Option<(Pixel, u32, u32)>,
@@ -3463,6 +3471,8 @@ unsafe extern "C" fn select_videotoolbox_format(
     ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
 }
 
+// The retained scaler state is passed explicitly to keep reuse and timing boundaries visible.
+#[allow(clippy::too_many_arguments)]
 fn scale_monitor_frame(
     scaler: &mut Option<ScalingContext>,
     scaler_input: &mut Option<(Pixel, u32, u32)>,
