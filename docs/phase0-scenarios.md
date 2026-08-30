@@ -65,7 +65,7 @@ The orchestrator never launches the GUI or a raw generated executable. It calls
 the existing Cargo-backed scenario runner, performs the fixture generation and
 manifest gate on the first pass, then reuses that validated fixture for later
 passes. Both scripts anchor Cargo to the repository, so the full-path command is
-independent of the caller's current directory. The schema-version 1 report is written atomically under
+independent of the caller's current directory. The schema-version 2 report is written atomically under
 `artifacts/phase0-sustained-scenarios/` and contains requested duration, separate
 setup and matrix wall durations, authoritative status, machine and pinned-FFmpeg
 evidence, every child run and its seven scenario records, aggregate per-scenario
@@ -73,20 +73,25 @@ run/work-iteration and elapsed-time totals, and any available failed-child
 scenario evidence. A user-local cross-process mutex serializes the shared fixture
 and cancellation artifacts.
 
+Schema 2 embeds `source_revision` snapshots from before and after the matrix: the absolute Git
+executable, exact commits, tracked/submodule dirtiness while ignoring untracked-only content,
+commit stability, qualification, and a bounded nullable capture error. A 600-second request fails
+before the matrix if its start state is unavailable or tracked-dirty, and fails at publication if
+the commit or tracked state changes. Short dirty-tree harness checks may pass but remain explicitly
+non-authoritative.
+
 This gate supplies repeated reverse-scrub, project-switch, offline/recovery,
 three forms of cache/idle-retirement pressure, and export-cancellation evidence in one report. It
 does not display the UI, exercise a live audio device, measure physical GPU
 scanout, replace the packaged playback soak, or satisfy the integrated/discrete
 cross-hardware exit gate by itself.
 
-The retained authoritative local schema-4 checkpoint on 2026-08-30 ran from source
-commit `266309f595baf6aedbe15c30dcc1c99d05fe281e`. It passed for 600.436 seconds,
-excluding 1.348 seconds of setup, with 520 complete matrix runs, 3,640 scenario
-executions, and 19,240 declared work iterations. Every scenario passed all 520
+The retained authoritative local schema-2 wrapper over the schema-4 matrix on 2026-08-30 embeds
+identical clean start/end source commit `99d43d65d87474f71b83361cec5d5f79a69e4532`.
+It passed for 600.673 seconds, excluding 1.133 seconds of setup, with 521 complete matrix runs,
+3,647 scenario executions, and 19,277 declared work iterations. Every scenario passed all 521
 runs; all child reports had unique SHA-256 values and no invocation/report-read
 failure. The Software decoder and `h264_mf` encoder appeared only in their
 separate nullable role fields. The report recorded `authoritative: true` with
-SHA-256 `ca531cbe16f5ccfc2d8085efdc30cbb674bba911d9505cfba2f39054b6d8b05f`.
-The schema-1 wrapper does not yet embed a Git revision; the source commit above was captured from
-the unchanged tracked `HEAD` immediately before starting the tracked runner session.
+SHA-256 `bef925939b118aaf7d9c1339cbd6e0cfca1c084b0e7b57a46d24971f0ba1e5d6`.
 Integrated/discrete cross-hardware proof remains open.

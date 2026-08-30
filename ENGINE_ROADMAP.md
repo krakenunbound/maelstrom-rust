@@ -109,13 +109,16 @@ Build the evidence harness before adding engine complexity.
       `docs/phase0-scenarios.md` and `docs/performance-reports.md`. A separate timed Phase 0
       orchestrator now repeatedly executes the full seven-scenario native matrix and writes one
       versioned report with all available child evidence, aggregate scenario totals, machine/FFmpeg
-      identity, and preserved failure details. Runs below 600 seconds are harness checks only. The
-      retained authoritative local schema-4 run on 2026-08-30 passed from source commit `266309f`
-      for 600.436 seconds, excluding 1.348 seconds of setup, with 520 complete seven-scenario runs,
-      3,640 scenario executions, and 19,240 declared work iterations. Every child report had a
-      unique SHA-256 and passed; the Software decoder and `h264_mf` encoder were recorded only in
-      their separate nullable role fields. The retained report SHA-256 is
-      `ca531cbe16f5ccfc2d8085efdc30cbb674bba911d9505cfba2f39054b6d8b05f`.
+      identity, source revision, and preserved failure details. Schema 2 requires identical clean
+      tracked start/end commits for authoritative status and fails a dirty/unavailable 600-second
+      request before the matrix. Runs below 600 seconds are harness checks only. The retained
+      authoritative local schema-2 wrapper over the schema-4 matrix on 2026-08-30 embeds clean
+      commit `99d43d65d87474f71b83361cec5d5f79a69e4532` and passed for 600.673 seconds,
+      excluding 1.133 seconds of setup, with 521 complete seven-scenario runs, 3,647 scenario
+      executions, and 19,277 declared work iterations. Every child report had a unique SHA-256 and
+      passed; the Software decoder and `h264_mf` encoder were recorded only in their separate
+      nullable role fields. The retained report SHA-256 is
+      `bef925939b118aaf7d9c1339cbd6e0cfca1c084b0e7b57a46d24971f0ba1e5d6`.
       Cross-hardware proof remains open.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
