@@ -328,6 +328,17 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       renders source identities `40/110/150/150 ms` at both 30 and 30000/1001 project rates, proving
       preview/export trim-slip identity and the exclusive out-point. This remains open pending broad
       real-media/cross-backend proof across more codecs, reorder patterns, and containers.
+- [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX
+      fixture exposed BT.709 frames being interpreted as BT.601 (4,644 differing RGBA bytes in a
+      64x48 frame, maximum channel error 41). The corrected software path passes exact independent
+      CLI comparisons; transferred hardware frames use the original frame's color metadata, with
+      actual hardware parity still unqualified. Retained-scaler matrix/range changes, untagged
+      defaults, YUVJ full range, and RGB/alpha preservation are covered. Generated ProRes/DNxHR
+      10-bit shifted-VFR MOV plus supplied HEVC Main 10 pass 57 exact frame/seek comparisons.
+      Both MOV fixtures also pass app analysis and local preview boundary/hold checks. 743 release
+      tests, strict Clippy, seven fixture contracts, and seven Phase 0 scenarios pass locally.
+      This does not close broad codec/hardware, HDR, or preview/export color parity gates.
+      See `docs/codec-color-qualification.md`.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for

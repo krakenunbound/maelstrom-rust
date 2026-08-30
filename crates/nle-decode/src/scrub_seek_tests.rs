@@ -1,6 +1,7 @@
 use super::*;
 use std::{
     fs,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -109,6 +110,363 @@ fn reordered_scrub_seek_media() -> GeneratedFixture {
         "FFmpeg did not create reordered scrub seek fixture"
     );
     fixture
+}
+
+fn real_codec_vfr_media(label: &str, codec_arguments: &[&str]) -> GeneratedFixture {
+    let fixture = generated_fixture_path(label, "mov");
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=24",
+        "-vf",
+        "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)',setpts=PTS+7/TB",
+        "-frames:v",
+        "8",
+        "-fps_mode",
+        "vfr",
+        "-an",
+    ]);
+    command.args(codec_arguments);
+    let status = command
+        .args([
+            "-fflags",
+            "+bitexact",
+            "-flags:v",
+            "+bitexact",
+            "-map_metadata",
+            "-1",
+        ])
+        .arg(&fixture.path)
+        .status()
+        .expect("start real-codec VFR FFmpeg fixture");
+    assert!(
+        status.success(),
+        "FFmpeg did not create {label} real-codec VFR fixture"
+    );
+    fixture
+}
+
+struct CliSequentialReference {
+    stream_origin: i64,
+    timestamps: Vec<i64>,
+    rgba: Vec<Arc<[u8]>>,
+}
+
+fn ffprobe_stream_properties(path: &Path) -> Vec<String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,profile,nb_frames",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+        ])
+        .arg(path)
+        .output()
+        .expect("start FFprobe stream inspection");
+    assert!(
+        output.status.success(),
+        "FFprobe could not inspect {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("FFprobe stream properties were UTF-8")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn ffprobe_frame_timestamps(path: &Path) -> Vec<i64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-read_intervals",
+            "%+#32",
+            "-show_frames",
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("start FFprobe frame timestamp inspection");
+    assert!(
+        output.status.success(),
+        "FFprobe could not inspect {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // CSV can append side-data fields. Only the leading frame timestamp belongs to this query.
+    String::from_utf8(output.stdout)
+        .expect("FFprobe frame timestamps were UTF-8")
+        .lines()
+        .filter_map(|line| {
+            match line
+                .split_once(',')
+                .map_or(line, |(timestamp, _)| timestamp)
+            {
+                "" => None,
+                timestamp => Some(
+                    parse_timestamp_microseconds(timestamp)
+                        .unwrap_or_else(|| panic!("invalid FFprobe timestamp {timestamp:?}")),
+                ),
+            }
+        })
+        .collect()
+}
+
+fn parse_timestamp_microseconds(timestamp: &str) -> Option<i64> {
+    let (negative, decimal) = match timestamp.strip_prefix('-') {
+        Some(decimal) => (true, decimal),
+        None => (false, timestamp),
+    };
+    let (whole, fraction) = decimal.split_once('.').unwrap_or((decimal, ""));
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let whole = whole.parse::<i128>().ok()?;
+    let mut microseconds = whole.checked_mul(1_000_000)?;
+    let mut digits = fraction.bytes();
+    let mut fractional = 0_i128;
+    for _ in 0..6 {
+        fractional *= 10;
+        if let Some(digit) = digits.next() {
+            fractional += i128::from(digit - b'0');
+        }
+    }
+    if digits.next().is_some_and(|digit| digit >= b'5') {
+        fractional += 1;
+    }
+    microseconds = microseconds.checked_add(fractional)?;
+    if negative {
+        microseconds = -microseconds;
+    }
+    i64::try_from(microseconds).ok()
+}
+
+fn cli_sequential_reference(path: &Path, frame_count: usize) -> CliSequentialReference {
+    let raw_timestamps = ffprobe_frame_timestamps(path);
+    assert_eq!(
+        raw_timestamps.len(),
+        frame_count,
+        "FFprobe frame count for {}",
+        path.display()
+    );
+    let stream_origin = *raw_timestamps
+        .first()
+        .expect("nonempty FFprobe timestamp list");
+    let timestamps = raw_timestamps
+        .into_iter()
+        .map(|timestamp| timestamp - stream_origin)
+        .collect();
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-hwaccel", "none", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            "scale=64:36:flags=bicubic,format=rgba,pad=64:48:0:6:color=black@0",
+            "-frames:v",
+            &frame_count.to_string(),
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .expect("start independent sequential FFmpeg reference decode");
+    assert!(
+        output.status.success(),
+        "FFmpeg could not create sequential reference for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes_per_frame = 64 * 48 * 4;
+    assert_eq!(
+        output.stdout.len(),
+        frame_count * bytes_per_frame,
+        "independent reference byte count for {}",
+        path.display()
+    );
+    let rgba = output
+        .stdout
+        .chunks_exact(bytes_per_frame)
+        .map(Arc::<[u8]>::from)
+        .collect();
+    CliSequentialReference {
+        stream_origin,
+        timestamps,
+        rgba,
+    }
+}
+
+fn assert_real_codec_frame(
+    frame: &DecodedRgba,
+    request: &DecodeRequest,
+    reference: &CliSequentialReference,
+    label: &str,
+) {
+    assert_eq!(
+        frame.request_id, request.request_id,
+        "decoded request ownership"
+    );
+    assert_eq!(
+        frame.target_tick, request.source_tick,
+        "decoded target ownership"
+    );
+    assert!(
+        (frame.source_tick - request.source_tick).abs()
+            <= SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS,
+        "scrub target {} decoded {}",
+        request.source_tick,
+        frame.source_tick
+    );
+    let index = reference
+        .timestamps
+        .iter()
+        .position(|timestamp| {
+            (*timestamp - request.source_tick).abs() <= SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS
+        })
+        .unwrap_or_else(|| panic!("missing CLI reference frame for {}", request.source_tick));
+    let expected = reference.rgba[index].as_ref();
+    let actual = frame.rgba.as_ref();
+    if actual != expected {
+        let first = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected)
+            .expect("unequal RGBA buffers have a differing byte");
+        let differences = actual
+            .iter()
+            .zip(expected)
+            .filter(|(actual, expected)| actual != expected)
+            .count();
+        panic!(
+            "{label} scrub target {} differs from independent CLI reference: {differences} / {} RGBA bytes, first byte {first} (actual {}, reference {})",
+            request.source_tick,
+            actual.len(),
+            actual[first],
+            expected[first],
+        );
+    }
+}
+
+fn assert_real_codec_vfr_seek_matches_cli_reference(
+    label: &str,
+    path: PathBuf,
+    expected_properties: &[&str],
+    request_id: u64,
+) {
+    let properties = ffprobe_stream_properties(&path);
+    assert!(
+        properties.iter().any(|value| value == "8"),
+        "{label} must declare eight frames"
+    );
+    for property in expected_properties {
+        assert!(
+            properties.iter().any(|value| value == property),
+            "{label} expected FFprobe property {property:?}, got {properties:?}"
+        );
+    }
+    let reference = cli_sequential_reference(&path, 8);
+    assert!(
+        reference.stream_origin > 0,
+        "{label} stream origin must be positive"
+    );
+    let gaps: std::collections::BTreeSet<_> = reference
+        .timestamps
+        .windows(2)
+        .map(|timestamps| timestamps[1] - timestamps[0])
+        .collect();
+    assert!(
+        gaps.len() > 1 && gaps.iter().all(|gap| *gap > 0),
+        "{label} must retain distinct positive VFR timestamp gaps: {gaps:?}"
+    );
+
+    let mut first = scrub_request(path.clone(), request_id);
+    first.source_tick = reference.timestamps[0];
+    first.source_frame_duration_tick = None;
+    let pool = MonitorSessionPool::new(1, 0);
+    let mut cases = 0;
+
+    let mut monitor = open_sticky_monitor(&first, &pool, 0, false)
+        .expect("open real-codec reusable monitor")
+        .expect("real-codec reusable monitor foreground permit");
+    assert_eq!(monitor.backend, DecodeBackend::Software, "{label} backend");
+    let timings = DecoderStageTimingAccumulators::default();
+    for (index, target) in reference.timestamps.iter().copied().enumerate() {
+        let mut request = first.clone();
+        request.request_id += index as u64;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        let frame = decode_scrub_frame(&mut monitor, &request, &timings);
+        assert_real_codec_frame(&frame, &request, &reference, label);
+        cases += 1;
+    }
+    for (index, target) in reference.timestamps.iter().copied().rev().enumerate() {
+        let mut request = first.clone();
+        request.request_id += 100 + index as u64;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        let frame = decode_scrub_frame(&mut monitor, &request, &timings);
+        assert_real_codec_frame(&frame, &request, &reference, label);
+        cases += 1;
+    }
+    let mut final_request = first.clone();
+    final_request.request_id += 200;
+    final_request.source_tick = *reference
+        .timestamps
+        .last()
+        .expect("eight reference timestamps");
+    final_request.is_scrubbing = true;
+    let frame = decode_scrub_frame(&mut monitor, &final_request, &timings);
+    assert_real_codec_frame(&frame, &final_request, &reference, label);
+    cases += 1;
+    drop(monitor);
+
+    for (index, target) in [reference.timestamps[3], reference.timestamps[6]]
+        .into_iter()
+        .enumerate()
+    {
+        let mut request = first.clone();
+        request.request_id += 300 + index as u64;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        let mut fresh_monitor = open_sticky_monitor(&request, &pool, 0, false)
+            .expect("open real-codec fresh monitor")
+            .expect("real-codec fresh monitor foreground permit");
+        assert_eq!(
+            fresh_monitor.backend,
+            DecodeBackend::Software,
+            "{label} fresh backend"
+        );
+        let fresh_timings = DecoderStageTimingAccumulators::default();
+        let frame = decode_scrub_frame(&mut fresh_monitor, &request, &fresh_timings);
+        assert_real_codec_frame(&frame, &request, &reference, label);
+        cases += 1;
+    }
+    eprintln!(
+        "{label}: {} VFR boundaries, {cases} exact CLI-reference seek cases",
+        reference.timestamps.len()
+    );
 }
 
 fn scrub_request(path: std::path::PathBuf, request_id: u64) -> DecodeRequest {
@@ -371,4 +729,225 @@ fn scrub_seek_reordered_mpeg2_matches_sequential_reference() {
             "reordered scrub target {target} traversed {traversed} demux packets"
         );
     }
+}
+
+#[test]
+fn scrub_seek_real_codec_vfr_generated_prores_matches_independent_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    let prores = real_codec_vfr_media(
+        "prores-422-10bit-vfr",
+        &[
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "2",
+            "-pix_fmt",
+            "yuv422p10le",
+        ],
+    );
+    assert_real_codec_vfr_seek_matches_cli_reference(
+        "ProRes Standard 10-bit 4:2:2",
+        prores.path.clone(),
+        &["prores", "Standard", "yuv422p10le"],
+        5_000,
+    );
+}
+
+#[test]
+fn scrub_seek_real_codec_vfr_generated_dnxhr_matches_independent_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    let dnxhr = real_codec_vfr_media(
+        "dnxhr-hqx-10bit-vfr",
+        &[
+            "-c:v",
+            "dnxhd",
+            "-profile:v",
+            "dnxhr_hqx",
+            "-pix_fmt",
+            "yuv422p10le",
+        ],
+    );
+    assert_real_codec_vfr_seek_matches_cli_reference(
+        "DNxHR HQX 10-bit 4:2:2",
+        dnxhr.path.clone(),
+        &["dnxhd", "DNXHR HQX", "yuv422p10le"],
+        6_000,
+    );
+}
+
+#[test]
+fn scrub_seek_real_codec_vfr_hevc_main10_matches_independent_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    let Some(path) = std::env::var_os("MAELSTROM_HEVC_VFR_TEST_MEDIA") else {
+        return;
+    };
+    assert_real_codec_vfr_seek_matches_cli_reference(
+        "supplied HEVC Main 10 VFR",
+        PathBuf::from(path),
+        &["hevc", "Main 10", "yuv420p10le"],
+        7_000,
+    );
+}
+
+#[test]
+fn scaler_color_metadata_changes_match_independent_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    use ffmpeg::util::color::{Range, Space};
+    let fixture = generated_fixture_path("color-metadata", "yuv");
+    let raw: Vec<u8> = [100, 150, 200]
+        .into_iter()
+        .flat_map(|value| std::iter::repeat_n(value, 64))
+        .collect();
+    fs::write(&fixture.path, &raw).unwrap();
+    let mut decoded = Video::new(Pixel::YUV444P, 8, 8);
+    for (plane, value) in [100, 150, 200].into_iter().enumerate() {
+        decoded.data_mut(plane).fill(value);
+    }
+    let (context, size) = StickyMonitor::make_scaler(Pixel::YUV444P, 8, 8, 8, 8, true).unwrap();
+    let mut scaler = Some(context);
+    let mut scaler_input = Some((Pixel::YUV444P, 8, 8));
+    let mut quality = Some(true);
+    let mut scaled_size = size;
+    let timings = DecoderStageTimingAccumulators::default();
+    let mut results = Vec::new();
+    // One retained scaler must follow per-frame metadata and reset unspecified input
+    // to its original defaults, rather than inheriting the previous frame's settings.
+    for (space, range, cli_space, cli_range) in [
+        (Space::BT709, Range::MPEG, "bt709", "tv"),
+        (Space::SMPTE170M, Range::MPEG, "smpte170m", "tv"),
+        (Space::BT709, Range::JPEG, "bt709", "pc"),
+        (Space::Unspecified, Range::Unspecified, "unknown", "unknown"),
+        (Space::BT709, Range::MPEG, "bt709", "tv"),
+    ] {
+        decoded.set_color_space(space);
+        decoded.set_color_range(range);
+        let converted = scale_monitor_frame(
+            &mut scaler,
+            &mut scaler_input,
+            &mut quality,
+            &mut scaled_size,
+            &decoded,
+            false,
+            (8, 8),
+            true,
+            &timings,
+        )
+        .unwrap();
+        let actual = copy_rgba_frame(&converted, 8, 8).unwrap();
+        let reference = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "yuv444p",
+                "-video_size",
+                "8x8",
+                "-framerate",
+                "1",
+                "-colorspace",
+                cli_space,
+                "-color_range",
+                cli_range,
+                "-i",
+            ])
+            .arg(&fixture.path)
+            .args([
+                "-vf",
+                "scale=8:8:flags=bicubic,format=rgba",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            reference.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        assert_eq!(reference.stdout.len(), 8 * 8 * 4);
+        assert_eq!(
+            actual, reference.stdout,
+            "matrix {space:?}, range {range:?}"
+        );
+        results.push(actual);
+    }
+    assert_ne!(
+        results[0], results[1],
+        "matrix change must affect these pixels"
+    );
+    assert_ne!(
+        results[0], results[2],
+        "range change must affect these pixels"
+    );
+    assert_eq!(
+        results[1], results[3],
+        "untagged input retains default BT.601 limited range"
+    );
+    assert_eq!(
+        results[0], results[4],
+        "retained scaler returns to the original matrix/range"
+    );
+
+    // Deprecated full-range pixel formats retain their intrinsic range even when
+    // the AVFrame range property is unspecified.
+    let mut jpeg = Video::new(Pixel::YUVJ444P, 8, 8);
+    for (plane, value) in [100, 150, 200].into_iter().enumerate() {
+        jpeg.data_mut(plane).fill(value);
+    }
+    jpeg.set_color_space(Space::BT709);
+    jpeg.set_color_range(Range::Unspecified);
+    let (context, size) = StickyMonitor::make_scaler(Pixel::YUVJ444P, 8, 8, 8, 8, true).unwrap();
+    scaler = Some(context);
+    scaler_input = Some((Pixel::YUVJ444P, 8, 8));
+    scaled_size = size;
+    let converted = scale_monitor_frame(
+        &mut scaler,
+        &mut scaler_input,
+        &mut quality,
+        &mut scaled_size,
+        &jpeg,
+        false,
+        (8, 8),
+        true,
+        &timings,
+    )
+    .unwrap();
+    assert_eq!(copy_rgba_frame(&converted, 8, 8).unwrap(), results[2]);
+}
+
+#[test]
+fn scaler_color_setup_preserves_rgb_pixels_and_alpha() {
+    let mut decoded = Video::new(Pixel::RGBA, 8, 8);
+    for pixel in decoded.data_mut(0).chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[23, 151, 202, 97]);
+    }
+    let expected = copy_rgba_frame(&decoded, 8, 8).unwrap();
+    let (context, mut size) = StickyMonitor::make_scaler(Pixel::RGBA, 8, 8, 8, 8, true).unwrap();
+    let converted = scale_monitor_frame(
+        &mut Some(context),
+        &mut Some((Pixel::RGBA, 8, 8)),
+        &mut Some(true),
+        &mut size,
+        &decoded,
+        false,
+        (8, 8),
+        true,
+        &DecoderStageTimingAccumulators::default(),
+    )
+    .unwrap();
+    assert_eq!(copy_rgba_frame(&converted, 8, 8).unwrap(), expected);
 }

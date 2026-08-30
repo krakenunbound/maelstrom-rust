@@ -196,6 +196,11 @@ including a deterministic 750 ms topmost-source hold with ready-source progress 
 recovery; cross-hardware and UI-present audio proof remain open. Bounded speculative-prewarm-first priority/recency session
 eviction is implemented; strict priority has no age-based fairness guarantee.
 
+Additional local Software coverage now includes shifted-VFR ProRes/DNxHR 10-bit MOV and supplied
+HEVC Main 10. Independent CLI pixels exposed and verified a fix for DNxHR BT.709 preview being
+converted with BT.601. These are exact small-frame timing/pixel checks, not hardware/HDR/playback
+qualification; see `docs/codec-color-qualification.md`.
+
 Gate: four 1080p sources requested at once; timeline latency unchanged; slow source cannot stall the clock.
 
 ### Then — Phase 2 holes

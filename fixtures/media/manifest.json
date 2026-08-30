@@ -88,6 +88,72 @@
       "expected": "success"
     },
     {
+      "id": "vfr-prores-10bit-shifted-mov",
+      "path": "vfr-prores-10bit-shifted.mov",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 filter; eight selected frames with a seven-second presentation origin; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "320x180 at 24 fps; select frames 0,1,3,4,6,8,11,12; setpts=PTS+7/TB; fps_mode vfr; prores_ks profile 2, yuv422p10le MOV, no audio, bitexact flags",
+      "sha256": "523DD0AA1941B13E2810C97E44357B3469E869E3BBDB5F33C0392CF4F6D7FAEE",
+      "byte_size": 188401,
+      "container": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": {
+        "codec": "prores",
+        "profile": "Standard",
+        "pixel_format": "yuv422p10le",
+        "rate": "24/1",
+        "width": 320,
+        "height": 180,
+        "gop": 1,
+        "has_b_frames": 0,
+        "keyframe_positions": [0, 1, 2, 3, 4, 5, 6, 7],
+        "picture_types": ["I", "I", "I", "I", "I", "I", "I", "I"],
+        "timing": {
+          "vfr": true,
+          "reordered": false,
+          "frame_count": 8,
+          "first_pts_us": 7000000,
+          "last_pts_us": 7500000,
+          "expected_gap_us": [41667, 83333, 125000],
+          "pts_sha256": "045F3FC879F0598C35EC083628CFB4D7094D30C20EAB35B110D80F98BBFBA52F"
+        }
+      },
+      "duration_seconds": 0.541667,
+      "expected": "success"
+    },
+    {
+      "id": "vfr-dnxhr-10bit-shifted-mov",
+      "path": "vfr-dnxhr-10bit-shifted.mov",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 filter; eight selected frames with a seven-second presentation origin; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "320x180 at 24 fps; select frames 0,1,3,4,6,8,11,12; setpts=PTS+7/TB; fps_mode vfr; dnxhd profile dnxhr_hqx, yuv422p10le MOV, no audio, bitexact flags",
+      "sha256": "6038CDE607392E49A09D80F92B75DA25A9CFF2034435202C2D4C80DCF2330C1A",
+      "byte_size": 230187,
+      "container": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": {
+        "codec": "dnxhd",
+        "profile": "DNXHR HQX",
+        "pixel_format": "yuv422p10le",
+        "rate": "24/1",
+        "width": 320,
+        "height": 180,
+        "gop": 1,
+        "has_b_frames": 0,
+        "keyframe_positions": [0, 1, 2, 3, 4, 5, 6, 7],
+        "picture_types": ["I", "I", "I", "I", "I", "I", "I", "I"],
+        "timing": {
+          "vfr": true,
+          "reordered": false,
+          "frame_count": 8,
+          "first_pts_us": 7000000,
+          "last_pts_us": 7500000,
+          "expected_gap_us": [41667, 83333, 125000],
+          "pts_sha256": "045F3FC879F0598C35EC083628CFB4D7094D30C20EAB35B110D80F98BBFBA52F"
+        }
+      },
+      "duration_seconds": 0.541667,
+      "expected": "success"
+    },
+    {
       "id": "mono-pcm-48k-wav",
       "path": "mono-pcm-48k.wav",
       "source": "generated",

@@ -8,6 +8,7 @@ Schema version 3 adds manifest-controlled FFprobe `has_b_frames` reorder-delay v
 keyframe positions for every video fixture. VFR timing records presentation PTS as rounded integer
 microseconds, required distinct timestamp gaps, and a SHA-256 fingerprint of the comma-separated
 PTS sequence.
+Optional `profile` and `pixel_format` contracts are also checked against FFprobe.
 
 Use only the pinned bundle explicitly; the scripts do not resolve `ffmpeg` or `ffprobe` from
 `PATH`:
@@ -28,6 +29,11 @@ MPEG-2 with two B-frames; its contract pins decoded presentation PTS, packet-ord
 types, and requires observable packet reordering. Both are generated, not downloaded, and carry
 no third-party video or audio content. The validator scans the exact timing contract; it does not
 infer VFR from `r_frame_rate`.
+The two shifted 10-bit MOV fixtures add ProRes Standard and DNxHR HQX coverage,
+eight all-intra frames with the same irregular 24 fps selection and a seven-second
+presentation origin. Their manifest pins 10-bit 4:2:2 pixels and exact timestamps.
+Independent CLI pixel/seek comparisons and app local-time mapping are described in
+[codec/color qualification](codec-color-qualification.md).
 The harness is deliberately independent of the editor executable. Normal Cargo tests do not depend
 on generated binaries; the opt-in Phase 0 runner passes the generated reordered TS by its exact
 absolute path through `MAELSTROM_REORDERED_VFR_TEST_MEDIA` to focused waveform, monitor-decode,
@@ -52,5 +58,5 @@ the local corpus. Do not add any file without redistribution permission to Git.
 
 `Test-MediaFixtures.ps1 -ManifestOnly` is the fast schema/path/uniqueness validation used when
 FFmpeg is unavailable. The Phase 0 measurement gate remains incomplete: it additionally gates the
-reordered fixture's waveform/decode/preview source-time path, but does not prove export behavior
-or broad real-media coverage.
+reordered fixture's waveform/decode/preview source-time path and the two generated
+10-bit MOV decode/preview paths, but does not prove export behavior or broad real-media coverage.

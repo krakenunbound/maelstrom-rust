@@ -36,6 +36,9 @@ foreach ($fixture in $manifest.fixtures) {
         foreach ($field in 'codec', 'rate', 'width', 'height', 'gop', 'has_b_frames', 'keyframe_positions') { if ($null -eq $fixture.video.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.video.$field)) { throw "Video fixture is missing ${field}: $($fixture.id)." } }
         if ([int]$fixture.video.width -lt 1 -or [int]$fixture.video.height -lt 1 -or [int]$fixture.video.gop -lt 1) { throw "Video dimensions and GOP must be positive: $($fixture.id)." }
         if ([int]$fixture.video.has_b_frames -lt 0) { throw "Video FFprobe has_b_frames value must be non-negative: $($fixture.id)." }
+        foreach ($field in @('profile', 'pixel_format')) {
+            if ($fixture.video.PSObject.Properties.Name -contains $field -and [string]::IsNullOrWhiteSpace([string]$fixture.video.$field)) { throw "Video ${field} contract must not be empty: $($fixture.id)." }
+        }
         $keyframePositions = @($fixture.video.keyframe_positions | ForEach-Object { [int]$_ })
         if ($keyframePositions.Count -lt 1 -or $keyframePositions[0] -ne 0) { throw "Video keyframe positions must start at zero: $($fixture.id)." }
         for ($index = 1; $index -lt $keyframePositions.Count; $index++) {
@@ -105,6 +108,12 @@ foreach ($fixture in $manifest.fixtures) {
         $video = @($probe.streams | Where-Object codec_type -eq 'video')[0]
         if ($null -eq $video) { throw "Missing video stream: $($fixture.id)" }
         Assert-Equal $video.codec_name $fixture.video.codec "Video codec for $($fixture.id)"
+        if ($fixture.video.PSObject.Properties.Name -contains 'profile') {
+            Assert-Equal $video.profile $fixture.video.profile "Video profile for $($fixture.id)"
+        }
+        if ($fixture.video.PSObject.Properties.Name -contains 'pixel_format') {
+            Assert-Equal $video.pix_fmt $fixture.video.pixel_format "Video pixel format for $($fixture.id)"
+        }
         if (-not $fixture.video.timing.vfr) {
             Assert-Equal $video.r_frame_rate $fixture.video.rate "Video rate for $($fixture.id)"
         }

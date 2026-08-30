@@ -55,6 +55,8 @@ New-Item -ItemType Directory -Force -Path $resolvedArtifactRoot | Out-Null
 $fixtureRoot = Join-Path $repoRoot 'artifacts\media-fixtures'
 $mediaPath = Join-Path $fixtureRoot 'bars-aac-2997.mp4'
 $reorderedVfrPath = Join-Path $fixtureRoot 'vfr-reordered-mpeg2.ts'
+$proresVfrPath = Join-Path $fixtureRoot 'vfr-prores-10bit-shifted.mov'
+$dnxhrVfrPath = Join-Path $fixtureRoot 'vfr-dnxhr-10bit-shifted.mov'
 $libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
     Join-Path $repoRoot '.deps\libclang-bindgen'
 } else {
@@ -67,6 +69,8 @@ $savedFfmpeg = $env:FFMPEG_DIR
 $savedLibclang = $env:LIBCLANG_PATH
 $savedMedia = $env:MAELSTROM_PHASE0_MEDIA
 $savedReorderedVfrMedia = $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA
+$savedProresVfrMedia = $env:MAELSTROM_PRORES_VFR_TEST_MEDIA
+$savedDnxhrVfrMedia = $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA
 $savedReport = $env:MAELSTROM_PHASE0_REPORT
 $savedArtifactRoot = $env:MAELSTROM_PHASE0_ARTIFACT_ROOT
 $repoLocationPushed = $false
@@ -80,6 +84,8 @@ try {
     if (-not (Test-Path -LiteralPath $mediaPath -PathType Leaf)) { throw "Missing generated Phase 0 media fixture: $mediaPath" }
     if (-not (Test-Path -LiteralPath $reorderedVfrPath -PathType Leaf)) { throw "Missing generated reordered VFR fixture: $reorderedVfrPath" }
     $reorderedVfrPath = (Resolve-Path -LiteralPath $reorderedVfrPath).Path
+    $proresVfrPath = (Resolve-Path -LiteralPath $proresVfrPath -ErrorAction Stop).Path
+    $dnxhrVfrPath = (Resolve-Path -LiteralPath $dnxhrVfrPath -ErrorAction Stop).Path
 
     Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $resolvedArtifactRoot 'phase0-cancelled.mp4') -Force -ErrorAction SilentlyContinue
@@ -88,6 +94,8 @@ try {
     $env:PATH = (Join-Path $ffmpegRootPath 'bin') + [IO.Path]::PathSeparator + $savedPath
     $env:MAELSTROM_PHASE0_MEDIA = $mediaPath
     $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA = $reorderedVfrPath
+    $env:MAELSTROM_PRORES_VFR_TEST_MEDIA = $proresVfrPath
+    $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA = $dnxhrVfrPath
     $env:MAELSTROM_PHASE0_REPORT = $resolvedReportPath
     $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $resolvedArtifactRoot
     Push-Location -LiteralPath $repoRoot
@@ -100,6 +108,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Focused reordered VFR decode test failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app tests::supplied_reordered_vfr_fixture_routes_preview_to_local_presentation_boundaries -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Focused reordered VFR app test failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-decode --release scrub_seek_real_codec_vfr_generated_ -- --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Generated 10-bit codec decode regressions failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-app --release tests::supplied_shifted_10bit_vfr_fixtures_route_preview_to_local_boundaries -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Shifted 10-bit VFR app regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::phase0_scenario_matrix -- --ignored --exact --test-threads=1
     $testExitCode = $LASTEXITCODE
 
@@ -179,6 +191,8 @@ finally {
     if ($null -eq $savedLibclang) { Remove-Item Env:LIBCLANG_PATH -ErrorAction SilentlyContinue } else { $env:LIBCLANG_PATH = $savedLibclang }
     if ($null -eq $savedMedia) { Remove-Item Env:MAELSTROM_PHASE0_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_MEDIA = $savedMedia }
     if ($null -eq $savedReorderedVfrMedia) { Remove-Item Env:MAELSTROM_REORDERED_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA = $savedReorderedVfrMedia }
+    if ($null -eq $savedProresVfrMedia) { Remove-Item Env:MAELSTROM_PRORES_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PRORES_VFR_TEST_MEDIA = $savedProresVfrMedia }
+    if ($null -eq $savedDnxhrVfrMedia) { Remove-Item Env:MAELSTROM_DNXHR_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA = $savedDnxhrVfrMedia }
     if ($null -eq $savedReport) { Remove-Item Env:MAELSTROM_PHASE0_REPORT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_REPORT = $savedReport }
     if ($null -eq $savedArtifactRoot) { Remove-Item Env:MAELSTROM_PHASE0_ARTIFACT_ROOT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $savedArtifactRoot }
     if ($null -ne $phase0Mutex) { $phase0Mutex.ReleaseMutex(); $phase0Mutex.Dispose() }

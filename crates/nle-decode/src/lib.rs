@@ -3742,23 +3742,79 @@ fn scale_monitor_frame(
         }
         {
             let _timer = StageTimer::new(&stage_timings.scaler);
-            scaler
+            let scaler = scaler
                 .as_mut()
-                .expect("hardware scaler initialized from transferred frame")
+                .expect("hardware scaler initialized from transferred frame");
+            // A hardware transfer does not copy AVFrame properties. Keep the original
+            // decoded frame's color metadata when converting the transferred pixels.
+            configure_scaler_color(scaler, decoded, software_frame.format())?;
+            scaler
                 .run(&software_frame, &mut rgba_frame)
                 .map_err(|error| format!("could not scale monitor frame: {error}"))?;
         }
     } else {
         {
             let _timer = StageTimer::new(&stage_timings.scaler);
-            scaler
+            let scaler = scaler
                 .as_mut()
-                .expect("software scaler initialized when monitor opens")
+                .expect("software scaler initialized when monitor opens");
+            configure_scaler_color(scaler, decoded, decoded.format())?;
+            scaler
                 .run(decoded, &mut rgba_frame)
                 .map_err(|error| format!("could not scale monitor frame: {error}"))?;
         }
     }
     Ok(rgba_frame)
+}
+
+fn configure_scaler_color(
+    scaler: &mut ScalingContext,
+    decoded: &Video,
+    pixel_format: Pixel,
+) -> Result<(), String> {
+    use ffmpeg::util::color::{Range, Space};
+    // ScalingContext::get uses sws_getContext, whose default YUV matrix is BT.601.
+    // Apply each frame's declared matrix, including after seeks or metadata changes.
+    // This is YUV-to-RGB conversion, not transfer-function or HDR tone mapping.
+    let matrix = match decoded.color_space() {
+        Space::BT709 => ffmpeg::ffi::SWS_CS_ITU709,
+        Space::FCC => ffmpeg::ffi::SWS_CS_FCC,
+        Space::BT470BG | Space::SMPTE170M => ffmpeg::ffi::SWS_CS_ITU601,
+        Space::SMPTE240M => ffmpeg::ffi::SWS_CS_SMPTE240M,
+        Space::BT2020NCL => ffmpeg::ffi::SWS_CS_BT2020,
+        _ => ffmpeg::ffi::SWS_CS_DEFAULT,
+    };
+    let full_range = match decoded.color_range() {
+        Range::JPEG => true,
+        Range::MPEG => false,
+        Range::Unspecified => matches!(
+            pixel_format,
+            Pixel::YUVJ420P | Pixel::YUVJ422P | Pixel::YUVJ444P | Pixel::YUVJ440P | Pixel::YUVJ411P
+        ),
+    };
+    // SAFETY: scaler owns a live SwsContext; each recognized matrix produces a static
+    // four-coefficient table. The output is full-range RGBA with neutral adjustments.
+    // libswscale retains its intrinsic full-range interpretation for RGB pixel formats.
+    let result = unsafe {
+        let coefficients = ffmpeg::ffi::sws_getCoefficients(matrix);
+        ffmpeg::ffi::sws_setColorspaceDetails(
+            scaler.as_mut_ptr(),
+            coefficients,
+            i32::from(full_range),
+            coefficients,
+            1,
+            0,
+            1 << 16,
+            1 << 16,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "could not configure monitor color conversion: {}",
+            ffmpeg::Error::from(result)
+        ));
+    }
+    Ok(())
 }
 
 const fn scaling_flags(high_quality_scaling: bool) -> ScalingFlags {

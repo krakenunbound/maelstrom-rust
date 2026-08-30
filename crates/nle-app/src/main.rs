@@ -12563,6 +12563,76 @@ mod tests {
     }
 
     #[test]
+    fn supplied_shifted_10bit_vfr_fixtures_route_preview_to_local_boundaries() {
+        for (variable, codec) in [
+            ("MAELSTROM_PRORES_VFR_TEST_MEDIA", "prores"),
+            ("MAELSTROM_DNXHR_VFR_TEST_MEDIA", "dnxhd"),
+        ] {
+            let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
+                continue;
+            };
+            let metadata =
+                nle_waveform::probe_media_metadata(&path).expect("probe shifted 10-bit fixture");
+            assert_eq!(metadata.video_codec.as_deref(), Some(codec));
+            let video = metadata
+                .streams
+                .iter()
+                .find(|stream| stream.kind.as_deref() == Some("video"))
+                .expect("fixture video stream");
+            assert_eq!(video.start_seconds, Some(7.0));
+            assert!((metadata.duration_seconds.unwrap() - 0.541_667).abs() < 0.000_001);
+            let timing =
+                nle_waveform::analyze_frame_timing(&path).expect("scan shifted 10-bit fixture");
+            let nle_waveform::FrameTiming::Variable(index) = &timing else {
+                panic!("{codec} fixture did not retain its irregular presentation timing");
+            };
+            let boundaries = [
+                0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
+            ];
+            assert_eq!(index.pts(), boundaries, "{codec} local presentation index");
+
+            let mut app = App::new_with_catalog(false, None);
+            app.editor.add_media_paths([path]);
+            assert!(app.editor.add_selected_to_timeline());
+            app.media_analysis_tx
+                .send(MediaAnalysisResult {
+                    project_epoch: app.media_analysis_epoch,
+                    media_id: 1,
+                    is_still: false,
+                    metadata: Ok(metadata),
+                    frame_timing: Ok(timing),
+                    waveform: Err("fixture intentionally has no audio".into()),
+                    video_strip: Err("strip is irrelevant to timing proof".into()),
+                })
+                .expect("queue shifted 10-bit analysis");
+            app.poll_media_analysis();
+
+            // Exercise both directions, each exact boundary, and the final microsecond
+            // before the next boundary. The final frame has no invented CFR duration.
+            for reverse in [false, true] {
+                for step in 0..boundaries.len() {
+                    let index = if reverse {
+                        boundaries.len() - 1 - step
+                    } else {
+                        step
+                    };
+                    let boundary = boundaries[index];
+                    let next = boundaries.get(index + 1).copied();
+                    let duration = next.map(|next| next - boundary);
+                    for logical_tick in [boundary, next.map_or(541_666, |next| next - 1)] {
+                        app.editor.set_playhead(nle_timeline::Tick(logical_tick));
+                        let source = preview_request(&app.editor).sources[0]
+                            .expect("shifted 10-bit preview source");
+                        assert_eq!(source.source_tick, boundary, "{codec} at {logical_tick}");
+                        assert_eq!(source.source_frame_duration_tick, duration);
+                        assert_eq!(source.source_frame_rate, None);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn scrub_submission_coalesces_to_source_frames_and_submits_matching_size_release() {
         let mut app = App::new_with_catalog(false, None);
         app.editor

@@ -74,6 +74,23 @@ Invoke-FixtureFfmpeg @(
     '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-muxdelay', '0'
 ) $reorderedVfrPath
 
+# Intra-frame professional formats with 10-bit 4:2:2 pixels and a nonzero MOV
+# presentation origin. Their local frame timing must still begin at zero.
+foreach ($codec in @('prores', 'dnxhr')) {
+    $encoderOptions = if ($codec -eq 'prores') {
+        @('-c:v', 'prores_ks', '-profile:v', '2')
+    } else {
+        @('-c:v', 'dnxhd', '-profile:v', 'dnxhr_hqx')
+    }
+    Invoke-FixtureFfmpeg (@(
+        '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
+        '-vf', "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)',setpts=PTS+7/TB",
+        '-frames:v', '8', '-fps_mode', 'vfr', '-an'
+    ) + $encoderOptions + @(
+        '-pix_fmt', 'yuv422p10le', '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1'
+    )) (Join-Path $outputPath "vfr-$codec-10bit-shifted.mov")
+}
+
 $wavPath = Join-Path $outputPath 'mono-pcm-48k.wav'
 Invoke-FixtureFfmpeg @(
     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1',

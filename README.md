@@ -310,6 +310,8 @@ The [scrub seek follow-up](./docs/scrub-seek-performance.md) records reduced fre
 waiting, reordered-frame correctness, and the limits of the local evidence.
 The [input integrity follow-up](./docs/windowed-input-integrity.md) records the
 pointer-interference regression and bounded diagnostics that preserve failed samples.
+The [10-bit codec follow-up](./docs/codec-color-qualification.md) covers ProRes, DNxHR,
+and HEVC seek/pixel checks and fixes frame-declared preview color conversion.
 
 Packaging copies `vcruntime140.dll` app-local from either a trusted, operator-supplied authorized
 AMD64 directory supplied with
