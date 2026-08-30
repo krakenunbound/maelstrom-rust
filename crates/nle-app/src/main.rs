@@ -1921,6 +1921,7 @@ struct SurfaceSubmissionReport {
     display_refresh_millihertz: Option<u32>,
     decoder_stage_timings: DecoderStageTimingsReport,
     viewer_stage_timings: ViewerStageTimingsReport,
+    gpu_stage_timings: GpuStageTimingsReport,
     audio_stage_timings: AudioStageTimingsReport,
     runtime_diagnostics: RuntimeDiagnosticsReport,
 }
@@ -1939,8 +1940,26 @@ struct ViewerStageTimingsReport {
     compositor_encode_cpu: ViewerStageTimingReport,
 }
 
+/// CPU wall-clock elapsed from queue submission until wgpu reports that submission completed
+/// on the GPU. This includes queueing and driver scheduling; it is not pass-duration,
+/// presentation, DWM, or physical scanout timing.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct GpuStageTimingsReport {
+    submission_to_completion_elapsed: ViewerStageTimingReport,
+}
+
 impl From<nle_render::ViewerCompositorEncodeTiming> for ViewerStageTimingReport {
     fn from(timing: nle_render::ViewerCompositorEncodeTiming) -> Self {
+        Self {
+            samples: timing.samples,
+            p95_ms: timing.p95_ms,
+            max_ms: timing.max_ms,
+        }
+    }
+}
+
+impl From<nle_render::GpuSubmissionCompletionTiming> for ViewerStageTimingReport {
+    fn from(timing: nle_render::GpuSubmissionCompletionTiming) -> Self {
         Self {
             samples: timing.samples,
             p95_ms: timing.p95_ms,
@@ -2115,6 +2134,7 @@ struct SurfaceReportEnvironment {
     display_refresh_millihertz: Option<u32>,
     decoder_stage_timings: DecoderStageTimingsReport,
     viewer_stage_timings: ViewerStageTimingsReport,
+    gpu_stage_timings: GpuStageTimingsReport,
     audio_stage_timings: AudioStageTimingsReport,
     runtime_diagnostics: RuntimeDiagnosticsReport,
 }
@@ -2139,6 +2159,13 @@ fn surface_report_viewer_stage_timings_ready(
     timings: ViewerStageTimingsReport,
 ) -> bool {
     !full_media_smoke || timings.fully_observed()
+}
+
+fn surface_report_gpu_stage_timings_ready(
+    full_media_smoke: bool,
+    timings: GpuStageTimingsReport,
+) -> bool {
+    !full_media_smoke || timings.submission_to_completion_elapsed.samples > 0
 }
 
 fn surface_report_audio_stage_timings_ready(
@@ -2575,7 +2602,7 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 5,
+            schema_version: 6,
             samples: metrics.samples,
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
@@ -2600,6 +2627,7 @@ impl SurfaceSubmissionProbe {
             display_refresh_millihertz: environment.display_refresh_millihertz,
             decoder_stage_timings: environment.decoder_stage_timings,
             viewer_stage_timings: environment.viewer_stage_timings,
+            gpu_stage_timings: environment.gpu_stage_timings,
             audio_stage_timings: environment.audio_stage_timings,
             runtime_diagnostics: environment.runtime_diagnostics,
         };
@@ -3483,6 +3511,17 @@ impl App {
         if !surface_report_viewer_stage_timings_ready(full_media_smoke, viewer_stage_timings) {
             return;
         }
+        let gpu_stage_timings = GpuStageTimingsReport {
+            submission_to_completion_elapsed: self
+                .hub_renderer
+                .as_ref()
+                .map(HubRenderer::gpu_submission_completion_timing)
+                .unwrap_or_default()
+                .into(),
+        };
+        if !surface_report_gpu_stage_timings_ready(full_media_smoke, gpu_stage_timings) {
+            return;
+        }
         let audio_diagnostics = self
             .audio_engine
             .as_ref()
@@ -3518,6 +3557,7 @@ impl App {
                 .and_then(|monitor| monitor.refresh_rate_millihertz()),
             decoder_stage_timings,
             viewer_stage_timings,
+            gpu_stage_timings,
             audio_stage_timings,
             runtime_diagnostics: RuntimeDiagnosticsReport::from(
                 self.runtime_diagnostics_with_audio(audio_diagnostics),
@@ -3747,20 +3787,34 @@ impl App {
             viewer_canvas.submit();
             state.handle_platform_output(window, output.platform_output);
             let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+            let measure_gpu_completion =
+                self.screen == Screen::Editor && self.surface_submission_probe.is_some();
             let hub_renderer = self
                 .hub_renderer
                 .get_or_insert_with(|| HubRenderer::new(&device, config.format));
-            hub_renderer.render(
-                &device,
-                &queue,
-                &view,
-                &primitives,
-                &output.textures_delta,
-                egui_wgpu::ScreenDescriptor {
-                    size_in_pixels: [config.width, config.height],
-                    pixels_per_point: output.pixels_per_point,
-                },
-            );
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [config.width, config.height],
+                pixels_per_point: output.pixels_per_point,
+            };
+            if measure_gpu_completion {
+                hub_renderer.render_with_gpu_completion_measurement(
+                    &device,
+                    &queue,
+                    &view,
+                    &primitives,
+                    &output.textures_delta,
+                    screen_descriptor,
+                );
+            } else {
+                hub_renderer.render(
+                    &device,
+                    &queue,
+                    &view,
+                    &primitives,
+                    &output.textures_delta,
+                    screen_descriptor,
+                );
+            }
             if output
                 .viewport_output
                 .values()
@@ -7471,6 +7525,13 @@ mod tests {
                         max_ms: 3.0,
                     },
                 },
+                gpu_stage_timings: GpuStageTimingsReport {
+                    submission_to_completion_elapsed: ViewerStageTimingReport {
+                        samples: 2,
+                        p95_ms: 4.0,
+                        max_ms: 5.0,
+                    },
+                },
                 audio_stage_timings: AudioStageTimingsReport {
                     output_callback_cpu: nle_audio::AudioCallbackCpuTiming {
                         samples: 2,
@@ -7489,7 +7550,7 @@ mod tests {
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 5);
+        assert_eq!(report.schema_version, 6);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
@@ -7507,6 +7568,20 @@ mod tests {
             report.viewer_stage_timings.compositor_encode_cpu.max_ms,
             3.0
         );
+        assert_eq!(
+            report
+                .gpu_stage_timings
+                .submission_to_completion_elapsed
+                .samples,
+            2
+        );
+        assert_eq!(
+            report
+                .gpu_stage_timings
+                .submission_to_completion_elapsed
+                .max_ms,
+            5.0
+        );
         assert_eq!(report.audio_stage_timings.output_callback_cpu.samples, 2);
         assert_eq!(report.audio_stage_timings.mix_render_cpu.samples, 2);
         assert_eq!(report.runtime_diagnostics, runtime_diagnostics);
@@ -7522,6 +7597,10 @@ mod tests {
         assert_eq!(
             json.pointer("/viewer_stage_timings/upload_cpu/samples"),
             Some(&serde_json::Value::from(2))
+        );
+        assert_eq!(
+            json.pointer("/gpu_stage_timings/submission_to_completion_elapsed/p95_ms"),
+            Some(&serde_json::Value::from(4.0))
         );
         assert_eq!(
             json.pointer("/surface_present_call_cpu_p95_ms"),
@@ -7583,6 +7662,19 @@ mod tests {
                     ..Default::default()
                 },
                 compositor_encode_cpu: ViewerStageTimingReport {
+                    samples: 1,
+                    ..Default::default()
+                },
+            }
+        ));
+
+        let empty = GpuStageTimingsReport::default();
+        assert!(surface_report_gpu_stage_timings_ready(false, empty));
+        assert!(!surface_report_gpu_stage_timings_ready(true, empty));
+        assert!(surface_report_gpu_stage_timings_ready(
+            true,
+            GpuStageTimingsReport {
+                submission_to_completion_elapsed: ViewerStageTimingReport {
                     samples: 1,
                     ..Default::default()
                 },

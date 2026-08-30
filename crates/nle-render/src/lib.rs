@@ -1,6 +1,13 @@
 //! GPU rendering primitives for Maelstrom.  This crate performs no runtime I/O.
 
-use std::fmt;
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{
@@ -28,12 +35,100 @@ pub use viewer_compositor::{
     ViewerFrame, ViewerLayerPrimitive, ViewerRgbCurves, ViewerUploadError,
 };
 
+const GPU_COMPLETION_SAMPLE_WINDOW: usize = 120;
+
+/// Snapshot of submission-to-GPU-completion elapsed time.
+///
+/// This is CPU monotonic elapsed time from immediately before a queue submission
+/// until wgpu reports that submission has finished on the GPU. It includes queue
+/// backlog and driver scheduling; it is not isolated GPU pass execution time or
+/// display scanout time. Callback dispatch and non-blocking poll cadence may
+/// also extend the observed elapsed time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuSubmissionCompletionTiming {
+    pub samples: usize,
+    pub p95_ms: f32,
+    pub max_ms: f32,
+}
+
+#[derive(Debug)]
+struct GpuCompletionTimingWindow {
+    samples: [u64; GPU_COMPLETION_SAMPLE_WINDOW],
+    len: usize,
+    next: usize,
+}
+
+impl Default for GpuCompletionTimingWindow {
+    fn default() -> Self {
+        Self {
+            samples: [0; GPU_COMPLETION_SAMPLE_WINDOW],
+            len: 0,
+            next: 0,
+        }
+    }
+}
+
+impl GpuCompletionTimingWindow {
+    fn push(&mut self, elapsed_nanos: u64) {
+        self.samples[self.next] = elapsed_nanos;
+        self.next = (self.next + 1) % GPU_COMPLETION_SAMPLE_WINDOW;
+        self.len = (self.len + 1).min(GPU_COMPLETION_SAMPLE_WINDOW);
+    }
+
+    fn snapshot(&self) -> GpuSubmissionCompletionTiming {
+        if self.len == 0 {
+            return GpuSubmissionCompletionTiming::default();
+        }
+
+        let mut ordered = self.samples;
+        ordered[..self.len].sort_unstable();
+        let p95_index = (self.len * 95).div_ceil(100).saturating_sub(1);
+        GpuSubmissionCompletionTiming {
+            samples: self.len,
+            p95_ms: ordered[p95_index] as f32 / 1_000_000.0,
+            max_ms: ordered[self.len - 1] as f32 / 1_000_000.0,
+        }
+    }
+}
+
+/// One callback/sample may be outstanding. The callback only publishes elapsed
+/// nanoseconds and completion state; the render thread owns window mutation.
+#[derive(Debug, Default)]
+struct GpuCompletionMailbox {
+    // 0 = idle, 1 = callback pending, 2 = completed sample ready to drain.
+    state: AtomicU8,
+    elapsed_nanos: AtomicU64,
+}
+
+impl GpuCompletionMailbox {
+    fn reserve(&self) -> Option<Instant> {
+        self.state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Instant::now())
+    }
+
+    fn complete(&self, elapsed_nanos: u64) {
+        self.elapsed_nanos.store(elapsed_nanos, Ordering::Relaxed);
+        self.state.store(2, Ordering::Release);
+    }
+
+    fn drain_completed(&self) -> Option<u64> {
+        self.state
+            .compare_exchange(2, 0, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| self.elapsed_nanos.load(Ordering::Relaxed))
+    }
+}
+
 /// Thin egui GPU submission adapter; application code retains window/event ownership.
 pub struct HubRenderer {
     renderer: egui_wgpu::Renderer,
     timeline_rects: TimelineRectCallbackHandle,
     timeline_textures: TimelineTextureCallbackHandle,
     viewer_compositor: ViewerCompositorCallbackHandle,
+    gpu_completion_mailbox: Arc<GpuCompletionMailbox>,
+    gpu_completion_timing: GpuCompletionTimingWindow,
 }
 
 impl HubRenderer {
@@ -53,6 +148,8 @@ impl HubRenderer {
             timeline_rects: TimelineRectCallbackHandle::new(),
             timeline_textures: TimelineTextureCallbackHandle::new(),
             viewer_compositor: ViewerCompositorCallbackHandle::new(),
+            gpu_completion_mailbox: Arc::new(GpuCompletionMailbox::default()),
+            gpu_completion_timing: GpuCompletionTimingWindow::default(),
         }
     }
 
@@ -74,6 +171,11 @@ impl HubRenderer {
     /// Snapshot CPU command-encoding time for changed viewer compositions only.
     pub fn viewer_compositor_encode_timing(&self) -> ViewerCompositorEncodeTiming {
         self.viewer_compositor.compositor_encode_timing()
+    }
+
+    /// Snapshot bounded submission-to-GPU-completion timing samples.
+    pub fn gpu_submission_completion_timing(&self) -> GpuSubmissionCompletionTiming {
+        self.gpu_completion_timing.snapshot()
     }
 
     /// Uploads a decoded RGBA frame into one fixed project-monitor layer slot.
@@ -160,6 +262,33 @@ impl HubRenderer {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             "project hub encoder",
             "project hub pass",
+            false,
+        );
+    }
+
+    /// Renders one frame and observes its queue submission completing on the GPU.
+    ///
+    /// This opt-in path is reserved for the bounded surface performance report.
+    pub fn render_with_gpu_completion_measurement(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        primitives: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        screen: egui_wgpu::ScreenDescriptor,
+    ) {
+        self.render_with_load(
+            device,
+            queue,
+            view,
+            primitives,
+            textures_delta,
+            screen,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            "project hub encoder",
+            "project hub pass",
+            true,
         );
     }
 
@@ -183,6 +312,7 @@ impl HubRenderer {
             wgpu::LoadOp::Load,
             "splash overlay encoder",
             "splash overlay pass",
+            false,
         );
     }
 
@@ -197,7 +327,16 @@ impl HubRenderer {
         load: wgpu::LoadOp<wgpu::Color>,
         encoder_label: &'static str,
         pass_label: &'static str,
+        measure_gpu_completion: bool,
     ) {
+        if measure_gpu_completion {
+            // Poll, never wait: callbacks are serviced opportunistically without
+            // stalling the interactive render path.
+            let _ = device.poll(wgpu::PollType::Poll);
+            if let Some(elapsed_nanos) = self.gpu_completion_mailbox.drain_completed() {
+                self.gpu_completion_timing.push(elapsed_nanos);
+            }
+        }
         for (id, delta) in &textures_delta.set {
             self.renderer.update_texture(device, queue, *id, delta);
         }
@@ -226,10 +365,64 @@ impl HubRenderer {
             let mut pass = pass.forget_lifetime();
             self.renderer.render(&mut pass, primitives, &screen);
         }
+        let submission_start = measure_gpu_completion
+            .then(|| self.gpu_completion_mailbox.reserve())
+            .flatten();
         queue.submit(Some(encoder.finish()));
+        if let Some(submission_start) = submission_start {
+            let mailbox = Arc::clone(&self.gpu_completion_mailbox);
+            queue.on_submitted_work_done(move || {
+                let elapsed_nanos =
+                    submission_start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                mailbox.complete(elapsed_nanos);
+            });
+        }
         for id in &textures_delta.free {
             self.renderer.free_texture(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_completion_tests {
+    use super::{GPU_COMPLETION_SAMPLE_WINDOW, GpuCompletionMailbox, GpuCompletionTimingWindow};
+
+    #[test]
+    fn completion_window_reports_bounded_nearest_rank_p95_and_max() {
+        let mut window = GpuCompletionTimingWindow::default();
+        for nanos in 1..=100_u64 {
+            window.push(nanos * 1_000_000);
+        }
+
+        let timing = window.snapshot();
+        assert_eq!(timing.samples, 100);
+        assert_eq!(timing.p95_ms, 95.0);
+        assert_eq!(timing.max_ms, 100.0);
+    }
+
+    #[test]
+    fn completion_window_wraps_without_exceeding_fixed_capacity() {
+        let mut window = GpuCompletionTimingWindow::default();
+        for nanos in 1..=(GPU_COMPLETION_SAMPLE_WINDOW as u64 + 5) {
+            window.push(nanos * 1_000_000);
+        }
+
+        let timing = window.snapshot();
+        assert_eq!(timing.samples, GPU_COMPLETION_SAMPLE_WINDOW);
+        assert_eq!(timing.max_ms, (GPU_COMPLETION_SAMPLE_WINDOW + 5) as f32);
+        assert_eq!(timing.p95_ms, (GPU_COMPLETION_SAMPLE_WINDOW - 1) as f32);
+    }
+
+    #[test]
+    fn completion_mailbox_allows_one_pending_sample_and_drains_once() {
+        let mailbox = GpuCompletionMailbox::default();
+        assert!(mailbox.reserve().is_some());
+        assert!(mailbox.reserve().is_none());
+
+        mailbox.complete(42);
+        assert_eq!(mailbox.drain_completed(), Some(42));
+        assert_eq!(mailbox.drain_completed(), None);
+        assert!(mailbox.reserve().is_some());
     }
 }
 

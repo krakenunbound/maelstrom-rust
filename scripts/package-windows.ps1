@@ -363,7 +363,7 @@ try {
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
         'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings',
-        'viewer_stage_timings', 'audio_stage_timings', 'runtime_diagnostics'
+        'viewer_stage_timings', 'gpu_stage_timings', 'audio_stage_timings', 'runtime_diagnostics'
     )) {
         if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
             throw "Surface submission probe omitted $property."
@@ -372,7 +372,7 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 5) {
+    if ($surfaceSubmission.schema_version -ne 6) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     foreach ($property in @(
@@ -507,6 +507,30 @@ try {
         if ($stage.samples -lt 1) {
             throw "Full media smoke did not exercise viewer timing stage $stageName."
         }
+    }
+    $gpuCompletion = $surfaceSubmission.gpu_stage_timings.submission_to_completion_elapsed
+    if ($null -eq $gpuCompletion) {
+        throw 'Surface submission probe omitted GPU submission-to-completion timing.'
+    }
+    foreach ($property in @('samples', 'p95_ms', 'max_ms')) {
+        if ($gpuCompletion.PSObject.Properties.Name -notcontains $property) {
+            throw "GPU submission-to-completion timing omitted $property."
+        }
+        if ($property -eq 'samples') {
+            if (-not (Test-JsonIntegerValue $gpuCompletion.$property) -or
+                $gpuCompletion.$property -lt 0) {
+                throw "GPU submission-to-completion timing returned invalid unsigned integer ${property}: $($gpuCompletion.$property)."
+            }
+        } elseif (-not (Test-JsonFiniteNumber $gpuCompletion.$property) -or
+            $gpuCompletion.$property -lt 0) {
+            throw "GPU submission-to-completion timing returned invalid numeric ${property}: $($gpuCompletion.$property)."
+        }
+    }
+    if ($gpuCompletion.max_ms -lt $gpuCompletion.p95_ms) {
+        throw 'GPU submission-to-completion timing has max below p95.'
+    }
+    if ($gpuCompletion.samples -lt 1) {
+        throw 'Full media smoke did not observe a completed GPU submission.'
     }
     foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {
         if ($surfaceSubmission.decoder_stage_timings.$stageName.samples -lt 1) {

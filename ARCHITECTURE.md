@@ -269,7 +269,16 @@ changed-composition command encoding, and the `frame.present()` call handoff. Al
 the package full-media smoke waits for at least one successful upload and one actual composition
 encode before publishing this evidence.
 
-Schema 5 also snapshots the existing cumulative runtime counters for monitor request/completion/
+Schema 6 adds a separate GPU submission-completion sub-object. During the opt-in editor report only,
+`nle-render` keeps one completion callback in flight and uses non-blocking device polling; a stalled
+submission skips later samples instead of allocating an unbounded callback queue. Its fixed
+120-sample p95/maximum window measures CPU monotonic elapsed time from immediately before queue
+submission until wgpu reports all GPU work through that submission complete. The value can include
+earlier queue backlog and driver scheduling, so it is not an isolated GPU-pass duration. It also
+includes callback dispatch/non-blocking poll observation delay, ends before the presentation
+handoff, and cannot prove DWM composition or physical scanout.
+
+Schema 6 also snapshots the existing cumulative runtime counters for monitor request/completion/
 presentation/drop/hold/late/error outcomes, native/fallback viewer uploads, and audio underrun,
 callback-lock, and late-discard faults. This snapshot covers process/session lifetime rather than
 the fixed 120-frame timing window and adds no per-frame logging or persistent project state.
@@ -308,8 +317,9 @@ Before a foundation change lands:
   layers change;
 - verify Windows packaging rejects GPL/nonfree dependencies and starts using only bundled DLLs;
 - gate packaging on 120 CPU frame/surface-submit samples, recording CPU p95, submission-interval
-  p95, and average submission cadence outside the shipped bundle; do not describe this as
-  compositor scanout or GPU-completion timing;
+  p95, average submission cadence, and at least one completed measured GPU submission outside the
+  shipped bundle; do not describe submission completion as compositor scanout or isolated GPU-pass
+  execution timing;
 - make the Windows package prove real-media linked bars, metadata, waveform, monitor decode,
   playback, live audio meters, confirmed FFmpeg export progress, cancellation without a partial
   output, and exact process-tree cleanup using only its adjacent runtime;
