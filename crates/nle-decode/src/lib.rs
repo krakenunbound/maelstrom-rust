@@ -256,39 +256,27 @@ pub struct MonitorDecoderDiagnostics {
 }
 
 struct DecoderResourceDiagnostics {
-    frame_cache_capacity_bytes: usize,
-    current_frame_cache_bytes: AtomicUsize,
-    peak_frame_cache_bytes: AtomicUsize,
     active_sticky_session_mask: AtomicUsize,
     peak_sticky_sessions: AtomicUsize,
 }
 
 impl DecoderResourceDiagnostics {
-    fn new(frame_cache_capacity_bytes: usize) -> Self {
+    fn new() -> Self {
         Self {
-            frame_cache_capacity_bytes,
-            current_frame_cache_bytes: AtomicUsize::new(0),
-            peak_frame_cache_bytes: AtomicUsize::new(0),
             active_sticky_session_mask: AtomicUsize::new(0),
             peak_sticky_sessions: AtomicUsize::new(0),
         }
     }
 
-    fn snapshot(&self) -> MonitorDecoderDiagnostics {
-        let current_frame_cache_bytes = self.current_frame_cache_bytes.load(Ordering::Acquire);
+    fn snapshot(&self, cache: MonitorFrameCachePoolDiagnostics) -> MonitorDecoderDiagnostics {
         let active_sticky_sessions = self
             .active_sticky_session_mask
             .load(Ordering::Acquire)
             .count_ones() as usize;
         MonitorDecoderDiagnostics {
-            frame_cache_capacity_bytes: self.frame_cache_capacity_bytes,
-            current_frame_cache_bytes,
-            // A reader may race publication across separate atomics. Clamp peak fields to the
-            // observed current count so every individual snapshot remains internally coherent.
-            peak_frame_cache_bytes: self
-                .peak_frame_cache_bytes
-                .load(Ordering::Acquire)
-                .max(current_frame_cache_bytes),
+            frame_cache_capacity_bytes: cache.capacity_bytes,
+            current_frame_cache_bytes: cache.current_bytes,
+            peak_frame_cache_bytes: cache.peak_bytes,
             active_sticky_sessions,
             peak_sticky_sessions: self
                 .peak_sticky_sessions
@@ -296,14 +284,6 @@ impl DecoderResourceDiagnostics {
                 .max(active_sticky_sessions),
             session_cap: MONITOR_WORKER_COUNT,
         }
-    }
-
-    fn publish_cache_bytes(&self, used_bytes: usize) {
-        debug_assert!(used_bytes <= self.frame_cache_capacity_bytes);
-        self.peak_frame_cache_bytes
-            .fetch_max(used_bytes, Ordering::AcqRel);
-        self.current_frame_cache_bytes
-            .store(used_bytes, Ordering::Release);
     }
 
     fn publish_worker_session(&self, worker_index: usize, active: bool) {
@@ -320,6 +300,46 @@ impl DecoderResourceDiagnostics {
         };
         self.peak_sticky_sessions
             .fetch_max(mask.count_ones() as usize, Ordering::AcqRel);
+    }
+}
+
+/// Exact, shared decoded-frame cache usage. A snapshot represents one physical cache, even
+/// when several monitor decoders reference its pool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorFrameCachePoolDiagnostics {
+    pub capacity_bytes: usize,
+    pub current_bytes: usize,
+    pub peak_bytes: usize,
+}
+
+struct FrameCacheDiagnostics {
+    capacity_bytes: usize,
+    current_bytes: AtomicUsize,
+    peak_bytes: AtomicUsize,
+}
+
+impl FrameCacheDiagnostics {
+    fn new(capacity_bytes: usize) -> Self {
+        Self {
+            capacity_bytes,
+            current_bytes: AtomicUsize::new(0),
+            peak_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> MonitorFrameCachePoolDiagnostics {
+        let current_bytes = self.current_bytes.load(Ordering::Acquire);
+        MonitorFrameCachePoolDiagnostics {
+            capacity_bytes: self.capacity_bytes,
+            current_bytes,
+            peak_bytes: self.peak_bytes.load(Ordering::Acquire).max(current_bytes),
+        }
+    }
+
+    fn publish(&self, used_bytes: usize) {
+        debug_assert!(used_bytes <= self.capacity_bytes);
+        self.peak_bytes.fetch_max(used_bytes, Ordering::AcqRel);
+        self.current_bytes.store(used_bytes, Ordering::Release);
     }
 }
 
@@ -635,6 +655,43 @@ pub fn bounded_dimensions(width: u32, height: u32) -> (u32, u32, usize) {
     (width, height, bytes)
 }
 
+/// Cloneable ownership of one hard-capped decoded-frame cache.
+///
+/// Cloned pools share decoded RGBA storage only. Decoder queues, events, generations, and
+/// sticky sessions remain per-decoder.
+#[derive(Clone)]
+pub struct MonitorFrameCachePool {
+    cache: Arc<Mutex<MonitorFrameCache>>,
+    diagnostics: Arc<FrameCacheDiagnostics>,
+}
+
+impl MonitorFrameCachePool {
+    /// Creates one application-wide decoded-frame cache with the supplied hard byte cap.
+    pub fn new(capacity_bytes: usize) -> Self {
+        Self::new_internal(capacity_bytes)
+    }
+
+    /// Returns exact usage for this physical cache. Do not sum this snapshot per decoder.
+    pub fn diagnostics(&self) -> MonitorFrameCachePoolDiagnostics {
+        self.diagnostics.snapshot()
+    }
+
+    fn new_private(capacity_bytes: usize) -> Self {
+        Self::new_internal(capacity_bytes)
+    }
+
+    fn new_internal(capacity_bytes: usize) -> Self {
+        let diagnostics = Arc::new(FrameCacheDiagnostics::new(capacity_bytes));
+        Self {
+            cache: Arc::new(Mutex::new(MonitorFrameCache::new_with_diagnostics(
+                capacity_bytes,
+                Arc::clone(&diagnostics),
+            ))),
+            diagnostics,
+        }
+    }
+}
+
 /// Latest-wins asynchronous monitor decoder.
 ///
 /// A bounded scheduler pool owns independent libav input, decoder, and scaling contexts.
@@ -648,6 +705,7 @@ pub struct MonitorDecoder {
     last_scrub_target: Mutex<Option<(u32, i64)>>,
     cache_reset_generation: Arc<AtomicU64>,
     resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+    frame_cache_pool: MonitorFrameCachePool,
     session_pool: MonitorSessionPool,
 }
 
@@ -687,13 +745,23 @@ impl MonitorDecoder {
         frame_cache_bytes: usize,
         session_pool: MonitorSessionPool,
     ) -> Self {
+        Self::new_with_notifier_and_frame_cache_pool_and_session_pool(
+            notify,
+            MonitorFrameCachePool::new_private(frame_cache_bytes),
+            session_pool,
+        )
+    }
+
+    /// Creates a decoder with explicit shared decoded-frame-cache and sticky-session pools.
+    pub fn new_with_notifier_and_frame_cache_pool_and_session_pool(
+        notify: impl Fn() + Send + Sync + 'static,
+        frame_cache_pool: MonitorFrameCachePool,
+        session_pool: MonitorSessionPool,
+    ) -> Self {
         let events = Arc::new(EventSlot::new(notify));
         let cache_reset_generation = Arc::new(AtomicU64::new(0));
-        let resource_diagnostics = Arc::new(DecoderResourceDiagnostics::new(frame_cache_bytes));
-        let frame_cache = Arc::new(Mutex::new(MonitorFrameCache::new_with_diagnostics(
-            frame_cache_bytes,
-            Arc::clone(&resource_diagnostics),
-        )));
+        let resource_diagnostics = Arc::new(DecoderResourceDiagnostics::new());
+        let frame_cache = Arc::clone(&frame_cache_pool.cache);
         let mut workers = Vec::with_capacity(MONITOR_WORKER_COUNT);
         let mut stage_timings = Vec::with_capacity(MONITOR_WORKER_COUNT);
         for index in 0..MONITOR_WORKER_COUNT {
@@ -737,6 +805,7 @@ impl MonitorDecoder {
             last_scrub_target: Mutex::new(None),
             cache_reset_generation,
             resource_diagnostics,
+            frame_cache_pool,
             session_pool,
         }
     }
@@ -814,7 +883,13 @@ impl MonitorDecoder {
 
     /// Returns a copyable snapshot of bounded cache and sticky-session resource use.
     pub fn diagnostics(&self) -> MonitorDecoderDiagnostics {
-        self.resource_diagnostics.snapshot()
+        self.resource_diagnostics
+            .snapshot(self.frame_cache_pool.diagnostics())
+    }
+
+    /// Returns the decoded-frame pool used by this decoder.
+    pub fn frame_cache_pool(&self) -> MonitorFrameCachePool {
+        self.frame_cache_pool.clone()
     }
 
     /// Returns the shared pool used by this decoder. Diagnostics on the returned clone are
@@ -936,7 +1011,7 @@ impl From<FrameKey> for FrameStreamKey {
 /// Continuous scrubbing therefore cannot fill the LRU with every intermediate request.
 struct MonitorFrameCache {
     frames: FrameCache,
-    resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+    cache_diagnostics: Arc<FrameCacheDiagnostics>,
     last_anchor_bucket: HashMap<FrameStreamKey, i64>,
     latest: HashMap<FrameStreamKey, (FrameKey, bool)>,
     /// Source-time lookup for scrub traversal frames. The frame cache remains the byte owner;
@@ -953,17 +1028,17 @@ impl MonitorFrameCache {
     fn new(capacity_bytes: usize) -> Self {
         Self::new_with_diagnostics(
             capacity_bytes,
-            Arc::new(DecoderResourceDiagnostics::new(capacity_bytes)),
+            Arc::new(FrameCacheDiagnostics::new(capacity_bytes)),
         )
     }
 
     fn new_with_diagnostics(
         capacity_bytes: usize,
-        resource_diagnostics: Arc<DecoderResourceDiagnostics>,
+        cache_diagnostics: Arc<FrameCacheDiagnostics>,
     ) -> Self {
         Self {
             frames: FrameCache::new(capacity_bytes),
-            resource_diagnostics,
+            cache_diagnostics,
             last_anchor_bucket: HashMap::new(),
             latest: HashMap::new(),
             scrub_frames: HashMap::new(),
@@ -995,9 +1070,9 @@ impl MonitorFrameCache {
             && self.latest.len() >= MAX_CACHE_STREAM_STATES)
             || (!self.sources.contains_key(&request.media_id)
                 && self.sources.len() >= MAX_CACHE_STREAM_STATES);
-        let reset_sessions =
-            project_changed || source_changed || scaling_changed || stream_limit_reached;
-        if reset_sessions {
+        let reset_cache =
+            project_changed || scaling_changed || stream_limit_reached || source_changed;
+        if reset_cache {
             self.clear();
             self.project_epoch = Some(request.cache_epoch);
         }
@@ -1005,7 +1080,7 @@ impl MonitorFrameCache {
             .entry(request.media_id)
             .or_insert_with(|| request.path.clone());
         self.high_quality_scaling = Some(request.high_quality_scaling);
-        reset_sessions
+        reset_cache
     }
 
     fn clear(&mut self) {
@@ -1159,8 +1234,7 @@ impl MonitorFrameCache {
     }
 
     fn publish_frame_cache_bytes(&self) {
-        self.resource_diagnostics
-            .publish_cache_bytes(self.frames.used_bytes());
+        self.cache_diagnostics.publish(self.frames.used_bytes());
     }
 }
 
@@ -3290,6 +3364,125 @@ mod tests {
     }
 
     #[test]
+    fn shared_frame_cache_pool_reuses_pixels_without_rewriting_event_identity() {
+        let pool = MonitorFrameCachePool::new(8 * 1024);
+        let session_pool = MonitorSessionPool::new(2, 2);
+        let first = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_session_pool(
+            || {},
+            pool.clone(),
+            session_pool.clone(),
+        );
+        let second = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_session_pool(
+            || {},
+            pool.clone(),
+            session_pool,
+        );
+        let first_request = request(PathBuf::from("shared-cache-must-not-open.mp4"), 101);
+        let mut second_request = first_request.clone();
+        second_request.request_id = 202;
+        second_request.project_epoch = 99;
+        {
+            let mut cache = pool.cache.lock().expect("shared frame cache lock");
+            cache.prepare_request(&first_request);
+            assert!(cache.insert_if_current(
+                &first_request,
+                frame_cache_key(&first_request, first_request.source_tick),
+                FrameValue::new(0, 40, 30, vec![7; 40 * 30 * 4].into()),
+            ));
+        }
+
+        first.request(first_request.clone()).unwrap();
+        second.request(second_request.clone()).unwrap();
+        let DecodeEvent::Frame(first_frame) = receive_for(&first, &first_request) else {
+            panic!("first shared-cache response was not a frame");
+        };
+        let DecodeEvent::Frame(second_frame) = receive_for(&second, &second_request) else {
+            panic!("second shared-cache response was not a frame");
+        };
+        assert_eq!(first_frame.request_id, first_request.request_id);
+        assert_eq!(first_frame.project_epoch, first_request.project_epoch);
+        assert_eq!(second_frame.request_id, second_request.request_id);
+        assert_eq!(second_frame.project_epoch, second_request.project_epoch);
+        assert!(Arc::ptr_eq(&first_frame.rgba, &second_frame.rgba));
+        let cache = pool.diagnostics();
+        assert_eq!(cache.capacity_bytes, 8 * 1024);
+        assert_eq!(cache.current_bytes, 40 * 30 * 4);
+        assert_eq!(
+            first.diagnostics().frame_cache_capacity_bytes,
+            cache.capacity_bytes
+        );
+        assert_eq!(
+            second.diagnostics().frame_cache_capacity_bytes,
+            cache.capacity_bytes
+        );
+    }
+
+    #[test]
+    fn shared_frame_cache_pool_does_not_alias_source_or_scaler_policy() {
+        let pool = MonitorFrameCachePool::new(8 * 1024);
+        let original = request(PathBuf::from("shared-cache-source-a.mp4"), 1);
+        let key = frame_cache_key(&original, original.source_tick);
+        let mut cache = pool.cache.lock().expect("shared frame cache lock");
+        cache.prepare_request(&original);
+        assert!(cache.insert_if_current(
+            &original,
+            key,
+            FrameValue::new(0, 40, 30, vec![9; 40 * 30 * 4].into()),
+        ));
+
+        let mut distinct_source = original.clone();
+        distinct_source.media_id = 4;
+        distinct_source.path = PathBuf::from("shared-cache-source-b.mp4");
+        cache.prepare_request(&distinct_source);
+        assert!(cache.get(&frame_cache_key(&distinct_source, 0)).is_none());
+
+        cache.prepare_request(&original);
+        assert!(cache.insert_if_current(
+            &original,
+            key,
+            FrameValue::new(0, 40, 30, vec![8; 40 * 30 * 4].into()),
+        ));
+        let mut relinked_source = original.clone();
+        relinked_source.path = PathBuf::from("shared-cache-source-relinked.mp4");
+        assert!(cache.prepare_request(&relinked_source));
+        assert!(cache.get(&key).is_none());
+
+        cache.prepare_request(&original);
+        assert!(cache.insert_if_current(
+            &original,
+            key,
+            FrameValue::new(0, 40, 30, vec![7; 40 * 30 * 4].into()),
+        ));
+        let mut distinct_output = original.clone();
+        distinct_output.width = 80;
+        assert!(
+            cache
+                .get(&frame_cache_key(
+                    &distinct_output,
+                    distinct_output.source_tick
+                ))
+                .is_none()
+        );
+
+        let mut distinct_epoch = original.clone();
+        distinct_epoch.cache_epoch += 1;
+        assert!(cache.prepare_request(&distinct_epoch));
+        assert!(
+            cache
+                .get(&frame_cache_key(
+                    &distinct_epoch,
+                    distinct_epoch.source_tick
+                ))
+                .is_none()
+        );
+
+        let mut distinct_policy = original.clone();
+        distinct_policy.high_quality_scaling = false;
+        assert!(cache.prepare_request(&distinct_policy));
+        assert!(cache.get(&frame_cache_key(&distinct_policy, 0)).is_none());
+    }
+
+    #[test]
     fn unavailable_background_session_defers_without_publishing_decode_error() {
         let desired = request(
             PathBuf::from("must-not-open-while-background-is-full.mp4"),
@@ -3376,7 +3569,7 @@ mod tests {
 
     #[test]
     fn frame_cache_diagnostics_track_current_peak_and_clear() {
-        let diagnostics = Arc::new(DecoderResourceDiagnostics::new(32));
+        let diagnostics = Arc::new(FrameCacheDiagnostics::new(32));
         let mut cache = MonitorFrameCache::new_with_diagnostics(32, Arc::clone(&diagnostics));
         let key = FrameKey {
             project_epoch: 1,
@@ -3402,30 +3595,30 @@ mod tests {
             FrameValue::new(SPARSE_CACHE_INTERVAL_TICKS * 2, 2, 2, vec![2; 16].into()),
         ));
         let snapshot = diagnostics.snapshot();
-        assert_eq!(snapshot.frame_cache_capacity_bytes, 32);
-        assert_eq!(snapshot.current_frame_cache_bytes, 32);
-        assert_eq!(snapshot.peak_frame_cache_bytes, 32);
-        assert!(snapshot.current_frame_cache_bytes <= snapshot.frame_cache_capacity_bytes);
+        assert_eq!(snapshot.capacity_bytes, 32);
+        assert_eq!(snapshot.current_bytes, 32);
+        assert_eq!(snapshot.peak_bytes, 32);
+        assert!(snapshot.current_bytes <= snapshot.capacity_bytes);
 
         cache.clear();
         let snapshot = diagnostics.snapshot();
-        assert_eq!(snapshot.current_frame_cache_bytes, 0);
-        assert_eq!(snapshot.peak_frame_cache_bytes, 32);
+        assert_eq!(snapshot.current_bytes, 0);
+        assert_eq!(snapshot.peak_bytes, 32);
     }
 
     #[test]
     fn worker_session_diagnostics_aggregate_with_fixed_cap() {
-        let diagnostics = DecoderResourceDiagnostics::new(0);
+        let diagnostics = DecoderResourceDiagnostics::new();
         diagnostics.publish_worker_session(0, true);
         diagnostics.publish_worker_session(2, true);
-        let snapshot = diagnostics.snapshot();
+        let snapshot = diagnostics.snapshot(MonitorFrameCachePoolDiagnostics::default());
         assert_eq!(snapshot.active_sticky_sessions, 2);
         assert_eq!(snapshot.peak_sticky_sessions, 2);
         assert_eq!(snapshot.session_cap, MONITOR_WORKER_COUNT);
 
         diagnostics.publish_worker_session(0, false);
         diagnostics.publish_worker_session(2, false);
-        let snapshot = diagnostics.snapshot();
+        let snapshot = diagnostics.snapshot(MonitorFrameCachePoolDiagnostics::default());
         assert_eq!(snapshot.active_sticky_sessions, 0);
         assert_eq!(snapshot.peak_sticky_sessions, 2);
         assert!(snapshot.peak_sticky_sessions <= snapshot.session_cap);
@@ -3433,22 +3626,24 @@ mod tests {
 
     #[test]
     fn diagnostics_snapshots_remain_peak_coherent_while_publishing() {
-        let diagnostics = Arc::new(DecoderResourceDiagnostics::new(128));
+        let diagnostics = Arc::new(DecoderResourceDiagnostics::new());
+        let cache_diagnostics = Arc::new(FrameCacheDiagnostics::new(128));
         let publishing = Arc::new(AtomicBool::new(true));
         let writer_diagnostics = Arc::clone(&diagnostics);
+        let writer_cache_diagnostics = Arc::clone(&cache_diagnostics);
         let writer_publishing = Arc::clone(&publishing);
         let writer = thread::spawn(move || {
             for _ in 0..10_000 {
-                writer_diagnostics.publish_cache_bytes(128);
+                writer_cache_diagnostics.publish(128);
                 writer_diagnostics.publish_worker_session(0, true);
-                writer_diagnostics.publish_cache_bytes(0);
+                writer_cache_diagnostics.publish(0);
                 writer_diagnostics.publish_worker_session(0, false);
             }
             writer_publishing.store(false, Ordering::Release);
         });
 
         while publishing.load(Ordering::Acquire) {
-            let snapshot = diagnostics.snapshot();
+            let snapshot = diagnostics.snapshot(cache_diagnostics.snapshot());
             assert!(snapshot.current_frame_cache_bytes <= snapshot.peak_frame_cache_bytes);
             assert!(snapshot.active_sticky_sessions <= snapshot.peak_sticky_sessions);
         }

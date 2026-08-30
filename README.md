@@ -28,7 +28,8 @@ remain resident for the future inference engines.
 cargo run -p nle-app
 ```
 
-The decoded monitor-frame cache defaults to 1024 MB and can be bounded explicitly:
+The monitor decoders share one decoded-frame cache. Its app-wide hard cap
+defaults to 1024 MB and can be bounded explicitly:
 
 ```powershell
 cargo run -p nle-app -- --cache-mb 512

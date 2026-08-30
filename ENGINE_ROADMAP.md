@@ -123,7 +123,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
 - [ ] Maintain one sticky decoder session per active source within a bounded session pool. A
       shared hard pool now limits all visible monitor decoders to four foreground and four
       speculative-background permits, with exact coherent playback-soak diagnostics and RAII
-      release on every exit path. Deduplicating speculative contexts by active source remains.
+      release on every exit path. All monitor decoders now also share one app-wide hard-capped
+      decoded-frame cache, so identical source/tick/output requests reuse the same pixels and the
+      byte budget is measured exactly once. Deduplicating sticky/speculative contexts by active
+      source remains.
 - [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing.
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.
 - [x] Add adaptive full/half/quarter/eighth preview resolution based on measured frame budget.
@@ -152,11 +155,13 @@ Exit gate:
       counter deltas including a documented bounded stale-event allowance, bounded cache/session evidence, post-drop release, and tracked-process
       working-set samples. It is not realtime playback, audio, visible UI, GPU compositor, or
       cross-hardware proof. The committed gate passed its authoritative local Software run on
-      2026-08-29 for 600.031 seconds: 15,195 cycles / 60,780 requests, 37 us scheduler p95
-      (183 us max), 48 ms coarse frame-ready p95 (76 ms max), 4 rejected stale events within a
-      61-event bound, zero errors, 207,360,000 current / 215,654,400 peak-upper-bound bytes under
-      the 1 GiB cache cap, 7 peak sessions under the 8-session cap, zero post-drop sessions, and
-      89,128,960 bytes of working-set growth under the 1.5 GiB diagnostic bound. The exit remains
+      2026-08-29 after the app-wide cache consolidation for 600.032 seconds: 14,899 cycles / 59,596
+      requests, 38 us scheduler p95 (2,675 us max), 49 ms coarse frame-ready p95 (76 ms max), 6
+      rejected stale events within a 60-event bound, zero errors, 207,360,000 current / 215,654,400
+      exact peak bytes under the 1 GiB cache cap, 7 peak sessions under the 8-session cap, zero
+      post-drop sessions, and 85,987,328 bytes of working-set growth under the 1.5 GiB diagnostic
+      bound. The isolated post-refactor comparison also held four-source scheduler p95 to 71 us.
+      The exit remains
       open for realtime UI-present and cross-hardware proof; see `docs/phase1-sustained-soak.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
       A deterministic test-only decoder barrier proves an independently scheduled ready source can

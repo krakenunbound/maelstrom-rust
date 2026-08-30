@@ -75,7 +75,7 @@ The committed gate passed on 2026-08-29 for 600.031 seconds. It completed
 (183 us maximum), 48 ms coarse frame-ready p95 (76 ms maximum), four rejected
 stale/non-converging events under the 61-event limit, and zero monitor errors.
 The cache ended at 207,360,000 bytes with a 215,654,400-byte peak upper bound
-under its 1 GiB cap. The shared pool peaked at seven of eight sessions and
+under its 1 GiB cap. The shared session pool peaked at seven of eight sessions and
 released to zero after app drop. Working-set growth was 89,128,960 bytes under
 the 1.5 GiB diagnostic bound. The observed decoder backend was Software.
 
@@ -85,3 +85,23 @@ test executable SHA-256 was
 `7d18a20f9fe4357b5f5e4986f7f129755db0bffe4c66153336e5dfbb7f3e90d8`; the
 app-report SHA-256 was
 `9dfe0003242cffdb47e90ff2f192e1469cb3db7ab2cacddd9eb5b7fe38ee1ef3`.
+
+## Post-shared-cache authoritative evidence
+
+After consolidating the four decoder-local caches into one app-wide hard-capped
+cache, the same gate passed again on 2026-08-29 for 600.032 seconds. It completed
+14,899 four-source cycles and 59,596 requests with 38 us input-to-submit p95
+(2,675 us maximum), 49 ms coarse frame-ready p95 (76 ms maximum), six rejected
+stale/non-converging events under the 60-event limit, and zero monitor errors.
+All 67,335 completed frames were presented. The physical cache ended at
+207,360,000 bytes and reached an exact 215,654,400-byte peak under its 1 GiB
+cap. The session pool again peaked at seven of eight sessions and released to
+zero after app drop. Working-set growth was 85,987,328 bytes under the 1.5 GiB
+bound. The observed decoder backend was Software.
+
+The ignored wrapper is
+`artifacts/phase1-sustained/phase1-sustained-shared-cache-wrapper.json`. The
+exact release test executable SHA-256 was
+`d74dbff796ad692b280de89c2c47d39dbef1d0c1ee8f013900c5c3e1a077897f`; the
+app-report SHA-256 was
+`d30a9d074dc4f73919c78aefdfe5416596dab3d7ccf95fa347a1aed50717d86d`.

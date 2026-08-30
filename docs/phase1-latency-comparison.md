@@ -38,3 +38,8 @@ before printing `PASS` or reporting the preserved report path.
 This is local Software-backend evidence, not sustained playback, a visible UI
 responsiveness measurement, GPU-compositor proof, or cross-hardware completion.
 The broader Phase 1 exit gate remains unchecked.
+
+After the app-wide decoded-frame cache consolidation, the gate passed again on
+2026-08-29 with a four-source input-to-submit p95 of 71 us and coarse
+frame-ready p95 of 93 ms. The ignored report is
+`artifacts/phase1-latency/phase1-latency-shared-cache.json`.
