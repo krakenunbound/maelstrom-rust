@@ -251,7 +251,17 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       lanes are protected from speculative release. Hard-cap, permit-retirement, and
       post-release-zero tests cover live plus retiring actors. The decoded-frame cache remains
       independently byte-capped by its exact LRU accounting.
-- [ ] Expose active source backend, preview scale, proxy/original choice, and fallback reason.
+- [x] Expose active source backend, preview scale, proxy/original choice, and fallback reason.
+      The Inspector now presents a fixed four-layer runtime view of the pixels actually retained
+      by the viewer: original source versus the honestly named internal scrub preview, concrete
+      decoder backend when observed, selected-to-resolved quality and raster dimensions, and
+      structured forced-software, hardware-unavailable, or runtime-hardware-failure reasons in
+      English and Japanese. Sticky decoder sessions retain runtime-fallback provenance while
+      shared cache hits explicitly report backend and fallback as unobserved rather than borrowing
+      a different session's identity. Diagnostics clear with their monitor layer and are excluded
+      from `.nleproj`; full decoder, UI-core, and app suites cover fallback retention, cache
+      provenance, per-layer lifecycle, localization, and persistence. This does not claim a user
+      proxy/optimized-media workflow; that remains separate Phase 1 product work.
 
 Exit gate:
 

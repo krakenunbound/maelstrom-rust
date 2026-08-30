@@ -2,8 +2,9 @@
 mod editor;
 
 pub use editor::{
-    AudioPlaybackTransitionEnvelope, AudioPlaybackTransitionRole, CachedWaveform,
-    DEFAULT_STILL_IMAGE_DURATION, EDITOR_PROJECT_SNAPSHOT_VERSION, EditorAction,
+    ActivePreviewDecoderBackend, ActivePreviewDiagnostic, ActivePreviewFallbackReason,
+    ActivePreviewSourceKind, AudioPlaybackTransitionEnvelope, AudioPlaybackTransitionRole,
+    CachedWaveform, DEFAULT_STILL_IMAGE_DURATION, EDITOR_PROJECT_SNAPSHOT_VERSION, EditorAction,
     EditorExportStatus, EditorMediaSnapshot, EditorProjectSnapshot, EditorRestoreError,
     EditorState, EditorViewSnapshot, EditorWorkspace, EguiTimelineCanvas, EguiViewerCanvas,
     InvalidProjectFrameRate, MediaId, MediaKind, MediaMetadata, MediaStreamMetadata, MonitorFrame,

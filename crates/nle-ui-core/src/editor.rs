@@ -662,6 +662,73 @@ pub struct MonitorFrame {
     pub source_tick: Option<Tick>,
 }
 
+/// Origin of the image currently contributing to a live preview layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivePreviewSourceKind {
+    OriginalSource,
+    InternalScrubPreview,
+}
+
+/// Decoder backend actually used for a live preview layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivePreviewDecoderBackend {
+    Software,
+    IntelQuickSync,
+    NvidiaCuvid,
+    AppleVideoToolbox,
+    WindowsD3d11va,
+    WindowsDxva2,
+}
+
+/// Why a live preview layer fell back from the requested hardware path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivePreviewFallbackReason {
+    ForcedSoftware,
+    HardwareUnavailable,
+    HardwareDecodeFailed,
+}
+
+/// Allocation-free runtime evidence for one active preview layer.
+///
+/// This is supplied by the application after it selects and resolves a decode path. It is never
+/// serialized into a project snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivePreviewDiagnostic {
+    pub media_id: MediaId,
+    pub source_kind: ActivePreviewSourceKind,
+    /// `None` means the UI has not observed a concrete decoder for this layer yet.
+    pub decoder_backend: Option<ActivePreviewDecoderBackend>,
+    pub fallback_reason: Option<ActivePreviewFallbackReason>,
+    pub selected_quality: PreviewQuality,
+    pub resolved_quality: PreviewQuality,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ActivePreviewDiagnostic {
+    pub const fn new(
+        media_id: MediaId,
+        source_kind: ActivePreviewSourceKind,
+        decoder_backend: Option<ActivePreviewDecoderBackend>,
+        fallback_reason: Option<ActivePreviewFallbackReason>,
+        selected_quality: PreviewQuality,
+        resolved_quality: PreviewQuality,
+        dimensions: [u32; 2],
+    ) -> Self {
+        let [width, height] = dimensions;
+        Self {
+            media_id,
+            source_kind,
+            decoder_backend,
+            fallback_reason,
+            selected_quality,
+            resolved_quality,
+            width,
+            height,
+        }
+    }
+}
+
 /// Layout metadata for app-produced, row-major timeline thumbnails.
 ///
 /// The app owns decoding and texture upload. This describes the immutable GPU image so the UI
@@ -1293,6 +1360,8 @@ pub struct EditorState {
     track_heights: HashMap<TrackId, f32>,
     /// Retained decoded frames in the same bottom-to-top order as `playback_targets`.
     monitor_layers: [Option<MonitorFrame>; PREVIEW_VIDEO_LAYER_COUNT],
+    /// Runtime-only decode evidence in the same bottom-to-top order as `monitor_layers`.
+    active_preview_diagnostics: [Option<ActivePreviewDiagnostic>; PREVIEW_VIDEO_LAYER_COUNT],
     /// Compatibility mirror for callers that still consume one monitor frame.
     pub monitor: Option<MonitorFrame>,
     pub monitor_status: MonitorStatus,
@@ -1428,6 +1497,7 @@ impl EditorState {
             auto_fit_provisional_view: false,
             track_heights: HashMap::new(),
             monitor_layers: [None; PREVIEW_VIDEO_LAYER_COUNT],
+            active_preview_diagnostics: [None; PREVIEW_VIDEO_LAYER_COUNT],
             monitor: None,
             monitor_status: MonitorStatus::Empty,
             performance_hud,
@@ -2534,6 +2604,47 @@ impl EditorState {
         self.monitor_layers.get(layer).copied().flatten()
     }
 
+    /// Returns runtime decode evidence for one bottom-to-top preview layer.
+    pub fn active_preview_diagnostic_for_layer(
+        &self,
+        layer: usize,
+    ) -> Option<ActivePreviewDiagnostic> {
+        self.active_preview_diagnostics
+            .get(layer)
+            .copied()
+            .flatten()
+    }
+
+    /// Records runtime decode evidence for one bottom-to-top preview layer.
+    ///
+    /// Invalid layer indexes are ignored and return `false`, keeping completion notifications
+    /// from a stale decoder harmless on the UI thread.
+    pub fn set_active_preview_diagnostic_for_layer(
+        &mut self,
+        layer: usize,
+        diagnostic: ActivePreviewDiagnostic,
+    ) -> bool {
+        let Some(slot) = self.active_preview_diagnostics.get_mut(layer) else {
+            return false;
+        };
+        *slot = Some(diagnostic);
+        true
+    }
+
+    /// Clears runtime decode evidence for one preview layer.
+    pub fn clear_active_preview_diagnostic_for_layer(&mut self, layer: usize) -> bool {
+        let Some(slot) = self.active_preview_diagnostics.get_mut(layer) else {
+            return false;
+        };
+        *slot = None;
+        true
+    }
+
+    /// Clears all runtime preview decode evidence without affecting project persistence.
+    pub fn clear_active_preview_diagnostics(&mut self) {
+        self.active_preview_diagnostics = [None; PREVIEW_VIDEO_LAYER_COUNT];
+    }
+
     /// Installs the newest decoded frame for one bottom-to-top viewer layer.
     ///
     /// Invalid layer indexes are ignored so decode completion cannot panic the UI thread.
@@ -2568,6 +2679,7 @@ impl EditorState {
 
     pub fn reset_monitor(&mut self) {
         self.monitor_layers = [None; PREVIEW_VIDEO_LAYER_COUNT];
+        self.clear_active_preview_diagnostics();
         self.monitor = None;
         self.monitor_status = MonitorStatus::Empty;
     }
@@ -2578,6 +2690,7 @@ impl EditorState {
             return;
         };
         *slot = None;
+        let _ = self.clear_active_preview_diagnostic_for_layer(layer);
         self.monitor = self.monitor_layers.iter().rev().flatten().copied().next();
         self.monitor_status = if self.monitor.is_some() {
             MonitorStatus::Ready
@@ -10383,9 +10496,145 @@ fn focus_audio_track_in_audio_tab(state: &mut EditorState, track_id: TrackId) {
 }
 
 fn inspector_details(ui: &mut Ui, state: &mut EditorState) {
+    active_preview_inspector(ui, state);
     title_inspector(ui, state);
     audio_crossfade_inspector(ui, state);
     clip_inspector(ui, state);
+}
+
+fn active_preview_inspector(ui: &mut Ui, state: &EditorState) {
+    if !state.active_preview_diagnostics.iter().any(Option::is_some) {
+        return;
+    }
+    Frame::new()
+        .fill(Color32::from_rgb(17, 28, 32))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(43, 79, 85)))
+        .inner_margin(egui::Margin::symmetric(8, 7))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(t(state.language, "Active preview", "アクティブプレビュー"))
+                    .small()
+                    .strong(),
+            );
+            for (layer, diagnostic) in state
+                .active_preview_diagnostics
+                .iter()
+                .enumerate()
+                .filter_map(|(layer, diagnostic)| diagnostic.map(|diagnostic| (layer, diagnostic)))
+            {
+                ui.add_space(3.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} {} · {} {}",
+                        t(state.language, "Layer", "レイヤー"),
+                        layer + 1,
+                        t(state.language, "Media", "メディア"),
+                        diagnostic.media_id,
+                    ))
+                    .small()
+                    .strong()
+                    .color(Color32::from_rgb(132, 170, 174)),
+                );
+                metadata_row(
+                    ui,
+                    &t(state.language, "Source", "ソース"),
+                    active_preview_source_label(state.language, diagnostic.source_kind),
+                );
+                let decoder = diagnostic
+                    .decoder_backend
+                    .map(|backend| active_preview_decoder_label(state.language, backend))
+                    .unwrap_or_else(|| match state.language {
+                        Language::English => "Not observed",
+                        Language::Japanese => "未確認",
+                    });
+                metadata_row(ui, &t(state.language, "Decoder", "デコーダー"), decoder);
+                let quality = format!(
+                    "{} → {} · {}×{}",
+                    preview_quality_option_label(state.language, diagnostic.selected_quality),
+                    preview_quality_option_label(state.language, diagnostic.resolved_quality),
+                    diagnostic.width,
+                    diagnostic.height,
+                );
+                metadata_row(ui, &t(state.language, "Quality", "品質"), &quality);
+                let fallback = active_preview_fallback_status_label(state.language, diagnostic);
+                metadata_row(
+                    ui,
+                    &t(state.language, "Fallback", "フォールバック"),
+                    fallback,
+                );
+            }
+        });
+    ui.add_space(6.0);
+}
+
+fn active_preview_source_label(
+    language: Language,
+    source: ActivePreviewSourceKind,
+) -> &'static str {
+    match (language, source) {
+        (Language::English, ActivePreviewSourceKind::OriginalSource) => "Original source",
+        (Language::Japanese, ActivePreviewSourceKind::OriginalSource) => "元のソース",
+        (Language::English, ActivePreviewSourceKind::InternalScrubPreview) => {
+            "Internal scrub preview"
+        }
+        (Language::Japanese, ActivePreviewSourceKind::InternalScrubPreview) => {
+            "内部スクラブプレビュー"
+        }
+    }
+}
+
+fn active_preview_decoder_label(
+    language: Language,
+    backend: ActivePreviewDecoderBackend,
+) -> &'static str {
+    match (language, backend) {
+        (_, ActivePreviewDecoderBackend::Software) => "Software",
+        (_, ActivePreviewDecoderBackend::IntelQuickSync) => "Intel Quick Sync",
+        (_, ActivePreviewDecoderBackend::NvidiaCuvid) => "NVIDIA CUVID",
+        (_, ActivePreviewDecoderBackend::AppleVideoToolbox) => "Apple VideoToolbox",
+        (_, ActivePreviewDecoderBackend::WindowsD3d11va) => "Windows D3D11VA",
+        (_, ActivePreviewDecoderBackend::WindowsDxva2) => "Windows DXVA2",
+    }
+}
+
+fn active_preview_fallback_label(
+    language: Language,
+    reason: ActivePreviewFallbackReason,
+) -> &'static str {
+    match (language, reason) {
+        (Language::English, ActivePreviewFallbackReason::ForcedSoftware) => "Forced software",
+        (Language::Japanese, ActivePreviewFallbackReason::ForcedSoftware) => "ソフトウェアを強制",
+        (Language::English, ActivePreviewFallbackReason::HardwareUnavailable) => {
+            "Hardware unavailable"
+        }
+        (Language::Japanese, ActivePreviewFallbackReason::HardwareUnavailable) => {
+            "ハードウェアを利用できません"
+        }
+        (Language::English, ActivePreviewFallbackReason::HardwareDecodeFailed) => {
+            "Hardware decode failed"
+        }
+        (Language::Japanese, ActivePreviewFallbackReason::HardwareDecodeFailed) => {
+            "ハードウェアデコードに失敗"
+        }
+    }
+}
+
+fn active_preview_fallback_status_label(
+    language: Language,
+    diagnostic: ActivePreviewDiagnostic,
+) -> &'static str {
+    if let Some(reason) = diagnostic.fallback_reason {
+        return active_preview_fallback_label(language, reason);
+    }
+    let observed_without_fallback = diagnostic
+        .decoder_backend
+        .is_some_and(|backend| backend != ActivePreviewDecoderBackend::Software);
+    match (language, observed_without_fallback) {
+        (Language::English, true) => "Not needed",
+        (Language::Japanese, true) => "不要",
+        (Language::English, false) => "Not observed",
+        (Language::Japanese, false) => "未確認",
+    }
 }
 
 fn audio_details(ui: &mut Ui, state: &mut EditorState) {
@@ -22409,5 +22658,110 @@ mod tests {
         assert!(restored.video_strips.is_empty());
         assert!(restored.action.is_none());
         assert_eq!(restored.export_status, EditorExportStatus::Idle);
+    }
+
+    #[test]
+    fn active_preview_diagnostics_are_fixed_per_layer_and_clear_with_monitor() {
+        let mut editor = EditorState::new(Language::English, "Preview diagnostics");
+        let diagnostic = ActivePreviewDiagnostic::new(
+            7,
+            ActivePreviewSourceKind::OriginalSource,
+            Some(ActivePreviewDecoderBackend::IntelQuickSync),
+            Some(ActivePreviewFallbackReason::HardwareDecodeFailed),
+            PreviewQuality::Auto,
+            PreviewQuality::Half,
+            [960, 540],
+        );
+        assert!(editor.set_active_preview_diagnostic_for_layer(3, diagnostic));
+        assert_eq!(
+            editor.active_preview_diagnostic_for_layer(3),
+            Some(diagnostic)
+        );
+        assert!(!editor.set_active_preview_diagnostic_for_layer(4, diagnostic));
+        assert!(editor.active_preview_diagnostic_for_layer(4).is_none());
+        assert!(editor.clear_active_preview_diagnostic_for_layer(3));
+        assert!(editor.active_preview_diagnostic_for_layer(3).is_none());
+        assert!(editor.set_active_preview_diagnostic_for_layer(0, diagnostic));
+        editor.reset_monitor();
+        assert!(editor.active_preview_diagnostic_for_layer(0).is_none());
+    }
+
+    #[test]
+    fn active_preview_diagnostic_labels_are_localized_without_misnaming_scrub_preview() {
+        assert_eq!(
+            active_preview_source_label(
+                Language::English,
+                ActivePreviewSourceKind::InternalScrubPreview
+            ),
+            "Internal scrub preview"
+        );
+        assert_eq!(
+            active_preview_source_label(
+                Language::Japanese,
+                ActivePreviewSourceKind::InternalScrubPreview
+            ),
+            "内部スクラブプレビュー"
+        );
+        assert_eq!(
+            active_preview_decoder_label(
+                Language::Japanese,
+                ActivePreviewDecoderBackend::WindowsD3d11va
+            ),
+            "Windows D3D11VA"
+        );
+        assert_eq!(
+            active_preview_fallback_label(
+                Language::Japanese,
+                ActivePreviewFallbackReason::ForcedSoftware
+            ),
+            "ソフトウェアを強制"
+        );
+        let unobserved = ActivePreviewDiagnostic::new(
+            1,
+            ActivePreviewSourceKind::InternalScrubPreview,
+            None,
+            None,
+            PreviewQuality::Auto,
+            PreviewQuality::Quarter,
+            [160, 90],
+        );
+        assert_eq!(
+            active_preview_fallback_status_label(Language::English, unobserved),
+            "Not observed"
+        );
+        let hardware = ActivePreviewDiagnostic {
+            source_kind: ActivePreviewSourceKind::OriginalSource,
+            decoder_backend: Some(ActivePreviewDecoderBackend::WindowsD3d11va),
+            ..unobserved
+        };
+        assert_eq!(
+            active_preview_fallback_status_label(Language::Japanese, hardware),
+            "不要"
+        );
+    }
+
+    #[test]
+    fn active_preview_diagnostics_are_excluded_from_project_snapshots() {
+        let mut editor = EditorState::new(Language::English, "Preview diagnostics");
+        let diagnostic = ActivePreviewDiagnostic::new(
+            42,
+            ActivePreviewSourceKind::InternalScrubPreview,
+            None,
+            None,
+            PreviewQuality::Quarter,
+            PreviewQuality::Quarter,
+            [480, 270],
+        );
+        assert!(editor.set_active_preview_diagnostic_for_layer(1, diagnostic));
+        let json = serde_json::to_string(&editor.snapshot()).unwrap();
+        assert!(!json.contains("InternalScrubPreview"));
+        assert!(!json.contains("480"));
+        let restored = EditorState::restore(
+            Language::English,
+            "Preview diagnostics",
+            serde_json::from_str(&json).unwrap(),
+        )
+        .unwrap();
+        assert!(restored.active_preview_diagnostic_for_layer(1).is_none());
     }
 }

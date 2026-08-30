@@ -593,9 +593,12 @@ pub struct DecodedFrame {
     pub source_tick: i64,
     pub width: u32,
     pub height: u32,
-    /// Decoder that produced this frame. Cached frames retain the active source session's
-    /// backend when one is available; callers should keep the last known concrete value.
+    /// Decoder that produced this frame. Cache hits report `None` because cached pixels do not
+    /// retain producer provenance; callers must not infer it from the current source session.
     pub backend: Option<DecodeBackend>,
+    /// Why this frame's retained decoder session is using software rather than hardware.
+    /// Cached frames do not carry this provenance and therefore always report `None`.
+    pub fallback_reason: Option<DecodeFallbackReason>,
     pub rgba: Arc<[u8]>,
 }
 
@@ -607,6 +610,17 @@ pub enum DecodeBackend {
     VideoToolbox,
     D3D11VA,
     DXVA2,
+}
+
+/// Why a monitor decoder session is using software decoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeFallbackReason {
+    /// The caller explicitly selected software decoding.
+    ForcedSoftware,
+    /// Hardware decoding was requested but no hardware decoder could be opened.
+    HardwareUnavailable,
+    /// An open hardware decoder failed while decoding and was replaced by software.
+    HardwareDecodeFailed,
 }
 
 impl DecodeBackend {
@@ -2104,21 +2118,22 @@ fn monitor_scheduler_loop(
         block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&stage_timings.worker_request);
         let progress_events = Arc::clone(&events);
-        let progress_backend = sessions
-            .get(&request.media_id)
-            .map(|session| session.backend);
-        let mut on_progress = |frame: &DecodedRgba| {
-            progress_events.publish(DecodeEvent::Frame(DecodedFrame {
-                project_epoch: request.project_epoch,
-                request_id: frame.request_id,
-                media_id: request.media_id,
-                source_tick: frame.source_tick,
-                width: frame.width,
-                height: frame.height,
-                backend: progress_backend,
-                rgba: Arc::clone(&frame.rgba),
-            }));
-        };
+        let mut on_progress =
+            |frame: &DecodedRgba,
+             backend: DecodeBackend,
+             fallback_reason: Option<DecodeFallbackReason>| {
+                progress_events.publish(DecodeEvent::Frame(DecodedFrame {
+                    project_epoch: request.project_epoch,
+                    request_id: frame.request_id,
+                    media_id: request.media_id,
+                    source_tick: frame.source_tick,
+                    width: frame.width,
+                    height: frame.height,
+                    backend: Some(backend),
+                    fallback_reason,
+                    rgba: Arc::clone(&frame.rgba),
+                }));
+            };
         let mut on_session_state = |active| {
             resource_diagnostics.publish_worker_session(worker_index, active);
         };
@@ -2228,21 +2243,22 @@ fn source_lane_actor_loop(
         block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&endpoint.stage_timings.worker_request);
         let progress_events = Arc::clone(&endpoint.events);
-        let progress_backend = sessions
-            .get(&request.media_id)
-            .map(|session| session.backend);
-        let mut on_progress = |frame: &DecodedRgba| {
-            progress_events.publish(DecodeEvent::Frame(DecodedFrame {
-                project_epoch: request.project_epoch,
-                request_id: frame.request_id,
-                media_id: request.media_id,
-                source_tick: frame.source_tick,
-                width: frame.width,
-                height: frame.height,
-                backend: progress_backend,
-                rgba: Arc::clone(&frame.rgba),
-            }));
-        };
+        let mut on_progress =
+            |frame: &DecodedRgba,
+             backend: DecodeBackend,
+             fallback_reason: Option<DecodeFallbackReason>| {
+                progress_events.publish(DecodeEvent::Frame(DecodedFrame {
+                    project_epoch: request.project_epoch,
+                    request_id: frame.request_id,
+                    media_id: request.media_id,
+                    source_tick: frame.source_tick,
+                    width: frame.width,
+                    height: frame.height,
+                    backend: Some(backend),
+                    fallback_reason,
+                    rgba: Arc::clone(&frame.rgba),
+                }));
+            };
         let diagnostics = Arc::clone(&endpoint.resource_diagnostics);
         let mut on_session_state =
             move |active| diagnostics.publish_worker_session(worker_index, active);
@@ -2397,7 +2413,7 @@ fn decode_monitor_request(
     frame_cache: &Arc<Mutex<MonitorFrameCache>>,
     request: &DecodeRequest,
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
-    on_progress: &mut dyn FnMut(&DecodedRgba),
+    on_progress: &mut dyn FnMut(&DecodedRgba, DecodeBackend, Option<DecodeFallbackReason>),
     on_session_state: &mut dyn FnMut(bool),
     on_deferred_for_capacity: &mut dyn FnMut(),
     stage_timings: &DecoderStageTimingAccumulators,
@@ -2446,9 +2462,8 @@ fn decode_monitor_request(
             source_tick: cached.source_tick,
             width: cached.width,
             height: cached.height,
-            backend: sessions
-                .get(&request.media_id)
-                .map(|session| session.backend),
+            backend: None,
+            fallback_reason: None,
             rgba: cached.rgba,
         }));
     }
@@ -2467,9 +2482,8 @@ fn decode_monitor_request(
             source_tick: cached.source_tick,
             width: cached.width,
             height: cached.height,
-            backend: sessions
-                .get(&request.media_id)
-                .map(|session| session.backend),
+            backend: None,
+            fallback_reason: None,
             rgba: cached.rgba,
         }));
     }
@@ -2543,6 +2557,9 @@ fn decode_monitor_request(
             let backend = sessions
                 .get(&request.media_id)
                 .map(|session| session.backend);
+            let fallback_reason = sessions
+                .get(&request.media_id)
+                .and_then(|session| session.fallback_reason);
             let decoded = DecodedFrame {
                 project_epoch: request.project_epoch,
                 request_id: frame.request_id,
@@ -2551,6 +2568,7 @@ fn decode_monitor_request(
                 width: frame.width,
                 height: frame.height,
                 backend,
+                fallback_reason,
                 rgba: Arc::clone(&frame.rgba),
             };
             let _ = frame_cache
@@ -2587,10 +2605,13 @@ fn decode_with_session(
     session: &mut StickyMonitor,
     request: &DecodeRequest,
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
-    on_progress: &mut dyn FnMut(&DecodedRgba),
+    on_progress: &mut dyn FnMut(&DecodedRgba, DecodeBackend, Option<DecodeFallbackReason>),
     on_traversal: &mut dyn FnMut(&DecodedRgba),
     stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<Option<DecodedRgba>, String> {
+    let backend = session.backend;
+    let fallback_reason = session.fallback_reason;
+    let mut report_progress = |frame: &DecodedRgba| on_progress(frame, backend, fallback_reason);
     session.decode(
         request,
         || {
@@ -2603,7 +2624,7 @@ fn decode_with_session(
             )
         },
         || latest_same_generation(commands, request),
-        on_progress,
+        &mut report_progress,
         on_traversal,
         stage_timings,
     )
@@ -2616,7 +2637,7 @@ fn recover_hardware_decode_failure(
     request: &DecodeRequest,
     commands: &Arc<Mutex<Option<MonitorCommand>>>,
     hardware_error: String,
-    on_progress: &mut dyn FnMut(&DecodedRgba),
+    on_progress: &mut dyn FnMut(&DecodedRgba, DecodeBackend, Option<DecodeFallbackReason>),
     on_traversal: &mut dyn FnMut(&DecodedRgba),
     on_session_state: &mut dyn FnMut(bool),
     on_deferred_for_capacity: &mut dyn FnMut(),
@@ -2646,6 +2667,8 @@ fn recover_hardware_decode_failure(
                 error = %hardware_error,
                 "hardware decoder failed during decode; retaining a software session"
             );
+            debug_assert_eq!(session.backend, DecodeBackend::Software);
+            session.fallback_reason = Some(DecodeFallbackReason::HardwareDecodeFailed);
             // Decode the caller's original generation. Only the open policy changes;
             // cancellation/coalescing must still compare against PreferHardware.
             let result = decode_with_session(
@@ -2716,6 +2739,18 @@ fn software_fallback_request(
         })
 }
 
+fn fallback_reason_for_open(
+    acceleration: AccelerationPreference,
+    backend: DecodeBackend,
+) -> Option<DecodeFallbackReason> {
+    (backend == DecodeBackend::Software).then_some(match acceleration {
+        AccelerationPreference::Software => DecodeFallbackReason::ForcedSoftware,
+        AccelerationPreference::Auto | AccelerationPreference::PreferHardware => {
+            DecodeFallbackReason::HardwareUnavailable
+        }
+    })
+}
+
 fn frame_cache_key(request: &DecodeRequest, target_tick: i64) -> FrameKey {
     FrameKey {
         project_epoch: request.cache_epoch,
@@ -2759,6 +2794,7 @@ struct StickyMonitor {
     last_source_tick: Option<i64>,
     last_visible_tick: Option<i64>,
     backend: DecodeBackend,
+    fallback_reason: Option<DecodeFallbackReason>,
     transfer_hardware_frames: bool,
 }
 
@@ -2782,6 +2818,7 @@ impl StickyMonitor {
         let stream_index = stream.index();
         let time_base = stream.time_base();
         let (decoder, backend) = open_video_decoder(&stream, request.acceleration)?;
+        let fallback_reason = fallback_reason_for_open(request.acceleration, backend);
         tracing::info!(
             target: "maelstrom::decode",
             media_id = request.media_id,
@@ -2825,6 +2862,7 @@ impl StickyMonitor {
             last_source_tick: None,
             last_visible_tick: None,
             backend,
+            fallback_reason,
             transfer_hardware_frames,
         })
     }
@@ -4986,6 +5024,32 @@ mod tests {
         assert!(software_fallback_request(&desired, DecodeBackend::D3D11VA).is_none());
     }
 
+    #[test]
+    fn fallback_reason_distinguishes_open_policy_from_runtime_recovery() {
+        assert_eq!(
+            fallback_reason_for_open(AccelerationPreference::Software, DecodeBackend::Software),
+            Some(DecodeFallbackReason::ForcedSoftware)
+        );
+        assert_eq!(
+            fallback_reason_for_open(
+                AccelerationPreference::PreferHardware,
+                DecodeBackend::Software
+            ),
+            Some(DecodeFallbackReason::HardwareUnavailable)
+        );
+        assert_eq!(
+            fallback_reason_for_open(AccelerationPreference::Auto, DecodeBackend::Software),
+            Some(DecodeFallbackReason::HardwareUnavailable)
+        );
+        assert_eq!(
+            fallback_reason_for_open(
+                AccelerationPreference::PreferHardware,
+                DecodeBackend::D3D11VA
+            ),
+            None
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_hardware_configuration_prefers_d3d11va_then_dxva2() {
@@ -5089,6 +5153,7 @@ mod tests {
             last_source_tick: None,
             last_visible_tick: None,
             backend: requested_backend,
+            fallback_reason: None,
             transfer_hardware_frames: true,
         })
     }
@@ -5161,7 +5226,7 @@ mod tests {
             &original,
             &commands,
             "injected D3D11VA runtime failure".to_owned(),
-            &mut |_| {},
+            &mut |_, _, _| {},
             &mut |_| {},
             &mut |_| {},
             &mut || {},
@@ -5184,6 +5249,39 @@ mod tests {
                 .expect("software session retained after hardware failure")
                 .backend,
             DecodeBackend::Software
+        );
+        assert_eq!(
+            sessions
+                .get(&original.media_id)
+                .expect("software session retained after hardware failure")
+                .fallback_reason,
+            Some(DecodeFallbackReason::HardwareDecodeFailed)
+        );
+        let mut subsequent = original.clone();
+        subsequent.request_id = 932;
+        subsequent.source_tick = 2_000_000;
+        let cache = Arc::new(Mutex::new(MonitorFrameCache::new(0)));
+        let event = decode_monitor_request(
+            &mut sessions,
+            &cache,
+            &subsequent,
+            &Arc::new(Mutex::new(None)),
+            &mut |_, _, _| {},
+            &mut |_| {},
+            &mut || {},
+            &stage_timings,
+            &session_pool,
+            0,
+            false,
+        )
+        .expect("retained software session returned an event");
+        let DecodeEvent::Frame(frame) = event else {
+            panic!("retained software session failed to decode subsequent frame")
+        };
+        assert_eq!(frame.backend, Some(DecodeBackend::Software));
+        assert_eq!(
+            frame.fallback_reason,
+            Some(DecodeFallbackReason::HardwareDecodeFailed)
         );
         let queued = commands.lock().unwrap();
         let Some(MonitorCommand::Request(queued)) = queued.as_ref() else {
@@ -5214,7 +5312,7 @@ mod tests {
             &cache,
             &desired,
             &commands,
-            &mut |_| {},
+            &mut |_, _, _| {},
             &mut |active| session_states.push(active),
             &mut || {},
             &stage_timings,
@@ -5228,6 +5326,8 @@ mod tests {
         };
         assert_eq!(frame.request_id, 91);
         assert_eq!(frame.rgba, rgba);
+        assert_eq!(frame.backend, None);
+        assert_eq!(frame.fallback_reason, None);
         assert!(sessions.is_empty());
         assert_eq!(session_states, vec![false]);
     }
@@ -5272,6 +5372,10 @@ mod tests {
         assert_eq!(first_frame.project_epoch, first_request.project_epoch);
         assert_eq!(second_frame.request_id, second_request.request_id);
         assert_eq!(second_frame.project_epoch, second_request.project_epoch);
+        assert_eq!(first_frame.backend, None);
+        assert_eq!(first_frame.fallback_reason, None);
+        assert_eq!(second_frame.backend, None);
+        assert_eq!(second_frame.fallback_reason, None);
         assert!(Arc::ptr_eq(&first_frame.rgba, &second_frame.rgba));
         let cache = pool.diagnostics();
         assert_eq!(cache.capacity_bytes, 8 * 1024);
@@ -5369,7 +5473,7 @@ mod tests {
             &cache,
             &desired,
             &commands,
-            &mut |_| {},
+            &mut |_, _, _| {},
             &mut |_| {},
             &mut || deferred = true,
             &stage_timings,
@@ -5982,7 +6086,7 @@ mod tests {
                 &frame_cache,
                 &current,
                 &commands,
-                &mut |_| {},
+                &mut |_, _, _| {},
                 &mut |_| {},
                 &mut || {},
                 &stage_timings,
@@ -6029,7 +6133,7 @@ mod tests {
             &frame_cache,
             &current,
             &commands,
-            &mut |_| {},
+            &mut |_, _, _| {},
             &mut |_| {},
             &mut || {},
             &stage_timings,

@@ -27,10 +27,11 @@ use nle_render::{
     ViewerLayerPrimitive, ViewerRgbCurves,
 };
 use nle_ui_core::{
-    EditorAction, EditorProjectSnapshot, EditorState, HubAction, HubBackdrops, Language, MediaKind,
-    MonitorFrame, PreviewQuality, ProjectFrameRate, ProjectHubState, RuntimeDiagnostics,
-    TimelineCanvas, ViewerCanvas, classify_path, configure_fonts, show_editor_with_canvases,
-    show_with_backdrops,
+    ActivePreviewDecoderBackend, ActivePreviewDiagnostic, ActivePreviewFallbackReason,
+    ActivePreviewSourceKind, EditorAction, EditorProjectSnapshot, EditorState, HubAction,
+    HubBackdrops, Language, MediaKind, MonitorFrame, PreviewQuality, ProjectFrameRate,
+    ProjectHubState, RuntimeDiagnostics, TimelineCanvas, ViewerCanvas, classify_path,
+    configure_fonts, show_editor_with_canvases, show_with_backdrops,
 };
 use winit::{
     application::ApplicationHandler,
@@ -1111,8 +1112,39 @@ struct MonitorRequestKey {
     is_scrubbing: bool,
     prewarm_scrub_workers: bool,
     high_quality_scaling: bool,
+    selected_quality: PreviewQuality,
+    resolved_quality: PreviewQuality,
     source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
     source_frame_duration_tick: Option<i64>,
+}
+
+const fn active_preview_decoder_backend(
+    backend: nle_decode::DecodeBackend,
+) -> ActivePreviewDecoderBackend {
+    match backend {
+        nle_decode::DecodeBackend::Software => ActivePreviewDecoderBackend::Software,
+        nle_decode::DecodeBackend::IntelQuickSync => ActivePreviewDecoderBackend::IntelQuickSync,
+        nle_decode::DecodeBackend::Nvidia => ActivePreviewDecoderBackend::NvidiaCuvid,
+        nle_decode::DecodeBackend::VideoToolbox => ActivePreviewDecoderBackend::AppleVideoToolbox,
+        nle_decode::DecodeBackend::D3D11VA => ActivePreviewDecoderBackend::WindowsD3d11va,
+        nle_decode::DecodeBackend::DXVA2 => ActivePreviewDecoderBackend::WindowsDxva2,
+    }
+}
+
+const fn active_preview_fallback_reason(
+    reason: nle_decode::DecodeFallbackReason,
+) -> ActivePreviewFallbackReason {
+    match reason {
+        nle_decode::DecodeFallbackReason::ForcedSoftware => {
+            ActivePreviewFallbackReason::ForcedSoftware
+        }
+        nle_decode::DecodeFallbackReason::HardwareUnavailable => {
+            ActivePreviewFallbackReason::HardwareUnavailable
+        }
+        nle_decode::DecodeFallbackReason::HardwareDecodeFailed => {
+            ActivePreviewFallbackReason::HardwareDecodeFailed
+        }
+    }
 }
 
 /// Decoder ownership is keyed separately from output policy.  Changing dimensions, scrub
@@ -5397,7 +5429,14 @@ impl App {
         self.video_strip_order.push_back(media_id);
     }
 
-    fn present_scrub_proxy(&mut self, layer: usize, media_id: u32, source_tick: i64) {
+    fn present_scrub_proxy(
+        &mut self,
+        layer: usize,
+        media_id: u32,
+        source_tick: i64,
+        selected_quality: PreviewQuality,
+        resolved_quality: PreviewQuality,
+    ) {
         let Some(strip) = self.video_strips.get(&media_id).cloned() else {
             return;
         };
@@ -5422,6 +5461,18 @@ impl App {
             frame.width,
             frame.height,
             &frame.rgba,
+        );
+        let _ = self.editor.set_active_preview_diagnostic_for_layer(
+            layer,
+            ActivePreviewDiagnostic::new(
+                media_id,
+                ActivePreviewSourceKind::InternalScrubPreview,
+                None,
+                None,
+                selected_quality,
+                resolved_quality,
+                [frame.width, frame.height],
+            ),
         );
         self.monitor_last_proxy_frames[layer] = Some(proxy_key);
         if let Some(window) = &self.window {
@@ -5561,6 +5612,8 @@ impl App {
                 is_scrubbing: preview.is_scrubbing,
                 prewarm_scrub_workers: prewarm_layer == Some(layer),
                 high_quality_scaling,
+                selected_quality: preview.selected_quality,
+                resolved_quality: preview.resolved_quality,
                 source_frame_rate: source.source_frame_rate,
                 source_frame_duration_tick: source.source_frame_duration_tick,
             };
@@ -5587,7 +5640,13 @@ impl App {
                     (width, height),
                     tolerance,
                 ) {
-                    self.present_scrub_proxy(layer, source.media_id, key.source_tick);
+                    self.present_scrub_proxy(
+                        layer,
+                        source.media_id,
+                        key.source_tick,
+                        preview.selected_quality,
+                        preview.resolved_quality,
+                    );
                 }
             } else {
                 self.monitor_last_proxy_frames[layer] = None;
@@ -6250,6 +6309,26 @@ impl App {
                     frame.width,
                     frame.height,
                     &frame.rgba,
+                );
+                let request = self.monitor_last_requests[layer]
+                    .filter(|request| request.media_id == media_id);
+                let decoder_backend = frame.backend.map(active_preview_decoder_backend);
+                let fallback_reason = frame.fallback_reason.map(active_preview_fallback_reason);
+                let _ = self.editor.set_active_preview_diagnostic_for_layer(
+                    layer,
+                    ActivePreviewDiagnostic::new(
+                        media_id,
+                        ActivePreviewSourceKind::OriginalSource,
+                        decoder_backend,
+                        fallback_reason,
+                        request
+                            .map(|request| request.selected_quality)
+                            .unwrap_or_else(|| self.editor.preview_quality()),
+                        request
+                            .map(|request| request.resolved_quality)
+                            .unwrap_or_else(|| self.editor.resolved_preview_quality()),
+                        [frame.width, frame.height],
+                    ),
                 );
                 self.monitor_runtime_metrics
                     .record_presented(native_uploaded);
@@ -8483,6 +8562,8 @@ mod tests {
             is_scrubbing: false,
             prewarm_scrub_workers: false,
             high_quality_scaling: true,
+            selected_quality: PreviewQuality::Full,
+            resolved_quality: PreviewQuality::Full,
             source_frame_rate: nle_ui_core::SourceFrameRate::new(30, 1),
             source_frame_duration_tick: None,
         };
@@ -9312,6 +9393,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 backend: Some(nle_decode::DecodeBackend::Software),
+                fallback_reason: Some(nle_decode::DecodeFallbackReason::ForcedSoftware),
                 rgba: Arc::from([0, 0, 0, 255]),
             })
         };
@@ -9358,6 +9440,8 @@ mod tests {
                     is_scrubbing: false,
                     prewarm_scrub_workers: false,
                     high_quality_scaling: false,
+                    selected_quality: PreviewQuality::Full,
+                    resolved_quality: PreviewQuality::Full,
                     source_frame_rate: None,
                     source_frame_duration_tick: None,
                 },
@@ -9464,6 +9548,49 @@ mod tests {
         assert_eq!(
             diagnostics.monitor_presented_frames,
             diagnostics.native_viewer_uploads + diagnostics.fallback_viewer_uploads
+        );
+        assert_eq!(
+            app.editor.active_preview_diagnostic_for_layer(0),
+            Some(ActivePreviewDiagnostic::new(
+                1,
+                ActivePreviewSourceKind::OriginalSource,
+                Some(ActivePreviewDecoderBackend::Software),
+                Some(ActivePreviewFallbackReason::ForcedSoftware),
+                PreviewQuality::Full,
+                PreviewQuality::Full,
+                [1, 1],
+            ))
+        );
+
+        // Shared-cache pixels do not retain producer provenance. A cache hit must replace—not
+        // inherit—the prior concrete software/fallback diagnosis.
+        install_request(&mut app, 14, 400);
+        assert!(app.apply_monitor_decode_event(
+            0,
+            nle_decode::DecodeEvent::Frame(nle_decode::DecodedFrame {
+                project_epoch: epoch,
+                request_id: 14,
+                media_id: 1,
+                source_tick: 400,
+                width: 1,
+                height: 1,
+                backend: None,
+                fallback_reason: None,
+                rgba: Arc::from([0, 0, 0, 255]),
+            }),
+            &mut adaptive_quality_changed,
+        ));
+        assert_eq!(
+            app.editor.active_preview_diagnostic_for_layer(0),
+            Some(ActivePreviewDiagnostic::new(
+                1,
+                ActivePreviewSourceKind::OriginalSource,
+                None,
+                None,
+                PreviewQuality::Full,
+                PreviewQuality::Full,
+                [1, 1],
+            ))
         );
     }
 
@@ -10135,6 +10262,20 @@ mod tests {
         );
         assert!(app.video_strips.contains_key(&2));
         assert!(!app.video_strips.contains_key(&3));
+
+        app.present_scrub_proxy(0, 2, 0, PreviewQuality::Auto, PreviewQuality::Quarter);
+        assert_eq!(
+            app.editor.active_preview_diagnostic_for_layer(0),
+            Some(ActivePreviewDiagnostic::new(
+                2,
+                ActivePreviewSourceKind::InternalScrubPreview,
+                None,
+                None,
+                PreviewQuality::Auto,
+                PreviewQuality::Quarter,
+                [1, 1],
+            ))
+        );
     }
 
     #[test]
@@ -10215,6 +10356,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 backend: Some(nle_decode::DecodeBackend::Software),
+                fallback_reason: Some(nle_decode::DecodeFallbackReason::ForcedSoftware),
                 rgba: Arc::from([0, 0, 0, 255]),
             })
         };
