@@ -149,7 +149,7 @@ Exit gate:
       `docs/phase1-latency-comparison.md`. A third opt-in headless local gate now repeats the
       same four-source Full-1080p five-second-fixture forward/back scrub workload for a bounded
       duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime
-      counter deltas, bounded cache/session evidence, post-drop release, and tracked-process
+      counter deltas including a documented bounded stale-event allowance, bounded cache/session evidence, post-drop release, and tracked-process
       working-set samples. It is not realtime playback, audio, visible UI, GPU compositor, or
       cross-hardware proof; see `docs/phase1-sustained-soak.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.

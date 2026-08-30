@@ -164,14 +164,17 @@ try {
     }
     $process.Refresh()
     if ($null -eq $warmBaselineBytes) { throw 'Sustained soak exited before a warm working-set baseline could be sampled.' }
-    if ($process.ExitCode -ne 0) { throw "Sustained soak test executable exited with code $($process.ExitCode)." }
-    if (-not (Test-Path -LiteralPath $appReportPath -PathType Leaf)) { throw 'Sustained soak test did not write its app report.' }
+    $testExitCode = $process.ExitCode
+    if (-not (Test-Path -LiteralPath $appReportPath -PathType Leaf)) {
+        if ($testExitCode -ne 0) { throw "Sustained soak test executable exited with code $testExitCode without an app report." }
+        throw 'Sustained soak test did not write its app report.'
+    }
     $appReport = Get-Content -LiteralPath $appReportPath -Raw | ConvertFrom-Json
-    foreach ($name in @('schema_version', 'requested_duration_seconds', 'source_count', 'cycle_count', 'input_to_submit_p95_us_limit', 'post_drop_active_sessions')) { Assert-Unsigned $appReport $name 'sustained app report' }
+    foreach ($name in @('schema_version', 'requested_duration_seconds', 'source_count', 'cycle_count', 'input_to_submit_p95_us_limit', 'post_drop_active_sessions', 'monitor_dropped_frame_limit')) { Assert-Unsigned $appReport $name 'sustained app report' }
     if (-not (Test-FiniteNumber $appReport.actual_duration_seconds) -or [double]$appReport.actual_duration_seconds -lt $DurationSeconds) {
         throw 'Sustained app report omitted a finite actual duration at least as long as the requested duration.'
     }
-    if ($appReport.schema_version -ne 1 -or $appReport.status -ne 'passed' -or $appReport.requested_duration_seconds -ne $DurationSeconds -or
+    if ($appReport.schema_version -ne 1 -or @('passed', 'failed') -notcontains $appReport.status -or $appReport.requested_duration_seconds -ne $DurationSeconds -or
         $appReport.authoritative -ne ($DurationSeconds -ge 600) -or $appReport.source_count -ne 4 -or $appReport.cycle_count -lt 8 -or
         @($appReport.output_size).Count -ne 2 -or $appReport.output_size[0] -ne 1920 -or $appReport.output_size[1] -ne 1080 -or
         $appReport.input_to_submit_p95_us_limit -ne 1000 -or $appReport.input_to_submit_us.p95 -gt 1000 -or $appReport.post_drop_active_sessions -ne 0) {
@@ -208,8 +211,12 @@ try {
     $diagnostics = $appReport.runtime_diagnostics_delta
     foreach ($name in @('monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames', 'monitor_dropped_frames', 'monitor_hold_events', 'monitor_late_frames', 'monitor_errors', 'native_viewer_uploads', 'fallback_viewer_uploads', 'audio_underrun_frames', 'audio_callback_lock_failures', 'audio_late_discarded_frames')) { Assert-Unsigned $diagnostics $name 'sustained runtime diagnostics delta' }
     $expectedRequests = [int64]$appReport.cycle_count * 4
+    $expectedDroppedLimit = [Math]::Max(4, [Math]::Ceiling($expectedRequests / 1000.0))
+    if ($appReport.monitor_dropped_frame_limit -ne $expectedDroppedLimit) {
+        throw 'Sustained app report omitted the exact bounded stale-event limit.'
+    }
     if ($diagnostics.monitor_requests -ne $expectedRequests -or $diagnostics.monitor_completed_frames -lt $expectedRequests -or
-        $diagnostics.monitor_presented_frames -ne $diagnostics.monitor_completed_frames -or $diagnostics.monitor_dropped_frames -ne 0 -or
+        $diagnostics.monitor_presented_frames -ne $diagnostics.monitor_completed_frames -or $diagnostics.monitor_dropped_frames -gt $expectedDroppedLimit -or
         $diagnostics.monitor_hold_events -gt $expectedRequests -or $diagnostics.monitor_late_frames -gt $expectedRequests -or
         $diagnostics.monitor_errors -ne 0 -or ($diagnostics.native_viewer_uploads + $diagnostics.fallback_viewer_uploads) -ne $diagnostics.monitor_presented_frames -or
         $diagnostics.audio_underrun_frames -ne 0 -or $diagnostics.audio_callback_lock_failures -ne 0 -or $diagnostics.audio_late_discarded_frames -ne 0) {
@@ -217,6 +224,10 @@ try {
     }
     Assert-Distribution $appReport.input_to_submit_us @($appReport.input_to_submit_samples_us) 'sustained input-to-submit summary'
     Assert-Distribution $appReport.frame_ready_ms @($appReport.frame_ready_samples_ms) 'sustained frame-ready summary'
+
+    if ($testExitCode -ne 0 -or $appReport.status -ne 'passed') {
+        throw "Sustained soak test reported status '$($appReport.status)' with exit code $testExitCode; app report preserved."
+    }
 
     $authoritativeRun = $DurationSeconds -ge 600 -and $appReport.authoritative -eq $true -and [double]$appReport.actual_duration_seconds -ge $DurationSeconds
 

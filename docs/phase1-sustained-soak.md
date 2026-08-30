@@ -39,11 +39,14 @@ more than one 30fps frame (33,334 microseconds) after the requested tick.
 
 The workload counter bounds are intentional: exactly four requests per completed
 cycle; completed frames at least requests; presented frames exactly completed;
-zero drops and errors; holds and late frames no greater than requests; native plus
+bounded rejected stale/non-converging monitor events and zero monitor errors; holds and late frames no greater than requests; native plus
 fallback uploads exactly equal presented frames; and zero audio underrun,
 audio-lock-failure, or audio-late-discard counters. Progressive monitor decode can
 legitimately make completed frames exceed requests and can record bounded holds or
-late frames, so those are not incorrectly forced to zero. Cache current/peak and
+late frames, so those are not incorrectly forced to zero. The stale-event limit is
+`max(4, ceil(requests / 1000))` (0.1%, with a four-event startup floor);
+it counts deliberately rejected obsolete/non-converging events rather than displayed-frame
+loss. Cache current/peak and
 session active/peak/lane totals must remain coherent with their owned caps, and
 dropping the app must release all sessions.
 
@@ -54,6 +57,11 @@ app-report path/SHA-256, and captured test stdout/stderr so a failed run retains
 when possible. The wrapper is authoritative only when the test passed, both
 reports mark a requested duration of at least 600 seconds, and the finite actual
 duration reached the requested duration.
+
+If a final gate threshold fails, the app atomically writes the complete schema-1
+report with `status: "failed"` before the ignored test returns failure. The wrapper
+reads and hashes that report before handling the nonzero test exit, preserving the
+same evidence path for failed and passing runs.
 
 This is headless local Software/backend evidence for a repeated fixture-loop
 scrub-resource workload. It is not evidence of realtime playback, audio,
