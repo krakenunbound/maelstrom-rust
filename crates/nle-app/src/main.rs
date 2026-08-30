@@ -11809,9 +11809,16 @@ mod tests {
         name: &'static str,
         iterations: u32,
         elapsed_ms: u128,
-        backend: Option<String>,
+        decoder_backend: Option<String>,
+        encoder_backend: Option<String>,
         passed: bool,
         evidence: String,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Phase0BackendRole {
+        Decoder,
+        Encoder,
     }
 
     #[derive(Serialize)]
@@ -12320,26 +12327,44 @@ mod tests {
     fn phase0_run_scenario(
         name: &'static str,
         iterations: u32,
+        backend_role: Option<Phase0BackendRole>,
         run: impl FnOnce() -> Result<(Option<String>, String), String>,
     ) -> Phase0ScenarioReport {
         let started = Instant::now();
         match run() {
-            Ok((backend, evidence)) => Phase0ScenarioReport {
-                name,
-                iterations,
-                elapsed_ms: started.elapsed().as_millis(),
-                backend,
-                passed: true,
-                evidence,
-            },
+            Ok((backend, evidence)) => {
+                let (decoder_backend, encoder_backend) =
+                    phase0_backend_fields(backend_role, backend);
+                Phase0ScenarioReport {
+                    name,
+                    iterations,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    decoder_backend,
+                    encoder_backend,
+                    passed: true,
+                    evidence,
+                }
+            }
             Err(evidence) => Phase0ScenarioReport {
                 name,
                 iterations,
                 elapsed_ms: started.elapsed().as_millis(),
-                backend: None,
+                decoder_backend: None,
+                encoder_backend: None,
                 passed: false,
                 evidence,
             },
+        }
+    }
+
+    fn phase0_backend_fields(
+        backend_role: Option<Phase0BackendRole>,
+        backend: Option<String>,
+    ) -> (Option<String>, Option<String>) {
+        match backend_role {
+            Some(Phase0BackendRole::Decoder) => (backend, None),
+            Some(Phase0BackendRole::Encoder) => (None, backend),
+            None => (None, None),
         }
     }
 
@@ -12440,6 +12465,39 @@ mod tests {
     }
 
     #[test]
+    fn phase0_backend_roles_are_reported_in_explicit_fields() {
+        assert_eq!(
+            phase0_backend_fields(Some(Phase0BackendRole::Decoder), Some("D3D11VA".to_owned()),),
+            (Some("D3D11VA".to_owned()), None)
+        );
+        assert_eq!(
+            phase0_backend_fields(Some(Phase0BackendRole::Encoder), Some("D3D11VA".to_owned()),),
+            (None, Some("D3D11VA".to_owned()))
+        );
+        assert_eq!(
+            phase0_backend_fields(None, Some("ignored".to_owned())),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn phase0_report_serializes_separate_backend_fields() {
+        let report = Phase0ScenarioReport {
+            name: "decoder",
+            iterations: 1,
+            elapsed_ms: 0,
+            decoder_backend: Some("Software".to_owned()),
+            encoder_backend: None,
+            passed: true,
+            evidence: "test".to_owned(),
+        };
+        let value = serde_json::to_value(report).expect("serialize Phase 0 report");
+        assert_eq!(value["decoder_backend"], "Software");
+        assert!(value["encoder_backend"].is_null());
+        assert!(value.get("backend").is_none());
+    }
+
+    #[test]
     #[ignore = "requires explicit MAELSTROM_PHASE0_MEDIA and MAELSTROM_PHASE0_REPORT"]
     fn phase0_scenario_matrix() {
         let media = phase0_required_absolute_file("MAELSTROM_PHASE0_MEDIA")
@@ -12460,6 +12518,7 @@ mod tests {
         scenarios.push(phase0_run_scenario(
             "reverse_scrub_public_monitor_decoder",
             6,
+            Some(Phase0BackendRole::Decoder),
             || {
                 let decoder = nle_decode::MonitorDecoder::new_with_notifier_and_cache_bytes(
                     || {},
@@ -12540,7 +12599,7 @@ mod tests {
                 Ok((backend, "six decreasing source ticks accepted by the public latest-wins decoder; the final 160x90 frame reached 300000 microseconds or the next declared source frame".to_owned()))
             },
         ));
-        scenarios.push(phase0_run_scenario("rapid_editor_state_switching", 8, || {
+        scenarios.push(phase0_run_scenario("rapid_editor_state_switching", 8, None, || {
             let mut first = EditorState::new(Language::English, "Phase 0 A");
             first.add_media_paths([media.clone()]);
             if !first.add_selected_to_timeline() {
@@ -12568,7 +12627,7 @@ mod tests {
             }
             Ok((None, "eight alternating App editor restores retained the fixture path and each snapshot playhead".to_owned()))
         }));
-        scenarios.push(phase0_run_scenario("offline_media_detection_and_recovery", 1, || {
+        scenarios.push(phase0_run_scenario("offline_media_detection_and_recovery", 1, Some(Phase0BackendRole::Decoder), || {
             let restored = report_path
                 .parent()
                 .expect("report parent")
@@ -12661,6 +12720,7 @@ mod tests {
         scenarios.push(phase0_run_scenario(
             "runtime_video_strip_cache_eviction",
             5,
+            None,
             || {
                 let mut app = App::new_with_catalog(false, None);
                 let mut cumulative_bytes = 0usize;
@@ -12723,6 +12783,7 @@ mod tests {
         scenarios.push(phase0_run_scenario(
             "four_source_decoded_frame_cache_pressure",
             4,
+            Some(Phase0BackendRole::Decoder),
             || {
                 const SOURCE_COUNT: usize = 4;
                 const FRAME_WIDTH: u32 = 160;
@@ -12892,7 +12953,7 @@ mod tests {
                 result
             },
         ));
-        scenarios.push(phase0_run_scenario("ffmpeg_export_cancellation", 1, || {
+        scenarios.push(phase0_run_scenario("ffmpeg_export_cancellation", 1, Some(Phase0BackendRole::Encoder), || {
             for artifact in phase0_export_artifacts(&output) {
                 let _ = fs::remove_file(artifact);
             }
@@ -12984,7 +13045,7 @@ mod tests {
 
         let passed = scenarios.iter().all(|scenario| scenario.passed);
         let report = Phase0Report {
-            schema_version: 2,
+            schema_version: 3,
             status: if passed { "passed" } else { "failed" },
             scenario_count: scenarios.len(),
             scenarios,

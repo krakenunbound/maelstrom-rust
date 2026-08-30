@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [string]$FfmpegRoot,
-    [string]$ReportPath
+    [string]$ReportPath,
+    [switch]$SkipFixtureValidation
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,6 +14,18 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
 }
 function Test-AbsolutePath([string]$Path) {
     return [IO.Path]::IsPathRooted($Path) -and [string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::OrdinalIgnoreCase)
+}
+function Enter-Phase0ScenarioMutex {
+    $mutex = [Threading.Mutex]::new($false, 'Local\MaelstromPhase0ScenarioMatrix')
+    try {
+        try { $acquired = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if (-not $acquired) { throw 'Another Phase 0 scenario matrix is already running.' }
+        return $mutex
+    } catch {
+        $mutex.Dispose()
+        throw
+    }
 }
 if (-not (Test-AbsolutePath $FfmpegRoot)) { throw 'FFmpeg root must be an absolute path.' }
 $ffmpegRootPath = (Resolve-Path -LiteralPath $FfmpegRoot).Path
@@ -54,9 +67,14 @@ $savedLibclang = $env:LIBCLANG_PATH
 $savedMedia = $env:MAELSTROM_PHASE0_MEDIA
 $savedReport = $env:MAELSTROM_PHASE0_REPORT
 $savedArtifactRoot = $env:MAELSTROM_PHASE0_ARTIFACT_ROOT
+$repoLocationPushed = $false
+$phase0Mutex = $null
 try {
-    & (Join-Path $PSScriptRoot 'Generate-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath
-    & (Join-Path $PSScriptRoot 'Test-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath -ArtifactRoot $fixtureRoot
+    $phase0Mutex = Enter-Phase0ScenarioMutex
+    if (-not $SkipFixtureValidation) {
+        & (Join-Path $PSScriptRoot 'Generate-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath
+        & (Join-Path $PSScriptRoot 'Test-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath -ArtifactRoot $fixtureRoot
+    }
     if (-not (Test-Path -LiteralPath $mediaPath -PathType Leaf)) { throw "Missing generated Phase 0 media fixture: $mediaPath" }
 
     Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
@@ -67,18 +85,30 @@ try {
     $env:MAELSTROM_PHASE0_MEDIA = $mediaPath
     $env:MAELSTROM_PHASE0_REPORT = $resolvedReportPath
     $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $resolvedArtifactRoot
-    cargo test -p nle-app --release tests::phase0_scenario_matrix -- --ignored --exact --test-threads=1
-    if ($LASTEXITCODE -ne 0) { throw 'Phase 0 scenario matrix failed.' }
+    Push-Location -LiteralPath $repoRoot
+    $repoLocationPushed = $true
+    $cargoExecutable = (Get-Command cargo.exe -ErrorAction Stop).Source
+    if (-not (Test-AbsolutePath $cargoExecutable)) { throw 'Cargo did not resolve to an absolute executable path.' }
+    & $cargoExecutable test -p nle-app --release tests::phase0_scenario_matrix -- --ignored --exact --test-threads=1
+    $testExitCode = $LASTEXITCODE
 
-    if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) { throw 'Phase 0 scenario matrix did not write its report.' }
+    if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
+        throw "Phase 0 scenario matrix exited with code $testExitCode without writing its report."
+    }
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw | ConvertFrom-Json
-    if ($report.schema_version -ne 2 -or $report.status -ne 'passed' -or [int]$report.scenario_count -ne 6 -or @($report.scenarios).Count -ne 6) {
+    if ($report.schema_version -ne 3 -or @('passed', 'failed') -notcontains $report.status -or [int]$report.scenario_count -ne 6 -or @($report.scenarios).Count -ne 6) {
         throw 'Phase 0 scenario report has an unexpected schema, status, or scenario count.'
     }
     foreach ($scenario in @($report.scenarios)) {
-        if ([string]::IsNullOrWhiteSpace($scenario.name) -or [int]$scenario.iterations -lt 1 -or [double]$scenario.elapsed_ms -lt 0 -or -not $scenario.passed -or [string]::IsNullOrWhiteSpace($scenario.evidence)) {
+        if ([string]::IsNullOrWhiteSpace($scenario.name) -or [int]$scenario.iterations -lt 1 -or [double]$scenario.elapsed_ms -lt 0 -or
+            -not ($scenario.passed -is [bool]) -or [string]::IsNullOrWhiteSpace($scenario.evidence)) {
             throw "Invalid scenario evidence in report: $($scenario.name)"
         }
+    }
+    $failedScenarios = @($report.scenarios | Where-Object { -not $_.passed })
+    if ($testExitCode -ne 0 -or $report.status -ne 'passed' -or $failedScenarios.Count -ne 0) {
+        $failedEvidence = @($failedScenarios | ForEach-Object { "$($_.name): $($_.evidence)" }) -join '; '
+        throw "Phase 0 scenario matrix failed with exit code $testExitCode; preserved report: $resolvedReportPath. $failedEvidence"
     }
     $memoryPressure = @($report.scenarios | Where-Object { $_.name -eq 'runtime_video_strip_cache_eviction' })
     if ($memoryPressure.Count -ne 1 -or [int]$memoryPressure[0].iterations -ne 5) {
@@ -115,10 +145,12 @@ try {
     Write-Host "Phase 0 scenarios: PASS ($resolvedReportPath)"
 }
 finally {
+    if ($repoLocationPushed) { Pop-Location }
     $env:PATH = $savedPath
     if ($null -eq $savedFfmpeg) { Remove-Item Env:FFMPEG_DIR -ErrorAction SilentlyContinue } else { $env:FFMPEG_DIR = $savedFfmpeg }
     if ($null -eq $savedLibclang) { Remove-Item Env:LIBCLANG_PATH -ErrorAction SilentlyContinue } else { $env:LIBCLANG_PATH = $savedLibclang }
     if ($null -eq $savedMedia) { Remove-Item Env:MAELSTROM_PHASE0_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_MEDIA = $savedMedia }
     if ($null -eq $savedReport) { Remove-Item Env:MAELSTROM_PHASE0_REPORT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_REPORT = $savedReport }
     if ($null -eq $savedArtifactRoot) { Remove-Item Env:MAELSTROM_PHASE0_ARTIFACT_ROOT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $savedArtifactRoot }
+    if ($null -ne $phase0Mutex) { $phase0Mutex.ReleaseMutex(); $phase0Mutex.Dispose() }
 }

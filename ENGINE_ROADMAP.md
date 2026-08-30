@@ -100,7 +100,15 @@ Build the evidence harness before adding engine complexity.
       frame-cache bytes below the 1 GiB cap and one peak sticky session below the 16-session app
       cap. This combined item remains open for broader multi-source memory-pressure coverage,
       including idle/session LRU and cross-hardware proof. See
-      `docs/phase0-scenarios.md` and `docs/performance-reports.md`.
+      `docs/phase0-scenarios.md` and `docs/performance-reports.md`. A separate timed Phase 0
+      orchestrator now repeatedly executes the full six-scenario native matrix and writes one
+      versioned report with all available child evidence, aggregate scenario totals, machine/FFmpeg
+      identity, and preserved failure details. Runs below 600 seconds are harness checks only; a
+      warm local 2026-08-30 harness check passed for 15.853 seconds, excluding 1.352 seconds of
+      setup, with 6 complete matrix runs, 36 scenario executions, 150 declared work iterations,
+      a Software decoder, and an `h264_mf`
+      encoder recorded in separate fields. A post-run scan found no child-report/process residue.
+      A retained authoritative 600-second result and cross-hardware proof remain open.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,
