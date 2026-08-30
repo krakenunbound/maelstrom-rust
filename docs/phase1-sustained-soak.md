@@ -67,3 +67,21 @@ This is headless local Software/backend evidence for a repeated fixture-loop
 scrub-resource workload. It is not evidence of realtime playback, audio,
 visible UI responsiveness, GPU compositor performance, export parity, or
 cross-hardware behavior. The broad Phase 1 exit gates remain unchecked.
+
+## Recorded authoritative local evidence
+
+The committed gate passed on 2026-08-29 for 600.031 seconds. It completed
+15,195 four-source cycles and 60,780 requests with 37 us input-to-submit p95
+(183 us maximum), 48 ms coarse frame-ready p95 (76 ms maximum), four rejected
+stale/non-converging events under the 61-event limit, and zero monitor errors.
+The cache ended at 207,360,000 bytes with a 215,654,400-byte peak upper bound
+under its 1 GiB cap. The shared pool peaked at seven of eight sessions and
+released to zero after app drop. Working-set growth was 89,128,960 bytes under
+the 1.5 GiB diagnostic bound. The observed decoder backend was Software.
+
+Local ignored evidence remains at
+`artifacts/phase1-sustained/phase1-sustained-wrapper.json`. The exact release
+test executable SHA-256 was
+`7d18a20f9fe4357b5f5e4986f7f129755db0bffe4c66153336e5dfbb7f3e90d8`; the
+app-report SHA-256 was
+`9dfe0003242cffdb47e90ff2f192e1469cb3db7ab2cacddd9eb5b7fe38ee1ef3`.

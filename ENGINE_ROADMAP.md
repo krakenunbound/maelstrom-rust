@@ -151,7 +151,13 @@ Exit gate:
       duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime
       counter deltas including a documented bounded stale-event allowance, bounded cache/session evidence, post-drop release, and tracked-process
       working-set samples. It is not realtime playback, audio, visible UI, GPU compositor, or
-      cross-hardware proof; see `docs/phase1-sustained-soak.md`.
+      cross-hardware proof. The committed gate passed its authoritative local Software run on
+      2026-08-29 for 600.031 seconds: 15,195 cycles / 60,780 requests, 37 us scheduler p95
+      (183 us max), 48 ms coarse frame-ready p95 (76 ms max), 4 rejected stale events within a
+      61-event bound, zero errors, 207,360,000 current / 215,654,400 peak-upper-bound bytes under
+      the 1 GiB cache cap, 7 peak sessions under the 8-session cap, zero post-drop sessions, and
+      89,128,960 bytes of working-set growth under the 1.5 GiB diagnostic bound. The exit remains
+      open for realtime UI-present and cross-hardware proof; see `docs/phase1-sustained-soak.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
       A deterministic test-only decoder barrier proves an independently scheduled ready source can
       complete while another decoder worker is blocked; this is not yet a real-media latency or
