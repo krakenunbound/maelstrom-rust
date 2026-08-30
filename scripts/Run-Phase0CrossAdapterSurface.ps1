@@ -21,9 +21,18 @@ function Restore-EnvironmentValue {
 
 function Write-AtomicUtf8File {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Contents)
-    $temporary = "$Path.tmp"
-    [IO.File]::WriteAllText($temporary, $Contents, [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    $temporary = Join-Path $directory ('.{0}.{1}.{2}.tmp' -f [IO.Path]::GetFileName($Path), $PID, [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($temporary, $Contents, [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Path, $null)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Test-FiniteNonnegativeNumber($Value) {
@@ -86,14 +95,48 @@ function Remove-GeneratedFile {
     Write-Warning "Could not remove generated qualification file after process shutdown: $Path"
 }
 
+function Get-NullableString($Value) {
+    if ($null -eq $Value) { return $null }
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    return $text
+}
+
+function Get-BoundedFailureMessage($Failure) {
+    $message = [string]$Failure.Exception.Message
+    if ($message.Length -le 2048) { return $message }
+    return $message.Substring(0, 2048)
+}
+
+function Get-ObservedSurfaceEvidence($Surface) {
+    if ($null -eq $Surface) {
+        return [ordered]@{
+            renderer_backend = $null
+            renderer_driver = $null
+            renderer_driver_info = $null
+            decoder_backends = $null
+            encoder_backend = $null
+        }
+    }
+    $decoderBackends = @()
+    if ($Surface.PSObject.Properties.Name -contains 'decoder_backends') {
+        $decoderBackends = @($Surface.decoder_backends | ForEach-Object { [string]$_ } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    if ($decoderBackends.Count -eq 0) { $decoderBackends = $null }
+    return [ordered]@{
+        renderer_backend = Get-NullableString $Surface.renderer_backend
+        renderer_driver = Get-NullableString $Surface.renderer_driver
+        renderer_driver_info = Get-NullableString $Surface.renderer_driver_info
+        decoder_backends = $decoderBackends
+        encoder_backend = Get-NullableString $Surface.encoder_backend
+    }
+}
+
 if (-not [IO.Path]::IsPathRooted($ExecutablePath)) {
     throw 'ExecutablePath must be the full absolute path to packaged Maelstrom.exe.'
 }
 $resolvedExecutable = [IO.Path]::GetFullPath($ExecutablePath)
-if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf) -or
-    [IO.Path]::GetFileName($resolvedExecutable) -ine 'Maelstrom.exe') {
-    throw "Packaged Maelstrom executable is missing or invalid: $resolvedExecutable"
-}
 $packageDirectory = [IO.Path]::GetDirectoryName($resolvedExecutable)
 $ffmpeg = Join-Path $packageDirectory 'ffmpeg.exe'
 $ffprobe = Join-Path $packageDirectory 'ffprobe.exe'
@@ -103,11 +146,6 @@ $requiredRuntimes = @(
     'libstdc++-6.dll', 'libvpl.dll', 'libwinpthread-1.dll', 'vcruntime140.dll'
 )
 $requiredFiles = @($ffmpeg, $ffprobe) + @($requiredRuntimes | ForEach-Object { Join-Path $packageDirectory $_ })
-foreach ($required in $requiredFiles) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "Packaged runtime is incomplete: $required"
-    }
-}
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-cross-adapter-surface'))
@@ -138,17 +176,52 @@ $runLock = [Threading.Mutex]::new($false, 'Local\MaelstromRustPhase0CrossAdapter
 $lockAcquired = $false
 $mediaPath = Join-Path $artifactRoot 'deterministic-av-60s.mp4'
 $runs = [Collections.Generic.List[object]]::new()
+$qualificationStatus = 'failed'
+$failureMessage = $null
+$failureComponent = 'package'
+$failureStage = 'runtime_closure'
+$currentAdapterClass = $null
+$currentArtifactPath = $null
+$currentProcessExitCode = $null
+$currentAffectedCodecs = $null
+$latestSurface = $null
+$operationError = $null
+$publicationError = $null
 try {
+    # Acquire exclusive ownership before package preflight so a broken package still leaves
+    # one diagnosable wrapper report without racing or overwriting another active run.
+    New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+    $failureComponent = 'harness'
+    $failureStage = 'lock_acquisition'
     if (-not $runLock.WaitOne(0)) { throw 'Another Phase 0 cross-adapter surface run is active.' }
     $lockAcquired = $true
-    New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+
+    $failureComponent = 'package'
+    $failureStage = 'runtime_closure'
+    if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf) -or
+        [IO.Path]::GetFileName($resolvedExecutable) -ine 'Maelstrom.exe') {
+        throw "Packaged Maelstrom executable is missing or invalid: $resolvedExecutable"
+    }
+    foreach ($required in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            $currentArtifactPath = $required
+            throw "Packaged runtime is incomplete: $required"
+        }
+    }
+
     Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
+    $failureComponent = 'package'
+    $failureStage = 'runtime_load'
     $env:PATH = "$packageDirectory;$env:SystemRoot\System32;$env:SystemRoot"
     & $ffmpeg -hide_banner -version *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Packaged ffmpeg.exe could not load with its sibling DLLs.' }
     & $ffprobe -hide_banner -version *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Packaged ffprobe.exe could not load with its sibling DLLs.' }
 
+    $failureComponent = 'encoder'
+    $failureStage = 'fixture_generation'
+    $currentAffectedCodecs = @('mpeg4', 'aac')
+    $currentArtifactPath = $mediaPath
     $savedErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $ffmpeg -hide_banner -y `
@@ -162,6 +235,10 @@ try {
     }
 
     foreach ($adapterClass in @('IntegratedGpu', 'DiscreteGpu')) {
+        $currentAdapterClass = $adapterClass
+        $currentProcessExitCode = $null
+        $currentAffectedCodecs = $null
+        $latestSurface = $null
         $prefix = $adapterClass.ToLowerInvariant()
         $startupPath = Join-Path $artifactRoot "$prefix-startup.json"
         $surfacePath = Join-Path $artifactRoot "$prefix-surface-schema7.json"
@@ -178,6 +255,9 @@ try {
         $env:MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS = $adapterClass
         $process = $null
         try {
+            $failureComponent = 'renderer'
+            $failureStage = 'startup_surface'
+            $currentArtifactPath = $startupPath
             $process = Start-Process -FilePath $resolvedExecutable -WorkingDirectory $packageDirectory -WindowStyle Normal -PassThru
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
             while ((-not (Test-Path -LiteralPath $startupPath -PathType Leaf) -or
@@ -192,21 +272,28 @@ try {
             }
             foreach ($requiredReport in @($startupPath, $surfacePath, $mediaReportPath)) {
                 if (-not (Test-Path -LiteralPath $requiredReport -PathType Leaf)) {
+                    $currentArtifactPath = $requiredReport
                     throw "$adapterClass did not produce required report: $requiredReport"
                 }
             }
 
+            $failureComponent = 'renderer'
+            $failureStage = 'surface_report'
+            $currentArtifactPath = $surfacePath
             $startup = Get-Content -LiteralPath $startupPath -Raw | ConvertFrom-Json
             $surface = Get-Content -LiteralPath $surfacePath -Raw | ConvertFrom-Json
+            $latestSurface = $surface
             $media = Get-Content -LiteralPath $mediaReportPath -Raw | ConvertFrom-Json
             if (-not (Test-FiniteNonnegativeNumber $startup.first_surface_present_ms) -or
                 [double]$startup.first_surface_present_ms -ge 1000.0) {
                 throw "$adapterClass first surface presentation regressed to $($startup.first_surface_present_ms) ms."
             }
+            $reportedDecoderBackends = @($surface.decoder_backends | ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             if ($surface.schema_version -ne 7 -or $surface.samples -lt 120 -or
                 $surface.renderer_device_type -ne $adapterClass -or $surface.renderer_backend -ne 'Dx12' -or
                 [string]::IsNullOrWhiteSpace([string]$surface.renderer_gpu_name) -or
-                @($surface.decoder_backends).Count -lt 1 -or
+                $reportedDecoderBackends.Count -lt 1 -or
                 [string]::IsNullOrWhiteSpace([string]$surface.encoder_backend) -or
                 $surface.encoder_backend -eq 'not_observed') {
                 throw "$adapterClass surface report omitted required schema-7 renderer/media evidence."
@@ -218,21 +305,37 @@ try {
                 $surface.average_submission_fps -lt 55.0) {
                 throw "$adapterClass surface cadence exceeded the retained foundation gate."
             }
+            $failureComponent = 'decoder'
+            $currentAffectedCodecs = @('mpeg4')
             foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {
+                $failureStage = "decoder.$stageName"
                 Assert-TimingStage -Stage $surface.decoder_stage_timings.$stageName -Context "$adapterClass decoder stage $stageName" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms')
             }
+            $failureComponent = 'viewer'
+            $currentAffectedCodecs = @('mpeg4')
             foreach ($stageName in @('upload_cpu', 'compositor_encode_cpu')) {
+                $failureStage = "viewer.$stageName"
                 Assert-TimingStage -Stage $surface.viewer_stage_timings.$stageName -Context "$adapterClass viewer stage $stageName" -Properties @('samples', 'p95_ms', 'max_ms')
             }
+            $failureComponent = 'audio'
+            $currentAffectedCodecs = @('aac')
             foreach ($stageName in @('output_callback_cpu', 'mix_render_cpu')) {
+                $failureStage = "audio.$stageName"
                 Assert-TimingStage -Stage $surface.audio_stage_timings.$stageName -Context "$adapterClass audio stage $stageName" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms')
             }
+            $failureComponent = 'gpu'
+            $failureStage = 'gpu.submission_to_completion'
+            $currentAffectedCodecs = $null
             Assert-TimingStage -Stage $surface.gpu_stage_timings.submission_to_completion_elapsed -Context "$adapterClass GPU submission completion" -Properties @('samples', 'p95_ms', 'max_ms')
             if ($surface.gpu_stage_timings.timestamp_query_supported) {
+                $failureStage = 'gpu.composite_pass'
                 Assert-TimingStage -Stage $surface.gpu_stage_timings.composite_pass_gpu -Context "$adapterClass compositor GPU pass" -Properties @('samples', 'p95_ms', 'max_ms')
             } elseif ($null -ne $surface.gpu_stage_timings.composite_pass_gpu) {
                 throw "$adapterClass serialized compositor GPU timing despite unavailable timestamp queries."
             }
+            $failureComponent = 'runtime'
+            $failureStage = 'runtime_diagnostics'
+            $currentAffectedCodecs = $null
             foreach ($property in @(
                 'monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames',
                 'monitor_dropped_frames', 'monitor_hold_events', 'monitor_late_frames', 'monitor_errors',
@@ -258,9 +361,27 @@ try {
                     throw "$adapterClass reported a disqualifying runtime fault in $property."
                 }
             }
-            foreach ($property in @('media_pool_drag_completed', 'analysis_metadata_ready', 'waveform_ready', 'monitor_frame_arrived', 'native_viewer_uploaded', 'live_audio_meter_nonzero', 'export_started', 'export_progress_received', 'export_cancelled')) {
+            $currentArtifactPath = $mediaReportPath
+            $mediaChecks = [ordered]@{
+                media_pool_drag_completed = @('media', 'media.import', @('mpeg4', 'aac'))
+                analysis_metadata_ready = @('media', 'media.analysis', @('mpeg4', 'aac'))
+                waveform_ready = @('audio', 'audio.waveform', @('aac'))
+                monitor_frame_arrived = @('decoder', 'decoder.monitor_frame', @('mpeg4'))
+                native_viewer_uploaded = @('viewer', 'viewer.native_upload', @('mpeg4'))
+                live_audio_meter_nonzero = @('audio', 'audio.live_meter', @('aac'))
+                export_started = @('encoder', 'encoder.export_start', @('h264'))
+                export_progress_received = @('encoder', 'encoder.export_progress', @('h264'))
+                export_cancelled = @('encoder', 'encoder.export_cancel', @('h264'))
+            }
+            foreach ($property in $mediaChecks.Keys) {
+                $failureComponent = $mediaChecks[$property][0]
+                $failureStage = $mediaChecks[$property][1]
+                $currentAffectedCodecs = $mediaChecks[$property][2]
                 if ($media.$property -ne $true) { throw "$adapterClass media acceptance did not prove $property." }
             }
+            $failureComponent = 'encoder'
+            $failureStage = 'encoder.export_cleanup'
+            $currentAffectedCodecs = @('h264')
             if (Test-Path -LiteralPath $exportPath -PathType Leaf) {
                 throw "$adapterClass cancelled export left a partial file."
             }
@@ -280,27 +401,140 @@ try {
             })
             Write-Host "Phase 0 $adapterClass full surface report: PASS ($surfacePath)"
         } finally {
+            if ($null -ne $process) {
+                try {
+                    $process.Refresh()
+                    if ($process.HasExited) { $currentProcessExitCode = [int]$process.ExitCode }
+                } catch {}
+            }
             Stop-TrackedProcessTree $process
             Remove-GeneratedFile -Path $exportPath
         }
     }
 
-    $combined = [ordered]@{
-        schema_version = 1
-        status = 'passed'
-        scope = 'packaged_editor_full_surface_schema7'
-        executable_path = $resolvedExecutable
-        executable_sha256 = (Get-FileHash -LiteralPath $resolvedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
-        physical_scanout_observed = $false
-        runs = $runs
-    }
-    Write-AtomicUtf8File -Path $resolvedReportPath -Contents (($combined | ConvertTo-Json -Depth 8) + "`n")
-    Write-Host "Phase 0 cross-adapter full surface qualification: PASS ($resolvedReportPath)"
+    $qualificationStatus = 'passed'
+} catch {
+    $operationError = $_
+    $failureMessage = Get-BoundedFailureMessage $_
 } finally {
-    Remove-GeneratedFile -Path $mediaPath
-    foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        Restore-EnvironmentValue -Name $entry.Key -Value $entry.Value
+    $cleanupError = $null
+    try {
+        Remove-GeneratedFile -Path $mediaPath
+    } catch {
+        $cleanupError = $_
     }
-    if ($lockAcquired) { $runLock.ReleaseMutex() }
-    $runLock.Dispose()
+    foreach ($entry in $savedEnvironment.GetEnumerator()) {
+        try {
+            Restore-EnvironmentValue -Name $entry.Key -Value $entry.Value
+        } catch {
+            if ($null -eq $cleanupError) { $cleanupError = $_ }
+        }
+    }
+    if ($null -ne $cleanupError) {
+        if ($null -eq $operationError) {
+            $operationError = $cleanupError
+            $qualificationStatus = 'failed'
+            $failureComponent = 'harness'
+            $failureStage = 'cleanup'
+            $currentAffectedCodecs = $null
+            $failureMessage = Get-BoundedFailureMessage $cleanupError
+        } else {
+            Write-Warning "Phase 0 cleanup also failed after the primary error: $($cleanupError.Exception.Message)"
+        }
+    }
+    if ($lockAcquired) {
+        try {
+            $executableHash = $null
+            if (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf) {
+                try {
+                    $executableHash = (Get-FileHash -LiteralPath $resolvedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+                } catch {
+                    if ($null -eq $operationError) {
+                        $operationError = $_
+                        $qualificationStatus = 'failed'
+                        $failureComponent = 'package'
+                        $failureStage = 'executable_identity'
+                        $currentAffectedCodecs = $null
+                        $failureMessage = Get-BoundedFailureMessage $_
+                    } else {
+                        Write-Warning "Could not hash the executable after the primary error: $($_.Exception.Message)"
+                    }
+                }
+            }
+            try {
+                $observedEvidence = Get-ObservedSurfaceEvidence $latestSurface
+            } catch {
+                if ($null -eq $operationError) {
+                    $operationError = $_
+                    $qualificationStatus = 'failed'
+                    $failureComponent = 'harness'
+                    $failureStage = 'evidence_collection'
+                    $currentAffectedCodecs = $null
+                    $failureMessage = Get-BoundedFailureMessage $_
+                } else {
+                    Write-Warning "Could not collect optional surface evidence after the primary error: $($_.Exception.Message)"
+                }
+                $observedEvidence = Get-ObservedSurfaceEvidence $null
+            }
+            $failure = if ($qualificationStatus -eq 'passed') {
+                $null
+            } else {
+                [ordered]@{
+                    component = $failureComponent
+                    stage = $failureStage
+                    error_type = $operationError.Exception.GetType().FullName
+                    requested_device_type = $currentAdapterClass
+                    affected_codecs = $currentAffectedCodecs
+                    renderer_backend = $observedEvidence.renderer_backend
+                    renderer_driver = $observedEvidence.renderer_driver
+                    renderer_driver_info = $observedEvidence.renderer_driver_info
+                    decoder_backends = $observedEvidence.decoder_backends
+                    encoder_backend = $observedEvidence.encoder_backend
+                    artifact_path = $currentArtifactPath
+                    process_exit_code = $currentProcessExitCode
+                    message = $failureMessage
+                }
+            }
+            $combined = [ordered]@{
+                schema_version = 2
+                status = $qualificationStatus
+                scope = 'packaged_editor_full_surface_schema7'
+                executable_path = $resolvedExecutable
+                executable_sha256 = $executableHash
+                physical_scanout_observed = $false
+                fixture = [ordered]@{ video_codec = 'mpeg4'; audio_codec = 'aac' }
+                runs = $runs
+                failure = $failure
+            }
+            Write-AtomicUtf8File -Path $resolvedReportPath -Contents (($combined | ConvertTo-Json -Depth 8) + "`n")
+        } catch {
+            $publicationError = $_
+            if ($null -ne $operationError) {
+                Write-Warning "Could not publish Phase 0 failed-run evidence: $($_.Exception.Message)"
+            }
+        } finally {
+            try {
+                $runLock.ReleaseMutex()
+            } catch {
+                if ($null -eq $operationError -and $null -eq $publicationError) {
+                    $publicationError = $_
+                } else {
+                    Write-Warning "Could not release the Phase 0 run lock after the primary result: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+    try {
+        $runLock.Dispose()
+    } catch {
+        if ($null -eq $operationError -and $null -eq $publicationError) {
+            $publicationError = $_
+        } else {
+            Write-Warning "Could not dispose the Phase 0 run lock after the primary result: $($_.Exception.Message)"
+        }
+    }
 }
+
+if ($null -ne $operationError) { throw $operationError }
+if ($null -ne $publicationError) { throw $publicationError }
+Write-Host "Phase 0 cross-adapter full surface qualification: PASS ($resolvedReportPath)"

@@ -155,7 +155,16 @@ Exit gate:
       cancellation, and passed the full-path launcher check with all 12 adjacent runtime DLLs.
       Packaged `Maelstrom.exe` SHA-256:
       `19859AB6534223B968E236048A7593C9CD4ABFACFD00C3F6CC872A9B842F2348`.
-- [ ] A failing codec, driver, or stage is identifiable from one report without guessing.
+- [x] A failing codec, driver, or stage is identifiable from one report without guessing.
+      The full-surface qualification wrapper now uses schema 2 on both pass and operational
+      failure and attempts atomic publication once it owns the report lock. Its failure envelope
+      separates stable component/stage, affected codec,
+      requested adapter, observed decoder/encoder/renderer backend, renderer driver/driver-info,
+      bounded error text, artifact, and exit-code evidence. Evidence that does not exist yet is
+      explicit JSON `null`, never inferred. A deterministic incomplete-package fixture proves a
+      nonzero run still leaves one `package` / `runtime_closure` report with unknown backend/driver
+      fields null; stage-specific validation maps MPEG-4 decode/viewer, AAC audio, and H.264 export
+      failures to the codecs actually exercised.
 
 The report's CPU boundaries do not prove GPU completion or scanout. Its optional pass timestamps
 measure isolated viewer-compositor execution, and the separate queue callback proves completion of

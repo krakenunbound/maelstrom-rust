@@ -115,13 +115,29 @@ Run it only against the full absolute packaged path:
 ```
 
 The ignored `artifacts/phase0-cross-adapter-surface` directory retains the two schema-7 surface
-reports, startup reports, media-acceptance reports, and a schema-version 1 summary containing the
-exact executable hash plus every child-report hash. The summary deliberately records
-`physical_scanout_observed: false`: a successful surface present and wgpu completion still do not
-prove DWM composition or physical scanout.
+reports, startup reports, media-acceptance reports, and a schema-version 2 wrapper containing the
+exact executable hash plus every completed child-report hash. A pass has `failure: null`. Once the
+report destination has been validated and the exclusive run lock acquired, the runner attempts to
+atomically publish `status: "failed"` and one structured `failure` object before returning a
+nonzero result. A unique same-directory temporary file prevents stale fixed-temp collisions. That
+object records a stable component and stage, requested adapter class, only the codecs affected by
+that stage, any renderer/decoder/encoder backend and driver data already observed, a bounded
+message, relevant artifact path, and process exit code when available. Unavailable backend or
+driver values remain JSON `null`; the runner never infers them from an adapter request. The wrapper
+also records the deterministic fixture codecs separately (`mpeg4` video and `aac` audio).
 
-The retained 2026-08-30 hybrid-host run passed on Intel UHD 770 `IntegratedGpu` and NVIDIA RTX 3090
-`DiscreteGpu`. Its schema-version 1 summary SHA-256 is
+The focused failure-contract check creates a disposable, deliberately incomplete package without
+launching the editor and verifies the schema-2 `package` / `runtime_closure` diagnosis:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Test-Phase0CrossAdapterFailureReport.ps1'
+```
+
+The wrapper deliberately records `physical_scanout_observed: false`: a successful surface present
+and wgpu completion still do not prove DWM composition or physical scanout.
+
+The retained 2026-08-30 hybrid-host run predates the failure-envelope revision and passed on Intel
+UHD 770 `IntegratedGpu` and NVIDIA RTX 3090 `DiscreteGpu`. Its schema-version 1 summary SHA-256 is
 `d1bd17bb3c482de9c7d26c8dc507ff5096961656d0998fa4d9697ccb6541e385`; the qualified packaged
 executable SHA-256 is `0f81e9e9df349c9f3b3254cdcf6d891b9cf0fc6faf91f33f4236557df3a44ad0`.
 
