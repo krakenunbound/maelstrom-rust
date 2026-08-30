@@ -59,6 +59,8 @@ function Assert-JsonIntegerProperty {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction Stop
+$cargoExecutable = [IO.Path]::GetFullPath($cargoCommand.Source)
 $ffmpegRoot = Join-Path $repoRoot '.deps\ffmpeg-project-8.1'
 $ffmpeg = Join-Path $ffmpegRoot 'bin\ffmpeg.exe'
 $ffprobe = Join-Path $ffmpegRoot 'bin\ffprobe.exe'
@@ -106,8 +108,12 @@ $savedSecond = $env:MAELSTROM_TEST_MEDIA_SECOND
 $savedThird = $env:MAELSTROM_TEST_MEDIA_THIRD
 $savedFourth = $env:MAELSTROM_TEST_MEDIA_FOURTH
 $savedReport = $env:MAELSTROM_PHASE1_MULTISOURCE_REPORT
+$runLock = [Threading.Mutex]::new($false, 'Local\MaelstromRustPhase1SustainedFixtureLock')
+$runLockAcquired = $false
 
 try {
+    if (-not $runLock.WaitOne(0)) { throw 'Another Phase 1 fixture/sustained run owns the exclusive local artifact lock.' }
+    $runLockAcquired = $true
     $env:FFMPEG_DIR = $ffmpegRoot
     $env:LIBCLANG_PATH = $libclangRoot
     $env:PATH = (Join-Path $ffmpegRoot 'bin') + [IO.Path]::PathSeparator + $libclangRoot + [IO.Path]::PathSeparator + $savedPath
@@ -136,7 +142,7 @@ try {
     $env:MAELSTROM_TEST_MEDIA_THIRD = $fixtures[2]
     $env:MAELSTROM_TEST_MEDIA_FOURTH = $fixtures[3]
     $env:MAELSTROM_PHASE1_MULTISOURCE_REPORT = $resolvedReportPath
-    cargo test -p nle-app --release tests::supplied_media_four_video_layers_decode_independently -- --ignored --exact --test-threads=1
+    & $cargoExecutable test -p nle-app --release tests::supplied_media_four_video_layers_decode_independently -- --ignored --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw 'Phase 1 four-source gate failed.' }
 
     if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
@@ -197,4 +203,6 @@ finally {
     Restore-EnvironmentValue -Name 'MAELSTROM_TEST_MEDIA_THIRD' -Value $savedThird
     Restore-EnvironmentValue -Name 'MAELSTROM_TEST_MEDIA_FOURTH' -Value $savedFourth
     Restore-EnvironmentValue -Name 'MAELSTROM_PHASE1_MULTISOURCE_REPORT' -Value $savedReport
+    if ($runLockAcquired) { $runLock.ReleaseMutex() }
+    $runLock.Dispose()
 }

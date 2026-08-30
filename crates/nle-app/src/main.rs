@@ -85,6 +85,9 @@ const AUTO_PREVIEW_SLOW_SAMPLES: u8 = 4;
 const AUTO_PREVIEW_FAST_SAMPLES: u16 = 90;
 const DEFAULT_PLAYBACK_SOAK_SECONDS: u64 = 600;
 const MAX_PLAYBACK_SOAK_SECONDS: u64 = 3_600;
+const DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 600;
+const MIN_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 15;
+const MAX_PHASE1_SUSTAINED_SOAK_SECONDS: u64 = 3_600;
 
 fn monitor_cache_bytes_from_args(args: impl IntoIterator<Item = String>) -> usize {
     let mut args = args.into_iter();
@@ -6931,6 +6934,30 @@ mod tests {
     }
 
     #[test]
+    fn phase1_sustained_duration_parser_defaults_and_bounds_explicit_values() {
+        assert_eq!(
+            phase1_sustained_duration_seconds(None),
+            DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS
+        );
+        assert_eq!(
+            phase1_sustained_duration_seconds(Some("15")),
+            MIN_PHASE1_SUSTAINED_SOAK_SECONDS
+        );
+        assert_eq!(
+            phase1_sustained_duration_seconds(Some("0")),
+            MIN_PHASE1_SUSTAINED_SOAK_SECONDS
+        );
+        assert_eq!(
+            phase1_sustained_duration_seconds(Some("999999")),
+            MAX_PHASE1_SUSTAINED_SOAK_SECONDS
+        );
+        assert_eq!(
+            phase1_sustained_duration_seconds(Some("invalid")),
+            DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS
+        );
+    }
+
+    #[test]
     fn playback_soak_starts_after_transport_and_reports_counter_deltas_and_loops() {
         let (report_tx, report_rx) = mpsc::sync_channel(1);
         let mut probe = PlaybackSoakProbe {
@@ -9762,6 +9789,210 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires four explicit dynamic 1920x1080 MPEG-4 fixtures and MAELSTROM_PHASE1_SUSTAINED_REPORT"]
+    fn supplied_media_four_video_layers_sustain_bounded_scrub_resources() {
+        const INPUT_TO_SUBMIT_P95_US_LIMIT: u128 = 1_000;
+        const CYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+        // Every position is inside a GOP. The order deliberately crosses forward and backward
+        // seeks while remaining inside the five-second fixture loop.
+        const MID_GOP_TICKS: [i64; 8] = [
+            1_117_000, 2_283_000, 3_449_000, 1_617_000, 3_117_000, 1_283_000, 2_617_000, 1_783_000,
+        ];
+
+        let sources = phase1_multisource_sources().expect("validate four Phase 1 source fixtures");
+        let report_path =
+            phase1_sustained_report_path().expect("validate MAELSTROM_PHASE1_SUSTAINED_REPORT");
+        let requested_duration_seconds = phase1_sustained_duration_seconds(
+            std::env::var("MAELSTROM_PHASE1_SUSTAINED_SECONDS")
+                .ok()
+                .as_deref(),
+        );
+        let authoritative = requested_duration_seconds >= DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS;
+        let mut app = phase1_multisource_app(&sources, MONITOR_LAYER_COUNT);
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+        let baseline_diagnostics = PlaybackSoakRuntimeDiagnostics::from(app.runtime_diagnostics());
+        let started_at = Instant::now();
+        let deadline = started_at + Duration::from_secs(requested_duration_seconds);
+        let mut submissions_us = Vec::new();
+        let mut frame_ready_ms = Vec::new();
+        let mut source_exercise_counts = [0_u64; MONITOR_LAYER_COUNT];
+        let mut max_decoded_tick_delta_us = 0_i64;
+        let mut final_resources = aggregate_playback_soak_monitor_resources(
+            &app.monitor_decoders,
+            app.monitor_session_pool.diagnostics(),
+        );
+        let mut cycles = 0_u64;
+
+        while Instant::now() < deadline {
+            let requested_source_tick = MID_GOP_TICKS[cycles as usize % MID_GOP_TICKS.len()];
+            app.editor
+                .set_playhead(nle_timeline::Tick(requested_source_tick));
+            let mut preview = preview_request(&app.editor);
+            assert_eq!(preview.selected_quality, PreviewQuality::Full);
+            assert_eq!(preview.resolved_quality, PreviewQuality::Full);
+            assert_eq!(preview.playhead_tick, requested_source_tick);
+            assert!(
+                preview
+                    .sources
+                    .iter()
+                    .flatten()
+                    .all(|source| source.media_id > 0)
+            );
+            preview.output_size = [1920, 1080];
+            let submitted_at = Instant::now();
+            app.submit_monitor_decode_request(preview);
+            submissions_us.push(submitted_at.elapsed().as_micros());
+
+            let cycle_deadline = Instant::now() + CYCLE_TIMEOUT;
+            loop {
+                app.poll_monitor_decoder();
+                let matched = (0..MONITOR_LAYER_COUNT).all(|layer| {
+                    app.editor
+                        .monitor_frame_for_layer(layer)
+                        .is_some_and(|frame| {
+                            frame.media_id == Some(layer as u32 + 1)
+                                && (frame.width, frame.height) == (1920, 1080)
+                                && frame.source_tick.is_some_and(|tick| {
+                                    tick.0 >= requested_source_tick
+                                        && tick.0 <= requested_source_tick + 33_334
+                                })
+                                && !app.monitor_requests_in_flight[layer]
+                        })
+                });
+                if matched {
+                    break;
+                }
+                assert!(
+                    Instant::now() < cycle_deadline,
+                    "sustained cycle {cycles} did not receive four matching Full-output frames within {} ms",
+                    CYCLE_TIMEOUT.as_millis(),
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            frame_ready_ms.push(submitted_at.elapsed().as_millis());
+            for layer in 0..MONITOR_LAYER_COUNT {
+                let decoded_tick = app
+                    .editor
+                    .monitor_frame_for_layer(layer)
+                    .and_then(|frame| frame.source_tick)
+                    .expect("validated matching sustained source tick")
+                    .0;
+                max_decoded_tick_delta_us = max_decoded_tick_delta_us
+                    .max(decoded_tick.saturating_sub(requested_source_tick));
+            }
+            for count in &mut source_exercise_counts {
+                *count += 1;
+            }
+            let resources = aggregate_playback_soak_monitor_resources(
+                &app.monitor_decoders,
+                app.monitor_session_pool.diagnostics(),
+            );
+            assert!(
+                resources.active_sticky_sessions
+                    == resources.active_foreground_sessions + resources.active_background_sessions
+                    && resources.session_cap
+                        == resources.foreground_session_cap + resources.background_session_cap
+                    && resources.foreground_session_cap <= resources.session_cap
+                    && resources.background_session_cap <= resources.session_cap
+                    && resources.active_sticky_sessions <= resources.session_cap
+                    && resources.peak_sticky_sessions <= resources.session_cap
+                    && resources.active_foreground_sessions <= resources.foreground_session_cap
+                    && resources.active_background_sessions <= resources.background_session_cap,
+                "sustained cycle {cycles} exceeded the shared session caps: {resources:?}"
+            );
+            assert!(
+                resources.current_frame_cache_bytes <= resources.frame_cache_capacity_bytes
+                    && resources.peak_frame_cache_bytes_upper_bound
+                        <= resources.frame_cache_capacity_bytes,
+                "sustained cycle {cycles} exceeded aggregate monitor cache capacity: {resources:?}"
+            );
+            final_resources = resources;
+            cycles += 1;
+        }
+
+        assert!(
+            cycles > 0,
+            "sustained soak completed without a completed request cycle"
+        );
+        assert!(cycles >= MID_GOP_TICKS.len() as u64);
+        assert!(source_exercise_counts.iter().all(|count| *count == cycles));
+        assert!(app.monitor_requests_in_flight.iter().all(|active| !active));
+        let diagnostics_delta = PlaybackSoakRuntimeDiagnostics::from(app.runtime_diagnostics())
+            .delta_since(baseline_diagnostics);
+        let expected_requests = cycles * MONITOR_LAYER_COUNT as u64;
+        assert_eq!(diagnostics_delta.monitor_requests, expected_requests);
+        assert!(diagnostics_delta.monitor_completed_frames >= expected_requests);
+        assert_eq!(
+            diagnostics_delta.monitor_presented_frames,
+            diagnostics_delta.monitor_completed_frames
+        );
+        assert_eq!(diagnostics_delta.monitor_dropped_frames, 0);
+        assert!(diagnostics_delta.monitor_hold_events <= expected_requests);
+        assert!(diagnostics_delta.monitor_late_frames <= expected_requests);
+        assert_eq!(diagnostics_delta.monitor_errors, 0);
+        assert_eq!(
+            diagnostics_delta.native_viewer_uploads + diagnostics_delta.fallback_viewer_uploads,
+            diagnostics_delta.monitor_presented_frames
+        );
+        assert_eq!(diagnostics_delta.audio_underrun_frames, 0);
+        assert_eq!(diagnostics_delta.audio_callback_lock_failures, 0);
+        assert_eq!(diagnostics_delta.audio_late_discarded_frames, 0);
+        assert!(max_decoded_tick_delta_us <= 33_334);
+        assert!(!app.observed_decoder_backends.is_empty());
+        let observed_decoder_backends = app.observed_decoder_backends.clone();
+        let monitor_session_pool = app.monitor_session_pool.clone();
+        drop(app);
+        let release_deadline = Instant::now() + CYCLE_TIMEOUT;
+        let post_drop_active_sessions = loop {
+            let active = monitor_session_pool.diagnostics().active_sticky_sessions;
+            if active == 0 {
+                break active;
+            }
+            assert!(
+                Instant::now() < release_deadline,
+                "monitor decoder sessions remained active after sustained soak App drop: {active}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        let submission_distribution = phase1_latency_distribution(submissions_us.iter().copied());
+        let frame_ready_distribution = phase1_latency_distribution(frame_ready_ms.iter().copied());
+        let passed = submission_distribution.p95 <= INPUT_TO_SUBMIT_P95_US_LIMIT;
+        let report = Phase1SustainedReport {
+            schema_version: 1,
+            status: if passed { "passed" } else { "failed" },
+            requested_duration_seconds,
+            actual_duration_seconds: started_at.elapsed().as_secs_f64(),
+            authoritative,
+            source_count: sources.len(),
+            sources,
+            output_size: [1920, 1080],
+            cycle_count: cycles,
+            source_exercise_counts,
+            requested_tick_pattern: MID_GOP_TICKS,
+            max_decoded_tick_delta_us,
+            input_to_submit_p95_us_limit: INPUT_TO_SUBMIT_P95_US_LIMIT,
+            input_to_submit_samples_us: submissions_us,
+            input_to_submit_us: submission_distribution,
+            frame_ready_samples_ms: frame_ready_ms,
+            frame_ready_ms: frame_ready_distribution,
+            runtime_diagnostics_delta: diagnostics_delta,
+            monitor_resources: final_resources,
+            observed_decoder_backends,
+            post_drop_active_sessions,
+        };
+        phase1_multisource_write_report(&report_path, &report)
+            .expect("atomically write Phase 1 sustained soak report");
+        assert!(
+            passed,
+            "four-source sustained scheduler p95 was {} us; expected no more than {INPUT_TO_SUBMIT_P95_US_LIMIT} us; report written to {}",
+            report.input_to_submit_us.p95,
+            report_path.display(),
+        );
+    }
+
+    #[test]
     fn supplied_media_missing_upper_layer_does_not_block_ready_lower_layer() {
         let Some(path) = std::env::var_os("MAELSTROM_TEST_MEDIA") else {
             return;
@@ -10176,6 +10407,31 @@ mod tests {
         comparison: Phase1LatencyComparison,
     }
 
+    #[derive(Serialize)]
+    struct Phase1SustainedReport {
+        schema_version: u32,
+        status: &'static str,
+        requested_duration_seconds: u64,
+        actual_duration_seconds: f64,
+        authoritative: bool,
+        source_count: usize,
+        sources: Vec<Phase1MultisourceSource>,
+        output_size: [u32; 2],
+        cycle_count: u64,
+        source_exercise_counts: [u64; MONITOR_LAYER_COUNT],
+        requested_tick_pattern: [i64; 8],
+        max_decoded_tick_delta_us: i64,
+        input_to_submit_p95_us_limit: u128,
+        input_to_submit_samples_us: Vec<u128>,
+        input_to_submit_us: Phase1LatencyDistribution,
+        frame_ready_samples_ms: Vec<u128>,
+        frame_ready_ms: Phase1LatencyDistribution,
+        runtime_diagnostics_delta: PlaybackSoakRuntimeDiagnostics,
+        monitor_resources: PlaybackSoakMonitorResources,
+        observed_decoder_backends: Vec<String>,
+        post_drop_active_sessions: usize,
+    }
+
     fn phase0_required_absolute_path(name: &str) -> Result<PathBuf, String> {
         let path = std::env::var_os(name)
             .map(PathBuf::from)
@@ -10249,6 +10505,72 @@ mod tests {
             ));
         }
         Ok(path)
+    }
+
+    fn phase1_sustained_report_path() -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path("MAELSTROM_PHASE1_SUSTAINED_REPORT")?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE1_SUSTAINED_REPORT must end in .json".to_owned());
+        }
+        let parent = path.parent().ok_or_else(|| {
+            "MAELSTROM_PHASE1_SUSTAINED_REPORT has no parent directory".to_owned()
+        })?;
+        if !parent.is_dir() {
+            return Err(format!(
+                "MAELSTROM_PHASE1_SUSTAINED_REPORT parent does not exist: {}",
+                parent.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    fn phase1_sustained_duration_seconds(value: Option<&str>) -> u64 {
+        value
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PHASE1_SUSTAINED_SOAK_SECONDS)
+            .clamp(
+                MIN_PHASE1_SUSTAINED_SOAK_SECONDS,
+                MAX_PHASE1_SUSTAINED_SOAK_SECONDS,
+            )
+    }
+
+    fn phase1_multisource_app(sources: &[Phase1MultisourceSource], source_count: usize) -> App {
+        assert!((1..=MONITOR_LAYER_COUNT).contains(&source_count));
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths(
+            sources
+                .iter()
+                .take(source_count)
+                .map(|source| source.path.clone()),
+        );
+        let mut video_tracks = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        while video_tracks.len() < source_count {
+            video_tracks.push(
+                app.editor
+                    .timeline
+                    .add_track(nle_timeline::TrackKind::Video),
+            );
+        }
+        for (track, media_id) in video_tracks.into_iter().zip(1..=source_count as u32) {
+            app.editor
+                .timeline
+                .insert_clip(
+                    track,
+                    nle_timeline::MediaId(media_id),
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(5_000_000),
+                    nle_timeline::Tick(0),
+                )
+                .expect("insert Phase 1 multisource fixture clip");
+        }
+        app
     }
 
     fn phase1_latency_trial(

@@ -146,7 +146,12 @@ Exit gate:
       p50/p95/max scheduler and matching-frame timings, and enforces only a 1 ms headless
       input-to-submit scheduler p95. It remains local Software-backend evidence rather than sustained, UI-present,
       or cross-hardware completion. See `docs/phase1-multisource.md` and
-      `docs/phase1-latency-comparison.md`.
+      `docs/phase1-latency-comparison.md`. A third opt-in headless local gate now repeats the
+      same four-source Full-1080p five-second-fixture forward/back scrub workload for a bounded
+      duration (600 seconds by default), with raw scheduler/frame-ready samples, exact runtime
+      counter deltas, bounded cache/session evidence, post-drop release, and tracked-process
+      working-set samples. It is not realtime playback, audio, visible UI, GPU compositor, or
+      cross-hardware proof; see `docs/phase1-sustained-soak.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.
       A deterministic test-only decoder barrier proves an independently scheduled ready source can
       complete while another decoder worker is blocked; this is not yet a real-media latency or
