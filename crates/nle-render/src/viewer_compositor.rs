@@ -1613,6 +1613,310 @@ mod tests {
     use super::*;
     use nle_compositor::{Point, Uv};
     use nle_timeline::ClipId;
+    use serde::Serialize;
+    use std::{
+        fs,
+        path::Path,
+        sync::mpsc,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    const CROSS_ADAPTER_REPORT_ENV: &str = "MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT";
+
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterReport {
+        schema_version: u32,
+        status: &'static str,
+        scope: &'static str,
+        physical_scanout_observed: bool,
+        machine: CrossAdapterMachine,
+        adapters: Vec<CrossAdapterEvidence>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterMachine {
+        computer_name: Option<String>,
+        os: String,
+        process_architecture: String,
+        processor_count: usize,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterEvidence {
+        name: String,
+        vendor: u32,
+        device: u32,
+        device_type: String,
+        backend: String,
+        driver: String,
+        driver_info: String,
+        timestamp_query_supported: bool,
+        correctness_readback_passed: bool,
+        composition_submissions: u32,
+        timing: Option<CrossAdapterTiming>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterTiming {
+        samples: usize,
+        p95_ms: f32,
+        max_ms: f32,
+    }
+
+    fn cross_adapter_machine() -> CrossAdapterMachine {
+        CrossAdapterMachine {
+            computer_name: std::env::var("COMPUTERNAME").ok(),
+            os: std::env::consts::OS.to_owned(),
+            process_architecture: std::env::consts::ARCH.to_owned(),
+            processor_count: std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .unwrap_or(1),
+        }
+    }
+
+    fn write_cross_adapter_report(path: &Path, report: &CrossAdapterReport) -> Result<(), String> {
+        if !path.is_absolute() {
+            return Err(format!(
+                "{CROSS_ADAPTER_REPORT_ENV} must be an absolute path"
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "cross-adapter report path has no parent directory".to_owned())?;
+        fs::create_dir_all(parent).map_err(|error| format!("create report directory: {error}"))?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock for report nonce: {error}"))?
+            .as_nanos();
+        let temporary = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("phase0-cross-adapter.json"),
+            std::process::id(),
+            nonce
+        ));
+        let serialized = serde_json::to_vec_pretty(report)
+            .map_err(|error| format!("serialize cross-adapter report: {error}"))?;
+        fs::write(&temporary, serialized)
+            .map_err(|error| format!("write temporary report: {error}"))?;
+        fs::rename(&temporary, path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("atomically publish cross-adapter report: {error}")
+        })
+    }
+
+    fn adapter_label(info: &wgpu::AdapterInfo) -> String {
+        format!(
+            "{} ({:?}, {:?}, vendor=0x{:04X}, device=0x{:04X})",
+            info.name, info.device_type, info.backend, info.vendor, info.device
+        )
+    }
+
+    fn qualification_frame() -> ViewerFrame {
+        let full_quad = |id| CompositeQuad {
+            clip_id: ClipId(id),
+            positions: [
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 4.0, y: 0.0 },
+                Point { x: 4.0, y: 4.0 },
+                Point { x: 0.0, y: 4.0 },
+            ],
+            uvs: [
+                Uv { u: 0.0, v: 0.0 },
+                Uv { u: 1.0, v: 0.0 },
+                Uv { u: 1.0, v: 1.0 },
+                Uv { u: 0.0, v: 1.0 },
+            ],
+            opacity: 1.0,
+        };
+        let primitive = |id, opacity| ViewerLayerPrimitive {
+            quad: CompositeQuad {
+                opacity,
+                ..full_quad(id)
+            },
+            content_uv: [
+                Uv { u: 0.0, v: 0.0 },
+                Uv { u: 1.0, v: 0.0 },
+                Uv { u: 1.0, v: 1.0 },
+                Uv { u: 0.0, v: 1.0 },
+            ],
+            color_corrections: [ViewerColorCorrection::default(); MAX_COLOR_CORRECTIONS_PER_LAYER],
+            color_correction_count: 0,
+        };
+        let mut corrected_base = primitive(1, 1.0);
+        corrected_base.color_corrections[0] = ViewerColorCorrection {
+            brightness: 0.8,
+            contrast: 1.0,
+            ..Default::default()
+        };
+        corrected_base.color_corrections[1] = ViewerColorCorrection {
+            brightness: -0.5,
+            contrast: 1.0,
+            ..Default::default()
+        };
+        corrected_base.color_correction_count = 2;
+        ViewerFrame {
+            project_size: PixelSize::new(4, 4),
+            logical_canvas_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(4.0, 4.0)),
+            black_mattes_before: [0.0, 1.0, 0.0, 0.0, 0.0],
+            white_mattes_before: [0.0; MAX_COMPOSITE_LAYERS + 1],
+            layers: [Some(corrected_base), Some(primitive(2, 0.5)), None, None],
+        }
+    }
+
+    fn readback_output(
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        submission: wgpu::SubmissionIndex,
+    ) -> Result<(), String> {
+        let (sent, received) = mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sent.send(result);
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(2)),
+            })
+            .map_err(|error| format!("viewer GPU completion: {error}"))?;
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("readback callback: {error}"))?
+            .map_err(|error| format!("mapped output: {error}"))?;
+        let pixels = buffer.slice(..).get_mapped_range();
+        let correct = (125..=130).contains(&pixels[0])
+            && (125..=130).contains(&pixels[1])
+            && (125..=130).contains(&pixels[2]);
+        drop(pixels);
+        buffer.unmap();
+        if correct {
+            Ok(())
+        } else {
+            Err(
+                "opaque boundary-one matte did not cover lower media before 50% white upper layer"
+                    .to_owned(),
+            )
+        }
+    }
+
+    fn qualify_viewer_compositor_adapter(
+        adapter: wgpu::Adapter,
+    ) -> Result<CrossAdapterEvidence, String> {
+        let info = adapter.get_info();
+        let timestamp_query_supported =
+            adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("phase0 cross-adapter viewer compositor device"),
+            required_features: if timestamp_query_supported {
+                wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .map_err(|error| format!("request device for {}: {error}", adapter_label(&info)))?;
+        let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        renderer.set_gpu_timing_enabled(timestamp_query_supported);
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 4, 4, &[255, 0, 0, 255].repeat(16))
+            .map_err(|error| format!("upload red input: {error}"))?;
+        renderer
+            .upload_layer_rgba(&device, &queue, 1, 4, 4, &[255, 255, 255, 255].repeat(16))
+            .map_err(|error| format!("upload white input: {error}"))?;
+        let frame = qualification_frame();
+        for generation in 1..=2 {
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("phase0 cross-adapter viewer readback"),
+                size: 256 * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            if !renderer.prepare(
+                &device,
+                &queue,
+                &mut encoder,
+                Some(frame),
+                generation,
+                PixelSize::new(4, 4),
+            ) {
+                return Err(format!(
+                    "composition cycle {generation} was unexpectedly skipped"
+                ));
+            }
+            if renderer.prepare(
+                &device,
+                &queue,
+                &mut encoder,
+                Some(frame),
+                generation,
+                PixelSize::new(4, 4),
+            ) {
+                return Err(format!(
+                    "unchanged composition cycle {generation} was unexpectedly encoded twice"
+                ));
+            }
+            let output = &renderer.outputs.as_ref().expect("output after prepare")
+                [renderer.front_output]
+                ._texture;
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let submission = queue.submit([encoder.finish()]);
+            readback_output(&device, &readback, submission)?;
+            renderer.drain_gpu_timing(&queue);
+        }
+        let timing = renderer.gpu_timing();
+        if timestamp_query_supported && timing.samples != 2 {
+            return Err(format!(
+                "{} enabled TIMESTAMP_QUERY but produced {} of 2 timing samples",
+                adapter_label(&info),
+                timing.samples
+            ));
+        }
+        Ok(CrossAdapterEvidence {
+            name: info.name,
+            vendor: info.vendor,
+            device: info.device,
+            device_type: format!("{:?}", info.device_type),
+            backend: format!("{:?}", info.backend),
+            driver: info.driver,
+            driver_info: info.driver_info,
+            timestamp_query_supported,
+            correctness_readback_passed: true,
+            composition_submissions: 2,
+            timing: timestamp_query_supported.then_some(CrossAdapterTiming {
+                samples: timing.samples,
+                p95_ms: timing.p95_ms,
+                max_ms: timing.max_ms,
+            }),
+        })
+    }
 
     #[test]
     fn gpu_timestamp_window_reports_supported_without_samples_and_bounded_p95() {
@@ -2117,8 +2421,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real GPU adapter; run with --ignored --nocapture"]
     fn gpu_interleaves_black_matte_between_media_layers() {
-        use std::{sync::mpsc, time::Duration};
-
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -2134,176 +2436,66 @@ mod tests {
                 "selected adapter must support TIMESTAMP_QUERY for the explicit timing gate"
             );
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("viewer GPU test device"),
-            required_features: if timestamp_query_supported {
-                wgpu::Features::TIMESTAMP_QUERY
-            } else {
-                wgpu::Features::empty()
-            },
-            required_limits: wgpu::Limits::default(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .expect("viewer GPU device");
-        let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        renderer.set_gpu_timing_enabled(timestamp_query_supported);
-        renderer
-            .upload_layer_rgba(&device, &queue, 0, 4, 4, &[255, 0, 0, 255].repeat(16))
-            .expect("red input");
-        renderer
-            .upload_layer_rgba(&device, &queue, 1, 4, 4, &[255, 255, 255, 255].repeat(16))
-            .expect("white input");
-        let full_quad = |id| CompositeQuad {
-            clip_id: ClipId(id),
-            positions: [
-                Point { x: 0.0, y: 0.0 },
-                Point { x: 4.0, y: 0.0 },
-                Point { x: 4.0, y: 4.0 },
-                Point { x: 0.0, y: 4.0 },
-            ],
-            uvs: [
-                Uv { u: 0.0, v: 0.0 },
-                Uv { u: 1.0, v: 0.0 },
-                Uv { u: 1.0, v: 1.0 },
-                Uv { u: 0.0, v: 1.0 },
-            ],
-            opacity: 1.0,
-        };
-        let primitive = |id, opacity| ViewerLayerPrimitive {
-            quad: CompositeQuad {
-                opacity,
-                ..full_quad(id)
-            },
-            content_uv: [
-                Uv { u: 0.0, v: 0.0 },
-                Uv { u: 1.0, v: 0.0 },
-                Uv { u: 1.0, v: 1.0 },
-                Uv { u: 0.0, v: 1.0 },
-            ],
-            color_corrections: [ViewerColorCorrection::default(); MAX_COLOR_CORRECTIONS_PER_LAYER],
-            color_correction_count: 0,
-        };
-        let mut corrected_base = primitive(1, 1.0);
-        corrected_base.color_corrections[0] = ViewerColorCorrection {
-            brightness: 0.8,
-            contrast: 1.0,
-            ..Default::default()
-        };
-        corrected_base.color_corrections[1] = ViewerColorCorrection {
-            brightness: -0.5,
-            contrast: 1.0,
-            ..Default::default()
-        };
-        corrected_base.color_correction_count = 2;
-        let frame = ViewerFrame {
-            project_size: PixelSize::new(4, 4),
-            logical_canvas_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(4.0, 4.0)),
-            black_mattes_before: [0.0, 1.0, 0.0, 0.0, 0.0],
-            white_mattes_before: [0.0; MAX_COMPOSITE_LAYERS + 1],
-            layers: [Some(corrected_base), Some(primitive(2, 0.5)), None, None],
-        };
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("viewer GPU readback"),
-            size: 256 * 4,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        assert!(renderer.prepare(
-            &device,
-            &queue,
-            &mut encoder,
-            Some(frame),
-            1,
-            PixelSize::new(4, 4),
-        ));
-        assert!(!renderer.prepare(
-            &device,
-            &queue,
-            &mut encoder,
-            Some(frame),
-            1,
-            PixelSize::new(4, 4),
-        ));
-        let output = &renderer.outputs.as_ref().expect("output")[renderer.front_output]._texture;
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: output,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256),
-                    rows_per_image: Some(4),
-                },
-            },
-            wgpu::Extent3d {
-                width: 4,
-                height: 4,
-                depth_or_array_layers: 1,
-            },
+        let evidence = qualify_viewer_compositor_adapter(adapter)
+            .expect("viewer compositor two-cycle qualification");
+        assert!(evidence.correctness_readback_passed);
+        assert_eq!(evidence.composition_submissions, 2);
+        assert_eq!(
+            evidence.timestamp_query_supported,
+            timestamp_query_supported
         );
-        let submission = queue.submit([encoder.finish()]);
-        let (sent, received) = mpsc::channel();
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                sent.send(result).expect("send map result")
-            });
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(Duration::from_secs(2)),
-            })
-            .expect("viewer GPU completion");
-        received
-            .recv_timeout(Duration::from_secs(2))
-            .expect("readback callback")
-            .expect("mapped output");
-        renderer.drain_gpu_timing(&queue);
-        let gpu_timing = renderer.gpu_timing();
-        assert_eq!(gpu_timing.supported, timestamp_query_supported);
         if timestamp_query_supported {
-            assert_eq!(gpu_timing.samples, 1);
-            assert!(gpu_timing.p95_ms > 0.0);
-            assert_eq!(gpu_timing.max_ms, gpu_timing.p95_ms);
+            assert_eq!(evidence.timing.expect("timestamp timing").samples, 2);
         }
-        let pixels = readback.slice(..).get_mapped_range();
-        assert!(
-            (125..=130).contains(&pixels[0])
-                && (125..=130).contains(&pixels[1])
-                && (125..=130).contains(&pixels[2]),
-            "opaque boundary-one matte must cover the lower media before the 50% white upper layer"
-        );
-        drop(pixels);
-        readback.unmap();
+    }
 
-        if timestamp_query_supported {
-            let mut second_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-            assert!(renderer.prepare(
-                &device,
-                &queue,
-                &mut second_encoder,
-                Some(frame),
-                2,
-                PixelSize::new(4, 4),
-            ));
-            let second_submission = queue.submit([second_encoder.finish()]);
-            device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: Some(second_submission),
-                    timeout: Some(Duration::from_secs(2)),
-                })
-                .expect("second viewer GPU timing completion");
-            renderer.drain_gpu_timing(&queue);
-            assert_eq!(renderer.gpu_timing().samples, 2);
+    #[test]
+    #[ignore = "requires DX12 integrated and discrete adapters plus MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT"]
+    fn phase0_cross_adapter_viewer_compositor_qualification() {
+        let report_path = std::env::var(CROSS_ADAPTER_REPORT_ENV).unwrap_or_else(|_| {
+            panic!("{CROSS_ADAPTER_REPORT_ENV} must name an absolute JSON report path")
+        });
+        let report_path = Path::new(&report_path);
+        assert!(
+            report_path.is_absolute(),
+            "{CROSS_ADAPTER_REPORT_ENV} must name an absolute JSON report path"
+        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12));
+        let available = adapters
+            .iter()
+            .map(|adapter| adapter_label(&adapter.get_info()))
+            .collect::<Vec<_>>();
+        let mut evidence = Vec::with_capacity(2);
+        for required_type in [
+            wgpu::DeviceType::IntegratedGpu,
+            wgpu::DeviceType::DiscreteGpu,
+        ] {
+            let adapter = adapters
+                .iter()
+                .find(|adapter| adapter.get_info().device_type == required_type)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "required DX12 {required_type:?} adapter is unavailable; enumerated: {}",
+                        available.join("; ")
+                    )
+                });
+            evidence.push(
+                qualify_viewer_compositor_adapter(adapter).unwrap_or_else(|error| {
+                    panic!("DX12 {required_type:?} viewer compositor qualification failed: {error}")
+                }),
+            );
         }
+        let report = CrossAdapterReport {
+            schema_version: 1,
+            status: "passed",
+            scope: "headless_viewer_compositor",
+            physical_scanout_observed: false,
+            machine: cross_adapter_machine(),
+            adapters: evidence,
+        };
+        write_cross_adapter_report(report_path, &report)
+            .unwrap_or_else(|error| panic!("write cross-adapter report: {error}"));
     }
 }

@@ -126,13 +126,19 @@ Build the evidence harness before adding engine complexity.
       monitor drop/hold/late/error and audio underrun/lock/late-discard counters; these counters
       cover process/session lifetime rather than the fixed 120-frame timing window. Windows package
       validation exercises report structure and required evidence, while numeric thresholds remain
-      in the dedicated soak gates. This item remains open for physical scanout and cross-hardware
-      proof.
+      in the dedicated soak gates. A schema-1 headless DX12 `ViewerCompositorRenderer`
+      qualification now passed on the hybrid Windows host for both Intel UHD 770 `IntegratedGpu`
+      and NVIDIA RTX 3090 `DiscreteGpu`: deterministic two-layer readback and two timestamp cycles
+      passed on each. This is compositor-only evidence; the full schema-7 surface report has not
+      been produced on both classes, and physical scanout remains unobserved. Those gaps keep this
+      item open.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
 
 Exit gate:
 
-- [ ] The same report can be produced on integrated and discrete Windows hardware.
+- [ ] The full schema-7 surface report can be produced on integrated and discrete Windows hardware.
+      The narrower schema-1 headless compositor qualification has passed on both DX12 adapter
+      classes on the hybrid host; it does not prove surface presentation or scanout.
 - [ ] Existing foundation gates remain green.
 - [ ] A failing codec, driver, or stage is identifiable from one report without guessing.
 

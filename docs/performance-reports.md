@@ -72,6 +72,29 @@ evidence rather than hardware guesses. Project files never contain this session-
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
 `"Unknown"` are not used as hidden unavailable-value sentinels.
 
+## Phase 0 cross-adapter compositor qualification
+
+The headless DX12 qualification exercises the production `ViewerCompositorRenderer` offscreen,
+not the editor, window surface, DWM, or a display. It explicitly enumerates one
+`IntegratedGpu` and one `DiscreteGpu` adapter, executes the same deterministic two-layer compose
+and readback proof twice on each, and records two isolated compositor timestamp cycles when the
+adapter supports `TIMESTAMP_QUERY`. Run it only through Cargo via the repository runner:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Run-Phase0CrossAdapterGpu.ps1'
+```
+
+The atomically written ignored local evidence is schema-version 1 JSON at
+`artifacts/phase0-cross-adapter/phase0-cross-adapter-gpu.json`. It records machine identity and
+adapter name/vendor/device/type/backend/driver information, readback correctness, composition
+submission count, optional timestamp timing, and `physical_scanout_observed: false`.
+It is deliberately limited to `scope: "headless_viewer_compositor"`: it does not replace the
+schema-7 surface report, establish presentation, DWM composition, physical scanout, or end-to-end
+display latency.
+The schema-1 file is retained success evidence only; adapter discovery, device creation, or GPU
+execution failures can terminate before publication and remain visible in the Cargo diagnostic
+output. Machine-readable failed-run evidence is still an open qualification-harness improvement.
+
 Windows packaging performs structural and exercised-path validation: it checks the packaged report
 shape and confirms the full report includes real CPU/RAM, renderer, media backend, preview, cache,
 display, and exercised runtime-counter data when available before accepting the build. Existing
