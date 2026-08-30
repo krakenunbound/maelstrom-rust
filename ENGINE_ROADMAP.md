@@ -109,17 +109,14 @@ Build the evidence harness before adding engine complexity.
       `docs/phase0-scenarios.md` and `docs/performance-reports.md`. A separate timed Phase 0
       orchestrator now repeatedly executes the full seven-scenario native matrix and writes one
       versioned report with all available child evidence, aggregate scenario totals, machine/FFmpeg
-      identity, and preserved failure details. Runs below 600 seconds are harness checks only; a
-      retained authoritative local 2026-08-30 run passed the prior schema-3 six-scenario contract
-      for 600.343 seconds, excluding 1.357 seconds of setup, with 563 complete matrix runs, 3,378
-      scenario executions, and 14,075 declared work iterations. All child reports were hashed and
-      passed; the Software decoder and
-      `h264_mf` encoder were recorded in separate fields with no mixed-role observations. The
-      retained local report SHA-256 is
-      `92ab2cf8cfe464932e1cd0f65aa334f766129c6df2c5207102c7998a58a2006d`. A fresh authoritative
-      schema-4 seven-scenario run is required before carrying that checkpoint forward. A 15-second
-      schema-4 harness check passed 13 complete runs (91 scenario executions), including 156
-      declared iterations of the new twelve-source scenario. Cross-hardware proof remains open.
+      identity, and preserved failure details. Runs below 600 seconds are harness checks only. The
+      retained authoritative local schema-4 run on 2026-08-30 passed from source commit `266309f`
+      for 600.436 seconds, excluding 1.348 seconds of setup, with 520 complete seven-scenario runs,
+      3,640 scenario executions, and 19,240 declared work iterations. Every child report had a
+      unique SHA-256 and passed; the Software decoder and `h264_mf` encoder were recorded only in
+      their separate nullable role fields. The retained report SHA-256 is
+      `ca531cbe16f5ccfc2d8085efdc30cbb674bba911d9505cfba2f39054b6d8b05f`.
+      Cross-hardware proof remains open.
 - [ ] Add per-stage timing for demux, decode, transfer, scale, composite, upload, audio mix, and
       presentation submission without logging per frame in normal builds.
       Decoder-worker aggregates now cover cache lookup, demux, decoder calls, hardware transfer,
@@ -143,6 +140,12 @@ Build the evidence harness before adding engine complexity.
       SHA-256 is `d1bd17bb3c482de9c7d26c8dc507ff5096961656d0998fa4d9697ccb6541e385`.
       Physical scanout remains unobserved, so this item stays open.
 - [x] Add visible dropped/held/late-frame counters and audio underrun counters to diagnostics.
+      A deterministic headless `App::apply_monitor_decode_event` contract now proves the production
+      event classifier increments stale/non-converging drops, late/held completions, presentations,
+      fallback uploads, and current errors with exact cross-counter invariants. Its test-only
+      constructor skips startup-resource loading and native audio initialization; the contract uses
+      no window, renderer, decode request, FFmpeg process, or synthetic native-GPU claim.
+      Packaged/live soak thresholds remain the authoritative runtime evidence.
 
 Exit gate:
 

@@ -167,8 +167,8 @@ Follow `ENGINE_ROADMAP.md`.
 - Versioned fixture manifest (codec, rate, GOP, expected failure)
 - Soak: 10 min play plus a separate seven-scenario native matrix for reverse scrub, project switch,
   offline media, cache pressure, twelve-source pressure/eager idle release, and export cancel. The
-  retained authoritative 600-second local result covers the prior six-scenario contract; a fresh
-  schema-4 authoritative run and broader cross-hardware soak evidence remain open.
+  retained schema-4 local result passed 520 complete runs over 600.436 seconds; broader
+  cross-hardware soak evidence remains open.
 - Per-stage timers and drop/hold/late/underrun counters on the HUD
 
 Gate update: full schema-7 surface reports now pass on integrated Intel and discrete NVIDIA GPUs on

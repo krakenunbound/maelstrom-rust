@@ -3467,6 +3467,25 @@ impl App {
         app
     }
 
+    /// Test-only app construction for monitor event contracts that must not load startup/model
+    /// resources or initialize a native audio device.
+    #[cfg(test)]
+    fn new_without_startup_or_audio_for_monitor_contract() -> Self {
+        let mut app = Self::new_with_catalog_and_notifier(
+            false,
+            None,
+            || {},
+            || {},
+            || {},
+            || {},
+            || {},
+            None,
+        );
+        // No startup worker will send on this receiver in this isolated app path.
+        app.startup_resources_tx = None;
+        app
+    }
+
     #[cfg(test)]
     fn new_with_catalog_and_monitor_cache_bytes(
         demo_hub: bool,
@@ -9280,6 +9299,172 @@ mod tests {
         assert!(monitor_event_is_current(4, 9, 4, 9));
         assert!(!monitor_event_is_current(4, 9, 3, 9));
         assert!(!monitor_event_is_current(4, 9, 4, 8));
+    }
+
+    #[test]
+    fn runtime_diagnostics_classify_monitor_events_without_a_native_viewer() {
+        let frame = |project_epoch, request_id, source_tick| {
+            nle_decode::DecodeEvent::Frame(nle_decode::DecodedFrame {
+                project_epoch,
+                request_id,
+                media_id: 1,
+                source_tick,
+                width: 1,
+                height: 1,
+                backend: Some(nle_decode::DecodeBackend::Software),
+                rgba: Arc::from([0, 0, 0, 255]),
+            })
+        };
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        assert!(app.audio_engine.is_none());
+        assert!(!app.audio_engine_initialized);
+        assert!(app.startup_resources_tx.is_none());
+        assert!(!app.startup_resources_ready);
+        assert_eq!(app.preloaded_models.len(), 0);
+        app.editor
+            .add_media_paths([PathBuf::from("runtime-counter-contract.mp4")]);
+        let video_track = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Video)
+            .expect("default video track")
+            .id;
+        app.editor
+            .timeline
+            .insert_clip(
+                video_track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(10_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert one monitor clip");
+        app.editor.set_playhead(nle_timeline::Tick(100));
+        assert_eq!(app.editor.playback_targets().count(), 1);
+
+        let epoch = 7;
+        app.monitor_generations[0] = epoch;
+        let install_request = |app: &mut App, request_id: u64, source_tick: i64| {
+            app.record_monitor_request_submission(
+                0,
+                MonitorRequestKey {
+                    project_epoch: epoch,
+                    media_id: 1,
+                    source_tick,
+                    width: 1,
+                    height: 1,
+                    is_scrubbing: false,
+                    prewarm_scrub_workers: false,
+                    high_quality_scaling: false,
+                    source_frame_rate: None,
+                    source_frame_duration_tick: None,
+                },
+                MonitorSourceIdentity {
+                    media_id: 1,
+                    path: PathBuf::from("runtime-counter-contract.mp4"),
+                    acceleration: nle_decode::AccelerationPreference::Software,
+                },
+                request_id,
+                false,
+            );
+        };
+        let mut adaptive_quality_changed = false;
+
+        install_request(&mut app, 10, 100);
+        app.editor.set_monitor_frame_for_layer(
+            0,
+            egui::TextureId::Managed(900),
+            1,
+            1,
+            Some(1),
+            Some(nle_timeline::Tick(100)),
+        );
+        // A cancelled generation must be dropped before source or convergence work.
+        assert!(!app.apply_monitor_decode_event(
+            0,
+            frame(epoch - 1, 10, 100),
+            &mut adaptive_quality_changed,
+        ));
+        // An older request in the current generation cannot replace a converged retained frame.
+        assert!(!app.apply_monitor_decode_event(
+            0,
+            frame(epoch, 9, 0),
+            &mut adaptive_quality_changed,
+        ));
+
+        // The current request arrives late while a prior frame is retained: present and record hold.
+        app.monitor_request_started_at[0] = Some((
+            10,
+            Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .expect("100ms precedes now"),
+        ));
+        assert!(app.apply_monitor_decode_event(
+            0,
+            frame(epoch, 10, 100),
+            &mut adaptive_quality_changed
+        ));
+
+        // The next late completion has no retained frame, so it cannot record a hold.
+        app.editor.reset_monitor_layer(0);
+        install_request(&mut app, 11, 200);
+        app.monitor_request_started_at[0] = Some((
+            11,
+            Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .expect("100ms precedes now"),
+        ));
+        assert!(app.apply_monitor_decode_event(
+            0,
+            frame(epoch, 11, 200),
+            &mut adaptive_quality_changed
+        ));
+
+        // A current completion without a turnaround sample still presents and adds no late frame.
+        install_request(&mut app, 12, 300);
+        app.monitor_request_started_at[0] = None;
+        assert!(app.apply_monitor_decode_event(
+            0,
+            frame(epoch, 12, 300),
+            &mut adaptive_quality_changed
+        ));
+
+        install_request(&mut app, 13, 300);
+        assert!(!app.apply_monitor_decode_event(
+            0,
+            nle_decode::DecodeEvent::Error(nle_decode::DecodeError {
+                project_epoch: epoch,
+                request_id: 13,
+                media_id: 1,
+                source_tick: 300,
+                message: "synthetic current decode failure".to_owned(),
+            }),
+            &mut adaptive_quality_changed,
+        ));
+
+        let diagnostics = app.runtime_diagnostics();
+        assert_eq!(diagnostics.monitor_requests, 4);
+        assert_eq!(diagnostics.monitor_completed_frames, 3);
+        assert_eq!(diagnostics.monitor_presented_frames, 3);
+        assert_eq!(diagnostics.monitor_dropped_frames, 2);
+        assert_eq!(diagnostics.monitor_hold_events, 1);
+        assert_eq!(diagnostics.monitor_late_frames, 2);
+        assert_eq!(diagnostics.monitor_errors, 1);
+        assert!(diagnostics.monitor_turnaround_p95_ms >= 100.0);
+        // A headless App has no HubRenderer, so this proves the observed fallback path rather
+        // than claiming a native GPU upload that did not occur.
+        assert_eq!(diagnostics.native_viewer_uploads, 0);
+        assert_eq!(diagnostics.fallback_viewer_uploads, 3);
+        assert_eq!(diagnostics.audio_underrun_frames, 0);
+        assert_eq!(diagnostics.audio_callback_lock_failures, 0);
+        assert_eq!(diagnostics.audio_late_discarded_frames, 0);
+        assert!(diagnostics.monitor_hold_events <= diagnostics.monitor_late_frames);
+        assert_eq!(
+            diagnostics.monitor_presented_frames,
+            diagnostics.native_viewer_uploads + diagnostics.fallback_viewer_uploads
+        );
     }
 
     #[test]

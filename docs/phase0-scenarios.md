@@ -79,12 +79,14 @@ does not display the UI, exercise a live audio device, measure physical GPU
 scanout, replace the packaged playback soak, or satisfy the integrated/discrete
 cross-hardware exit gate by itself.
 
-The retained authoritative local checkpoint on 2026-08-30 predates schema 4 and
-therefore covers the prior six-scenario matrix: 600.343 seconds excluding 1.357
-seconds of setup, 563 complete runs, and 3,378 scenario executions. It is not
-evidence for the new multi-source idle-retirement scenario; a fresh schema-4
-authoritative run is required before carrying this checkpoint forward. The prior
-run recorded `authoritative: true` with SHA-256
-`92ab2cf8cfe464932e1cd0f65aa334f766129c6df2c5207102c7998a58a2006d` and left
-no sustained child-report or related process residue. Integrated/discrete
-cross-hardware proof remains open.
+The retained authoritative local schema-4 checkpoint on 2026-08-30 ran from source
+commit `266309f595baf6aedbe15c30dcc1c99d05fe281e`. It passed for 600.436 seconds,
+excluding 1.348 seconds of setup, with 520 complete matrix runs, 3,640 scenario
+executions, and 19,240 declared work iterations. Every scenario passed all 520
+runs; all child reports had unique SHA-256 values and no invocation/report-read
+failure. The Software decoder and `h264_mf` encoder appeared only in their
+separate nullable role fields. The report recorded `authoritative: true` with
+SHA-256 `ca531cbe16f5ccfc2d8085efdc30cbb674bba911d9505cfba2f39054b6d8b05f`.
+The schema-1 wrapper does not yet embed a Git revision; the source commit above was captured from
+the unchanged tracked `HEAD` immediately before starting the tracked runner session.
+Integrated/discrete cross-hardware proof remains open.

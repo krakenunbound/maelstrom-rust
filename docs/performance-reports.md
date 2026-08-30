@@ -56,6 +56,15 @@ The report records:
   `audio_callback_lock_failures`, and `audio_late_discarded_frames`. These counters are cumulative
   since process/session start and are not scoped to the fixed 120-frame timing window.
 
+The normal headless unit test
+`tests::runtime_diagnostics_classify_monitor_events_without_a_native_viewer` drives synthetic
+decoder events through the production `App::apply_monitor_decode_event` classifier. It proves exact
+stale/non-converging drop, late, hold, presentation, upload-mode, and current-error deltas plus
+`holds <= late` and `presented = native + fallback`. Its test-only constructor skips startup-resource
+loading and native audio initialization. Because the test has no native renderer, it expects the
+observed fallback-upload path and does not claim GPU presentation or physical scanout. Packaged and
+sustained runners remain the numeric runtime threshold gates.
+
 This is CPU, submission-cadence, isolated compositor-pass GPU, and whole-submission completion
 evidence. It does not claim DWM composition, physical scanout, or end-to-end display latency. The
 other timing stages likewise end at their named CPU boundaries; the audio callback
