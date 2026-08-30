@@ -37,6 +37,11 @@ are routed by `.cargo\config.toml` through `scripts\cargo-runtime-runner.bat`, w
 project-local runtime and reports an incomplete bundle in the terminal instead of opening a chain
 of Windows missing-DLL dialogs. Neither path installs DLLs into Windows.
 
+A loader dialog titled `nle_app-<hash>.exe` identifies a generated test harness that bypassed that
+runner; it is not the packaged editor and does not mean the listed DLL should be installed. Stop the
+raw test process and rerun it through Cargo from this repository. A packaged-editor runtime check
+that does not open the GUI is available at the same exact launcher path with `--verify-runtime`.
+
 The monitor decoders share one decoded-frame cache. Its app-wide hard cap
 defaults to 1024 MB and can be bounded explicitly:
 

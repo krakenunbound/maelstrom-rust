@@ -1115,6 +1115,37 @@ impl PreviewRequest {
     }
 }
 
+/// Returns contributing video layers in decode-admission order: highest source priority first,
+/// with the visually topmost layer winning ties. The fixed four-slot result avoids allocation on
+/// the monitor submission hot path.
+fn contributing_video_layers_by_priority(
+    sources: &[Option<PreviewSourceRequest>; MONITOR_LAYER_COUNT],
+) -> ([usize; MONITOR_LAYER_COUNT], usize) {
+    let mut layers = [0; MONITOR_LAYER_COUNT];
+    let mut count = 0;
+    for (layer, source) in sources.iter().enumerate() {
+        let Some(source) = source else {
+            continue;
+        };
+        let mut insert_at = count;
+        while insert_at > 0 {
+            let preceding_layer = layers[insert_at - 1];
+            let preceding = sources[preceding_layer]
+                .expect("admission order contains only contributing layers");
+            if preceding.priority > source.priority
+                || (preceding.priority == source.priority && preceding_layer > layer)
+            {
+                break;
+            }
+            layers[insert_at] = preceding_layer;
+            insert_at -= 1;
+        }
+        layers[insert_at] = layer;
+        count += 1;
+    }
+    (layers, count)
+}
+
 fn preview_decode_size(editor: &EditorState, scrubbing: bool) -> (u32, u32) {
     if editor.playing || scrubbing {
         editor.monitor_playback_decode_size_hint()
@@ -5175,31 +5206,40 @@ impl App {
         let prewarm_layer = (!self.editor.playing && !preview.is_scrubbing)
             .then(|| preview.sources.iter().rposition(Option::is_some))
             .flatten();
-        for (layer, source) in preview.sources.into_iter().enumerate() {
-            let Some(source) = source else {
-                let had_live_source = self.monitor_last_requests[layer].take().is_some()
-                    || self.monitor_source_identities[layer].is_some()
-                    || self.monitor_requests_in_flight[layer]
-                    || self.editor.monitor_frame_for_layer(layer).is_some();
-                if had_live_source {
-                    let _ = self.monitor_decoders[layer].cancel_pending();
-                    self.invalidate_monitor_request(layer);
-                    self.monitor_textures[layer] = None;
-                    self.monitor_last_proxy_frames[layer] = None;
-                    self.monitor_requests_in_flight[layer] = false;
-                    self.monitor_request_deferred[layer] = false;
-                    self.monitor_request_started_at[layer] = None;
-                    self.editor.reset_monitor_layer(layer);
-                    self.clear_native_viewer_layer(layer);
-                }
-                // A positional slot that is no longer visible must not retain an actor lease.
-                // This deliberately leaves the app-wide decoded-frame cache intact.
-                if had_live_source {
-                    let _ = self.monitor_decoders[layer].release_live_sessions();
-                }
-                self.monitor_source_identities[layer] = None;
+        // Release every no-longer-contributing positional slot before admitting any source. This
+        // gives a newly visible high-priority layer a chance to take a hard coordinator permit
+        // immediately instead of being deferred behind an inactive lower layer.
+        for layer in 0..MONITOR_LAYER_COUNT {
+            if preview.sources[layer].is_some() {
                 continue;
-            };
+            }
+            let had_live_source = self.monitor_last_requests[layer].take().is_some()
+                || self.monitor_source_identities[layer].is_some()
+                || self.monitor_requests_in_flight[layer]
+                || self.editor.monitor_frame_for_layer(layer).is_some();
+            if had_live_source {
+                let _ = self.monitor_decoders[layer].cancel_pending();
+                self.invalidate_monitor_request(layer);
+                self.monitor_textures[layer] = None;
+                self.monitor_last_proxy_frames[layer] = None;
+                self.monitor_requests_in_flight[layer] = false;
+                self.monitor_request_deferred[layer] = false;
+                self.monitor_request_started_at[layer] = None;
+                self.editor.reset_monitor_layer(layer);
+                self.clear_native_viewer_layer(layer);
+            }
+            // A positional slot that is no longer visible must not retain an actor lease. This
+            // deliberately leaves the app-wide decoded-frame cache intact.
+            if had_live_source {
+                let _ = self.monitor_decoders[layer].release_live_sessions();
+            }
+            self.monitor_source_identities[layer] = None;
+        }
+        let (contributing_layers, contributing_count) =
+            contributing_video_layers_by_priority(&preview.sources);
+        for &layer in &contributing_layers[..contributing_count] {
+            let source = preview.sources[layer]
+                .expect("contributing monitor admission layer remains populated");
             let previous = self.monitor_last_requests[layer];
             // Compare the retained source identity while borrowing the timeline path. A path is
             // cloned only below, after the unchanged-key early return has decided to submit.
@@ -8228,6 +8268,117 @@ mod tests {
             slots[source.layer] = Some(source);
         }
         slots
+    }
+
+    fn reconfigure_test_monitor_source_cap(app: &mut App, source_group_cap: usize) {
+        let session_pool = nle_decode::MonitorSessionPool::new(source_group_cap, 0);
+        let coordinator =
+            nle_decode::MonitorSourceCoordinator::new(source_group_cap, session_pool.clone());
+        let frame_cache_pool = app.monitor_frame_cache_pool.clone();
+        app.monitor_decoders = std::array::from_fn(|_| {
+            nle_decode::MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+                || {},
+                frame_cache_pool.clone(),
+                coordinator.clone(),
+            )
+        });
+        app.monitor_session_pool = session_pool;
+        app.monitor_source_coordinator = coordinator;
+    }
+
+    fn priority_test_app() -> App {
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths([
+            PathBuf::from("priority-lower-does-not-exist.mp4"),
+            PathBuf::from("priority-upper-does-not-exist.mp4"),
+        ]);
+        let video_tracks = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+            .map(|track| track.id)
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(video_tracks.len(), 2);
+        for (track, media_id) in video_tracks.into_iter().zip([1, 2]) {
+            app.editor
+                .timeline
+                .insert_clip(
+                    track,
+                    nle_timeline::MediaId(media_id),
+                    nle_timeline::Tick(0),
+                    nle_timeline::Tick(1_000_000),
+                    nle_timeline::Tick(0),
+                )
+                .expect("insert priority test clip");
+        }
+        app.editor.set_playhead(nle_timeline::Tick(100_000));
+        app
+    }
+
+    #[test]
+    fn contributing_video_layers_prioritize_visible_top_layers_without_allocating() {
+        let mut lower = preview_source(0, 1);
+        lower.priority = 4;
+        let mut upper_tie = preview_source(2, 2);
+        upper_tie.priority = 9;
+        let mut uppermost_tie = preview_source(3, 3);
+        uppermost_tie.priority = 9;
+        let sources = preview_sources([lower, upper_tie, uppermost_tie]);
+
+        let (layers, count) = contributing_video_layers_by_priority(&sources);
+
+        assert_eq!(count, 3);
+        assert_eq!(&layers[..count], &[3, 2, 0]);
+        assert!(
+            sources[1].is_none(),
+            "release pass precedes this admission list"
+        );
+    }
+
+    #[test]
+    fn priority_admission_prefers_top_source_and_releases_absent_lower_before_admitting_upper() {
+        let mut app = priority_test_app();
+        reconfigure_test_monitor_source_cap(&mut app, 1);
+
+        let mut both = preview_request(&app.editor);
+        both.is_scrubbing = true;
+        both.output_size = [64, 36];
+        app.submit_monitor_decode_request(both);
+        assert!(app.monitor_last_requests[1].is_some());
+        assert!(!app.monitor_request_deferred[1]);
+        assert!(app.monitor_last_requests[0].is_some());
+        assert!(app.monitor_request_deferred[0]);
+        assert_eq!(
+            app.monitor_source_coordinator
+                .diagnostics()
+                .live_source_groups,
+            1
+        );
+
+        let mut replacement = priority_test_app();
+        reconfigure_test_monitor_source_cap(&mut replacement, 1);
+        let mut lower_only = preview_request(&replacement.editor);
+        lower_only.is_scrubbing = true;
+        lower_only.output_size = [64, 36];
+        lower_only.sources[1] = None;
+        replacement.submit_monitor_decode_request(lower_only);
+        assert!(replacement.monitor_last_requests[0].is_some());
+        assert!(!replacement.monitor_request_deferred[0]);
+
+        let mut upper_only = preview_request(&replacement.editor);
+        upper_only.is_scrubbing = true;
+        upper_only.output_size = [64, 36];
+        upper_only.sources[0] = None;
+        replacement.submit_monitor_decode_request(upper_only);
+        assert!(replacement.monitor_last_requests[0].is_none());
+        assert!(replacement.monitor_last_requests[1].is_some());
+        assert!(
+            !replacement.monitor_request_deferred[1],
+            "releasing the absent lower layer must happen before upper admission"
+        );
     }
 
     fn wait_for_project_open(app: &mut App) {

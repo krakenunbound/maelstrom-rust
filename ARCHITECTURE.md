@@ -182,6 +182,12 @@ Auto observes latest-request decoder turnaround against a frame-rate-derived bud
 breach and longer recovery windows to avoid oscillation, and changes only runtime resolution.
 Manual quality is durable view state; Auto's current resolution is runtime-only. Output-size changes
 cancel and generation-obsolete prior layer requests but retain the last good texture for continuity.
+Before decode admission, the app releases every positional slot that no longer contributes. It then
+orders contributing video slots in a fixed four-entry array by declared priority, with the visually
+topmost layer winning ties, while preserving each result's positional compositor slot. This gives a
+new top visible source first access to bounded source/session capacity without allocating on the
+submission path. Audio scheduling remains independent and includes every audible lane; this policy
+does not yet claim priority-driven preemptive eviction of another actively contributing source.
 
 Playback advances independently of video decode. Late video frames are held or skipped rather than
 stalling the clock. During audible playback, the CPAL device callback owns the shared A/V clock and

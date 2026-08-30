@@ -150,7 +150,13 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       The post-refactor authoritative ten-minute four-source gate held four source groups, five
       live actors/sessions under the eight-actor/session cap, zero retiring actors at the final
       sample, and zero sessions after app drop.
-- [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing.
+- [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing. Video
+      admission now releases all absent positional slots first, then uses an allocation-free fixed
+      array to admit contributing sources by descending priority with the visually topmost layer
+      winning ties. A one-source-cap regression proves a top layer wins fresh contention and an
+      absent lower layer releases before its upper replacement is admitted. This remains open for
+      audible-versus-speculative arbitration and safe preemptive eviction under active contention;
+      actual audio playback is still never truncated to the diagnostic snapshot cap.
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.
 - [x] Add adaptive full/half/quarter/eighth preview resolution based on measured frame budget.
 - [x] Add manual preview-quality override and an honest Auto mode.
@@ -168,7 +174,9 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       through analysis and preview addressing. This remains open: packet PTS is a safe bounded
       demux index rather than decoded best-effort frame timing for every complex codec, and slip
       mapping plus reverse-policy proof are still required.
-- [ ] Add decode-session eviction that respects the global byte/session cap.
+- [ ] Add decode-session eviction that respects the global byte/session cap. Release-first cleanup
+      now prevents a noncontributing positional slot from blocking its replacement, but it is not
+      global priority/recency eviction and makes no preemption claim for active contributors.
 - [ ] Expose active source backend, preview scale, proxy/original choice, and fallback reason.
 
 Exit gate:
