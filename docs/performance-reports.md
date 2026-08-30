@@ -67,23 +67,25 @@ executable path. During the opt-in run the editor window remains visible and alw
 Windows occluded-surface throttling; it returns to normal level when the application report is
 written.
 
-The app atomically writes schema-version 3 `playback-soak-app-report.json` under the ignored
+The app atomically writes schema-version 4 `playback-soak-app-report.json` under the ignored
 `artifacts/phase0-playback-soak` directory. It contains requested and actual wall duration,
 completed loop count, observed decoder backends, selected/resolved preview quality, configured
 monitor-cache cap, `monitor_resources`, and deltas for monitor
 requests/completions/presents/drops/holds/lates/errors, native/fallback viewer uploads, audio
-underruns, callback lock failures, and late audio discards. `monitor_resources` sums cache
-capacity/current bytes across the app's monitor decoders. Cache peaks remain the explicit summed
-upper bound `peak_frame_cache_bytes_upper_bound`. Session fields come from one shared hard permit
-pool instead: `active_sticky_sessions`, exact `peak_sticky_sessions`, and `session_cap`, plus exact
-foreground/background active counts and caps.
+underruns, callback lock failures, and late audio discards. `monitor_resources` reports the one
+app-wide hard-capped decoded-frame cache; capacity, current bytes, and
+`peak_frame_cache_bytes_upper_bound` therefore describe one physical allocation budget rather than
+a sum of decoder-local caches. Session fields come from one shared hard permit pool:
+`active_sticky_sessions`, exact `peak_sticky_sessions`, and `session_cap`, plus exact
+foreground/background active counts and caps. Source ownership is reported separately through live
+source-group/group-cap and live/retiring lane-actor diagnostics.
 
 The runner validates actual duration, a `Full` selected/resolved preview, backend evidence, at least
 20 native uploads per second, a healthy A/V transport at completion with no observed audio fault or
 early stop, positive cache/session peak exercise, cache current and peak upper bound no greater than
 aggregate capacity, exact active and peak sessions no greater than the shared cap, coherent
-foreground/background totals, zero monitor errors/fallback uploads, no more than 2% late monitor
-requests, and zero audio
+foreground/background totals, bounded source groups, combined live-plus-retiring lane actors no
+greater than the lane-actor cap, zero monitor errors/fallback uploads, no more than 2% late monitor requests, and zero audio
 underruns/callback lock failures/late discards. It then atomically writes
 `playback-soak-report.json` beside the app report with the exact executable path and SHA-256 plus
 coarse WorkingSet64 evidence.
@@ -99,7 +101,9 @@ The latest 2026-08-28 Windows checkpoint passed against packaged executable SHA-
 `C41F3F1552ADBA6C30A4CA5F93580A93727AA1C51196A9877060198651B16CF5`: 600.006 seconds,
 10 timeline loops, `Full` selected/resolved quality, 18,015 native viewer uploads, zero monitor
 errors/fallback uploads, and zero audio underruns/callback lock failures/late discards. The decoded
-frame-cache sample ended at 264,456,192 bytes and its summed decoder-local peak upper bound was
+frame-cache sample ended at 264,456,192 bytes and its then-current summed decoder-local peak upper bound was
 268,015,616 bytes against the 1,073,741,824-byte aggregate cap. Active/peak sticky sessions were
 1/1 against the 16-session app cap. Peak GUI working-set growth was 237,711,360 bytes. The ignored
-local evidence remains in `artifacts/phase0-playback-soak/playback-soak-report.json`.
+local schema-version 3 evidence remains in
+`artifacts/phase0-playback-soak/playback-soak-report.json`; it predates the shared physical cache
+and source-actor diagnostics.

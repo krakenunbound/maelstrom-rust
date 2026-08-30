@@ -2,8 +2,9 @@
 
 `scripts/Run-Phase1SustainedSoak.ps1` is an opt-in, headless resource and
 scheduler soak. It does not launch `Maelstrom.exe`, display the GUI, or modify
-a project document. It requires PowerShell 7 because timeout cleanup uses the
-tracked test process-tree API.
+a project document. The wrapper starts the full absolute Cargo path; Cargo owns
+the test child normally. It requires PowerShell 7 because timeout cleanup uses
+the tracked Cargo process-tree API.
 
 ```powershell
 .\scripts\Run-Phase1SustainedSoak.ps1
@@ -47,11 +48,12 @@ late frames, so those are not incorrectly forced to zero. The stale-event limit 
 `max(4, ceil(requests / 1000))` (0.1%, with a four-event startup floor);
 it counts deliberately rejected obsolete/non-converging events rather than displayed-frame
 loss. Cache current/peak and
-session active/peak/lane totals must remain coherent with their owned caps, and
+session active/peak/lane totals and source-group/live/retiring actor totals must
+remain coherent with their owned caps, and
 dropping the app must release all sessions.
 
 Both reports are atomically written below ignored
-`artifacts/phase1-sustained/`. The wrapper includes the exact test executable
+`artifacts/phase1-sustained/`. The wrapper includes the exact Cargo/test executable
 path/SHA-256, fixture paths/sizes/SHA-256, PID, memory samples/baseline/peak/growth/bound,
 app-report path/SHA-256, and captured test stdout/stderr so a failed run retains evidence
 when possible. The wrapper is authoritative only when the test passed, both
@@ -86,7 +88,7 @@ test executable SHA-256 was
 app-report SHA-256 was
 `9dfe0003242cffdb47e90ff2f192e1469cb3db7ab2cacddd9eb5b7fe38ee1ef3`.
 
-## Post-shared-cache authoritative evidence
+## Pre-source-actor shared-cache evidence
 
 After consolidating the four decoder-local caches into one app-wide hard-capped
 cache, the same gate passed again on 2026-08-29 for 600.032 seconds. It completed
@@ -97,7 +99,8 @@ All 67,335 completed frames were presented. The physical cache ended at
 207,360,000 bytes and reached an exact 215,654,400-byte peak under its 1 GiB
 cap. The session pool again peaked at seven of eight sessions and released to
 zero after app drop. Working-set growth was 85,987,328 bytes under the 1.5 GiB
-bound. The observed decoder backend was Software.
+bound. The observed decoder backend was Software. This historical run predates
+source-owned actor/session deduplication.
 
 The ignored wrapper is
 `artifacts/phase1-sustained/phase1-sustained-shared-cache-wrapper.json`. The
@@ -105,3 +108,26 @@ exact release test executable SHA-256 was
 `d74dbff796ad692b280de89c2c47d39dbef1d0c1ee8f013900c5c3e1a077897f`; the
 app-report SHA-256 was
 `d30a9d074dc4f73919c78aefdfe5416596dab3d7ccf95fa347a1aed50717d86d`.
+
+## Post-source-actor authoritative evidence
+
+After source-owned actor/session deduplication and the hard combined
+live-plus-retiring actor reservation were added, the gate passed on 2026-08-29
+for 600.020 seconds. It completed 16,494 four-source cycles and 65,976 requests
+with 44 us input-to-submit p95 (416 us maximum), 45 ms coarse frame-ready p95
+(64 ms maximum), seven rejected stale/non-converging events under the bounded
+allowance, and zero monitor errors. All 67,557 completed frames were presented.
+The physical cache ended at 207,360,000 bytes and reached an exact 215,654,400-byte
+peak under its 1 GiB cap. The source coordinator held four groups and five live
+actors (four foreground plus one shared speculative background) under its
+eight-actor cap, with zero retiring actors at the final sample. The session pool
+peaked at five of eight and released to zero after app drop. Working-set growth
+was 40,943,616 bytes under the 1.5 GiB diagnostic bound. The observed decoder
+backend was Software.
+
+The ignored wrapper remains
+`artifacts/phase1-sustained/phase1-sustained-wrapper.json`. The exact release test
+executable SHA-256 was
+`89106d9f98648cf3fe597b5280083c9f13058ccda6224eb2bd01b81089cdc00e`; the
+app-report SHA-256 was
+`6f4a16497556d145a0bd244e1ff46a8b9aa5fe6227cc7453714d4fdd1b177216`.

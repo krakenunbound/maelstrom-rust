@@ -64,6 +64,26 @@ function Write-AtomicJson([string]$Path, $Value) {
     }
 }
 
+function Get-TrackedSustainedTestChild([int]$RootProcessId) {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $descendantIds = [Collections.Generic.HashSet[int]]::new()
+    $null = $descendantIds.Add($RootProcessId)
+    do {
+        $added = $false
+        foreach ($candidate in $processes) {
+            if ($descendantIds.Contains([int]$candidate.ParentProcessId) -and
+                $descendantIds.Add([int]$candidate.ProcessId)) {
+                $added = $true
+            }
+        }
+    } while ($added)
+    return @($processes | Where-Object {
+        $descendantIds.Contains([int]$_.ProcessId) -and
+        $_.Name -like 'nle_app-*.exe' -and
+        $_.CommandLine -like '*supplied_media_four_video_layers_sustain_bounded_scrub_resources*'
+    } | Select-Object -First 1)
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $fixtureRunner = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Run-Phase1Multisource.ps1'))
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase1-sustained'))
@@ -88,7 +108,7 @@ $savedPath = $env:PATH; $savedFfmpeg = $env:FFMPEG_DIR; $savedLibclang = $env:LI
 $savedFirst = $env:MAELSTROM_TEST_MEDIA; $savedSecond = $env:MAELSTROM_TEST_MEDIA_SECOND
 $savedThird = $env:MAELSTROM_TEST_MEDIA_THIRD; $savedFourth = $env:MAELSTROM_TEST_MEDIA_FOURTH
 $savedSustainedSeconds = $env:MAELSTROM_PHASE1_SUSTAINED_SECONDS; $savedSustainedReport = $env:MAELSTROM_PHASE1_SUSTAINED_REPORT
-$process = $null; $testExecutable = $null; $failure = $null; $appReport = $null; $memorySamples = @()
+$process = $null; $testProcessId = $null; $testExecutable = $null; $failure = $null; $appReport = $null; $memorySamples = @()
 $fixtureProvenance = @(); $runLockAcquired = $false; $authoritativeRun = $false
 $runLock = [Threading.Mutex]::new($false, 'Local\MaelstromRustPhase1SustainedFixtureLock')
 try {
@@ -141,9 +161,12 @@ try {
     $testExecutable = [IO.Path]::GetFullPath($testExecutable[0])
     $testExecutableHash = (Get-FileHash -LiteralPath $testExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
 
-    # The exact resolved test executable is hidden and is the only process this runner tracks.
-    $process = Start-Process -FilePath $testExecutable -ArgumentList @(
-        'tests::supplied_media_four_video_layers_sustain_bounded_scrub_resources', '--ignored', '--exact', '--test-threads=1'
+    # Cargo is the only process this sustained-test section launches. It owns the test child and
+    # gives timeout cleanup one tracked process-tree root without directly starting a raw test executable.
+    $process = Start-Process -FilePath $cargoExecutable -ArgumentList @(
+        'test', '-p', 'nle-app', '--release',
+        'tests::supplied_media_four_video_layers_sustain_bounded_scrub_resources',
+        '--', '--ignored', '--exact', '--test-threads=1'
     ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     $startedAt = [Diagnostics.Stopwatch]::StartNew()
     $warmBaselineBytes = $null
@@ -151,10 +174,14 @@ try {
     $timeoutSeconds = $DurationSeconds + 30
     while (-not $process.HasExited) {
         $process.Refresh()
-        $workingSet = [int64]$process.WorkingSet64
-        $sample = [ordered]@{ elapsed_seconds = [Math]::Round($startedAt.Elapsed.TotalSeconds, 3); working_set_bytes = $workingSet }
-        $memorySamples += [pscustomobject]$sample
-        if ($null -eq $warmBaselineBytes -and $startedAt.Elapsed.TotalSeconds -ge $warmAfterSeconds) { $warmBaselineBytes = $workingSet }
+        $testChild = @(Get-TrackedSustainedTestChild $process.Id)
+        if ($testChild.Count -eq 1) {
+            $testProcessId = [int]$testChild[0].ProcessId
+            $workingSet = [int64]$testChild[0].WorkingSetSize
+            $sample = [ordered]@{ elapsed_seconds = [Math]::Round($startedAt.Elapsed.TotalSeconds, 3); working_set_bytes = $workingSet }
+            $memorySamples += [pscustomobject]$sample
+            if ($null -eq $warmBaselineBytes -and $startedAt.Elapsed.TotalSeconds -ge $warmAfterSeconds) { $warmBaselineBytes = $workingSet }
+        }
         if ($startedAt.Elapsed.TotalSeconds -gt $timeoutSeconds) {
             $process.Kill($true)
             $process.WaitForExit()
@@ -199,12 +226,14 @@ try {
         }
     }
     $resources = $appReport.monitor_resources
-    foreach ($name in @('frame_cache_capacity_bytes', 'current_frame_cache_bytes', 'peak_frame_cache_bytes_upper_bound', 'active_sticky_sessions', 'peak_sticky_sessions', 'session_cap', 'active_foreground_sessions', 'foreground_session_cap', 'active_background_sessions', 'background_session_cap')) { Assert-Unsigned $resources $name 'sustained monitor resources' }
+    foreach ($name in @('frame_cache_capacity_bytes', 'current_frame_cache_bytes', 'peak_frame_cache_bytes_upper_bound', 'active_sticky_sessions', 'peak_sticky_sessions', 'session_cap', 'active_foreground_sessions', 'foreground_session_cap', 'active_background_sessions', 'background_session_cap', 'live_source_groups', 'source_group_cap', 'live_lane_actors', 'lane_actor_cap', 'retiring_lane_actors')) { Assert-Unsigned $resources $name 'sustained monitor resources' }
     if ($resources.current_frame_cache_bytes -gt $resources.frame_cache_capacity_bytes -or $resources.peak_frame_cache_bytes_upper_bound -gt $resources.frame_cache_capacity_bytes -or
         $resources.active_sticky_sessions -ne ($resources.active_foreground_sessions + $resources.active_background_sessions) -or
         $resources.session_cap -ne ($resources.foreground_session_cap + $resources.background_session_cap) -or
         $resources.active_sticky_sessions -gt $resources.session_cap -or $resources.peak_sticky_sessions -gt $resources.session_cap -or
-        $resources.active_foreground_sessions -gt $resources.foreground_session_cap -or $resources.active_background_sessions -gt $resources.background_session_cap) {
+        $resources.active_foreground_sessions -gt $resources.foreground_session_cap -or $resources.active_background_sessions -gt $resources.background_session_cap -or
+        $resources.live_source_groups -gt $resources.source_group_cap -or
+        ($resources.live_lane_actors + $resources.retiring_lane_actors) -gt $resources.lane_actor_cap) {
         throw 'Sustained app report exceeded bounded cache or session resources.'
     }
     if (@($appReport.observed_decoder_backends).Count -lt 1) { throw 'Sustained app report omitted observed decoder backend evidence.' }
@@ -260,7 +289,8 @@ finally {
             fixture_provenance = $fixtureProvenance
             test_executable_path = $testExecutable
             test_executable_sha256 = if ($null -ne $testExecutable -and (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { (Get-FileHash -LiteralPath $testExecutable -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
-            tracked_pid = if ($null -ne $process) { $process.Id } else { $null }
+            tracked_pid = $testProcessId
+            tracked_cargo_pid = if ($null -ne $process) { $process.Id } else { $null }
             memory_samples = $memorySamples
             warm_baseline_working_set_bytes = $warmBaselineBytes
             peak_working_set_bytes = if ($memorySamples.Count) { [int64](($memorySamples | Measure-Object -Property working_set_bytes -Maximum).Maximum) } else { $null }

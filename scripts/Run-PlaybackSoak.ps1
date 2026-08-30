@@ -151,7 +151,7 @@ try {
     }
     $actualDurationSeconds = [double]$appReport.actual_duration_seconds
     $decoderBackends = $appReport.PSObject.Properties['observed_decoder_backends'].Value
-    if ($appReport.schema_version -ne 3 -or
+    if ($appReport.schema_version -ne 4 -or
         $appReport.requested_duration_seconds -ne $DurationSeconds -or
         $actualDurationSeconds -lt $DurationSeconds -or
         $actualDurationSeconds -gt ($DurationSeconds + 2) -or
@@ -176,7 +176,8 @@ try {
         'frame_cache_capacity_bytes', 'current_frame_cache_bytes', 'peak_frame_cache_bytes_upper_bound',
         'active_sticky_sessions', 'peak_sticky_sessions', 'session_cap',
         'active_foreground_sessions', 'foreground_session_cap',
-        'active_background_sessions', 'background_session_cap'
+        'active_background_sessions', 'background_session_cap',
+        'live_source_groups', 'source_group_cap', 'live_lane_actors', 'lane_actor_cap', 'retiring_lane_actors'
     )) {
         Assert-JsonUnsignedIntegerProperty $resources $property 'Playback soak monitor resources'
     }
@@ -190,7 +191,9 @@ try {
         $resources.active_foreground_sessions -gt $resources.foreground_session_cap -or
         $resources.active_background_sessions -gt $resources.background_session_cap -or
         ($resources.active_foreground_sessions + $resources.active_background_sessions) -ne $resources.active_sticky_sessions -or
-        ($resources.foreground_session_cap + $resources.background_session_cap) -ne $resources.session_cap) {
+        ($resources.foreground_session_cap + $resources.background_session_cap) -ne $resources.session_cap -or
+        $resources.live_source_groups -gt $resources.source_group_cap -or
+        ($resources.live_lane_actors + $resources.retiring_lane_actors) -gt $resources.lane_actor_cap) {
         throw "Playback soak reported monitor resources outside their aggregate bounds: $($resources | ConvertTo-Json -Compress)"
     }
     if ($resources.peak_frame_cache_bytes_upper_bound -lt 1 -or

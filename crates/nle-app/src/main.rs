@@ -1043,6 +1043,29 @@ struct MonitorRequestKey {
     source_frame_rate_millihz: Option<u32>,
 }
 
+/// Decoder ownership is keyed separately from output policy.  Changing dimensions, scrub
+/// quality, or scaling must keep the same source actor warm; changing media, path, or decode
+/// acceleration must hand the endpoint to the correct bounded actor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MonitorSourceIdentity {
+    media_id: u32,
+    path: PathBuf,
+    acceleration: nle_decode::AccelerationPreference,
+}
+
+fn monitor_source_identity_changed(
+    previous: Option<&MonitorSourceIdentity>,
+    media_id: u32,
+    path: &Path,
+    acceleration: nle_decode::AccelerationPreference,
+) -> bool {
+    previous.is_some_and(|previous| {
+        previous.media_id != media_id
+            || previous.path.as_path() != path
+            || previous.acceleration != acceleration
+    })
+}
+
 /// Immutable, allocation-free description of one viewer update. Decoder workers still receive
 /// owned paths only when a source key actually changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2229,21 +2252,29 @@ struct PlaybackSoakMonitorResources {
     foreground_session_cap: usize,
     active_background_sessions: usize,
     background_session_cap: usize,
+    live_source_groups: usize,
+    source_group_cap: usize,
+    live_lane_actors: usize,
+    lane_actor_cap: usize,
+    retiring_lane_actors: usize,
 }
 
 fn aggregate_playback_soak_monitor_resources(
     frame_cache_pool: &nle_decode::MonitorFrameCachePool,
     session_pool: nle_decode::MonitorSessionPoolDiagnostics,
+    source_coordinator: nle_decode::MonitorSourceCoordinatorDiagnostics,
 ) -> PlaybackSoakMonitorResources {
     aggregate_playback_soak_monitor_resource_diagnostics(
         frame_cache_pool.diagnostics(),
         session_pool,
+        source_coordinator,
     )
 }
 
 fn aggregate_playback_soak_monitor_resource_diagnostics(
     frame_cache: nle_decode::MonitorFrameCachePoolDiagnostics,
     session_pool: nle_decode::MonitorSessionPoolDiagnostics,
+    source_coordinator: nle_decode::MonitorSourceCoordinatorDiagnostics,
 ) -> PlaybackSoakMonitorResources {
     let mut resources = PlaybackSoakMonitorResources {
         frame_cache_capacity_bytes: frame_cache.capacity_bytes,
@@ -2256,6 +2287,11 @@ fn aggregate_playback_soak_monitor_resource_diagnostics(
         foreground_session_cap: session_pool.foreground_session_cap,
         active_background_sessions: session_pool.active_background_sessions,
         background_session_cap: session_pool.background_session_cap,
+        live_source_groups: source_coordinator.live_source_groups,
+        source_group_cap: source_coordinator.source_group_cap,
+        live_lane_actors: source_coordinator.live_lane_actors,
+        lane_actor_cap: source_coordinator.lane_actor_cap,
+        retiring_lane_actors: source_coordinator.retiring_lane_actors,
     };
     resources.active_sticky_sessions = session_pool.active_sticky_sessions;
     resources
@@ -2378,7 +2414,7 @@ impl PlaybackSoakProbe {
     ) -> Option<PlaybackSoakReport> {
         let started_at = self.started_at?;
         Some(PlaybackSoakReport {
-            schema_version: 3,
+            schema_version: 4,
             requested_duration_seconds: self.requested_duration.as_secs(),
             actual_duration_seconds: now.duration_since(started_at).as_secs_f64(),
             loop_count: self.loop_count,
@@ -2944,6 +2980,7 @@ struct App {
     monitor_decoders: [nle_decode::MonitorDecoder; MONITOR_LAYER_COUNT],
     monitor_frame_cache_pool: nle_decode::MonitorFrameCachePool,
     monitor_session_pool: nle_decode::MonitorSessionPool,
+    monitor_source_coordinator: nle_decode::MonitorSourceCoordinator,
     audio_engine: Option<nle_audio::AudioEngine>,
     audio_engine_error: Option<String>,
     startup_resources_tx: Option<mpsc::Sender<StartupResources>>,
@@ -2957,10 +2994,12 @@ struct App {
     monitor_textures: [Option<egui::TextureHandle>; MONITOR_LAYER_COUNT],
     monitor_last_proxy_frames: [Option<ScrubProxyKey>; MONITOR_LAYER_COUNT],
     monitor_last_requests: [Option<MonitorRequestKey>; MONITOR_LAYER_COUNT],
+    monitor_source_identities: [Option<MonitorSourceIdentity>; MONITOR_LAYER_COUNT],
     monitor_generations: [u64; MONITOR_LAYER_COUNT],
     monitor_latest_request_ids: [u64; MONITOR_LAYER_COUNT],
     monitor_next_request_id: u64,
     monitor_requests_in_flight: [bool; MONITOR_LAYER_COUNT],
+    monitor_request_deferred: [bool; MONITOR_LAYER_COUNT],
     monitor_request_started_at: [Option<(u64, Instant)>; MONITOR_LAYER_COUNT],
     adaptive_preview: AdaptivePreviewController,
     hub: ProjectHubState,
@@ -3161,12 +3200,16 @@ impl App {
             MONITOR_FOREGROUND_SESSION_CAP,
             MONITOR_BACKGROUND_SESSION_CAP,
         );
+        let monitor_source_coordinator = nle_decode::MonitorSourceCoordinator::new(
+            MONITOR_LAYER_COUNT,
+            monitor_session_pool.clone(),
+        );
         let monitor_decoders = std::array::from_fn(|_| {
             let notifier = Arc::clone(&monitor_notifier);
-            nle_decode::MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_session_pool(
+            nle_decode::MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
                 move || notifier(),
                 monitor_frame_cache_pool.clone(),
-                monitor_session_pool.clone(),
+                monitor_source_coordinator.clone(),
             )
         });
         Self {
@@ -3210,6 +3253,7 @@ impl App {
             monitor_decoders,
             monitor_frame_cache_pool,
             monitor_session_pool,
+            monitor_source_coordinator,
             audio_engine: None,
             audio_engine_error: None,
             startup_resources_tx: Some(startup_resources_tx),
@@ -3223,10 +3267,12 @@ impl App {
             monitor_textures: std::array::from_fn(|_| None),
             monitor_last_proxy_frames: [None; MONITOR_LAYER_COUNT],
             monitor_last_requests: [None; MONITOR_LAYER_COUNT],
+            monitor_source_identities: std::array::from_fn(|_| None),
             monitor_generations: [1; MONITOR_LAYER_COUNT],
             monitor_latest_request_ids: [0; MONITOR_LAYER_COUNT],
             monitor_next_request_id: 1,
             monitor_requests_in_flight: [false; MONITOR_LAYER_COUNT],
+            monitor_request_deferred: [false; MONITOR_LAYER_COUNT],
             monitor_request_started_at: [None; MONITOR_LAYER_COUNT],
             adaptive_preview: AdaptivePreviewController::default(),
             hub,
@@ -3490,6 +3536,7 @@ impl App {
                 aggregate_playback_soak_monitor_resources(
                     &self.monitor_frame_cache_pool,
                     self.monitor_session_pool.diagnostics(),
+                    self.monitor_source_coordinator.diagnostics(),
                 ),
                 audio_transport_healthy_now,
             ) {
@@ -4715,9 +4762,11 @@ impl App {
                     let _ = self.monitor_decoders[layer].reset_live_cache();
                     self.invalidate_monitor_request(layer);
                     self.monitor_last_requests[layer] = None;
+                    self.monitor_source_identities[layer] = None;
                     self.monitor_textures[layer] = None;
                     self.monitor_last_proxy_frames[layer] = None;
                     self.monitor_requests_in_flight[layer] = false;
+                    self.monitor_request_deferred[layer] = false;
                     self.monitor_request_started_at[layer] = None;
                 }
                 self.editor.reset_monitor();
@@ -4904,10 +4953,12 @@ impl App {
             self.monitor_textures[layer] = None;
             self.monitor_last_proxy_frames[layer] = None;
             self.monitor_last_requests[layer] = None;
+            self.monitor_source_identities[layer] = None;
             self.monitor_generations[layer] =
                 self.monitor_generations[layer].wrapping_add(1).max(1);
             self.monitor_latest_request_ids[layer] = 0;
             self.monitor_requests_in_flight[layer] = false;
+            self.monitor_request_deferred[layer] = false;
             self.monitor_request_started_at[layer] = None;
         }
         self.adaptive_preview = AdaptivePreviewController::default();
@@ -5018,36 +5069,61 @@ impl App {
             .flatten();
         for (layer, source) in preview.sources.into_iter().enumerate() {
             let Some(source) = source else {
-                if self.monitor_last_requests[layer].take().is_some()
+                let had_live_source = self.monitor_last_requests[layer].take().is_some()
+                    || self.monitor_source_identities[layer].is_some()
                     || self.monitor_requests_in_flight[layer]
-                    || self.editor.monitor_frame_for_layer(layer).is_some()
-                {
+                    || self.editor.monitor_frame_for_layer(layer).is_some();
+                if had_live_source {
                     let _ = self.monitor_decoders[layer].cancel_pending();
                     self.invalidate_monitor_request(layer);
                     self.monitor_textures[layer] = None;
                     self.monitor_last_proxy_frames[layer] = None;
                     self.monitor_requests_in_flight[layer] = false;
+                    self.monitor_request_deferred[layer] = false;
                     self.monitor_request_started_at[layer] = None;
                     self.editor.reset_monitor_layer(layer);
                     self.clear_native_viewer_layer(layer);
                 }
+                // A positional slot that is no longer visible must not retain an actor lease.
+                // This deliberately leaves the app-wide decoded-frame cache intact.
+                if had_live_source {
+                    let _ = self.monitor_decoders[layer].release_live_sessions();
+                }
+                self.monitor_source_identities[layer] = None;
                 continue;
             };
             let previous = self.monitor_last_requests[layer];
-            let media_changed =
-                previous.is_some_and(|previous| previous.media_id != source.media_id);
+            // Compare the retained source identity while borrowing the timeline path. A path is
+            // cloned only below, after the unchanged-key early return has decided to submit.
+            let source_changed = {
+                let target_path = self
+                    .editor
+                    .playback_targets()
+                    .nth(layer)
+                    .expect("resolved monitor layer remains stable during one sync")
+                    .path;
+                monitor_source_identity_changed(
+                    self.monitor_source_identities[layer].as_ref(),
+                    source.media_id,
+                    target_path,
+                    acceleration,
+                )
+            };
+            let media_changed = source_changed
+                || previous.is_some_and(|previous| previous.media_id != source.media_id);
             let output_changed = previous
                 .is_some_and(|previous| previous.width != width || previous.height != height);
             let scaling_changed = previous
                 .is_some_and(|previous| previous.high_quality_scaling != high_quality_scaling);
-            if media_changed || output_changed || scaling_changed {
+            if source_changed || media_changed || output_changed || scaling_changed {
                 let _ = self.monitor_decoders[layer].cancel_pending();
                 self.invalidate_monitor_request(layer);
                 self.monitor_requests_in_flight[layer] = false;
+                self.monitor_request_deferred[layer] = false;
                 self.monitor_request_started_at[layer] = None;
                 self.adaptive_preview.reset_layer_samples(layer);
                 self.monitor_last_proxy_frames[layer] = None;
-                if media_changed {
+                if source_changed || media_changed {
                     self.monitor_textures[layer] = None;
                     self.editor.reset_monitor_layer(layer);
                     self.clear_native_viewer_layer(layer);
@@ -5099,8 +5175,6 @@ impl App {
             }
             let request_id = self.monitor_next_request_id;
             self.monitor_next_request_id = self.monitor_next_request_id.wrapping_add(1).max(1);
-            // Clone the path only for a request that will actually be submitted. Pointer samples
-            // that quantize to the current frame remain allocation-free.
             let target_path = self
                 .editor
                 .playback_targets()
@@ -5113,7 +5187,7 @@ impl App {
                 cache_epoch: self.media_analysis_epoch,
                 request_id,
                 media_id: key.media_id,
-                path: target_path,
+                path: target_path.clone(),
                 source_tick: key.source_tick,
                 width: key.width,
                 height: key.height,
@@ -5127,14 +5201,39 @@ impl App {
                 acceleration,
             }) {
                 Ok(()) => {
-                    self.monitor_runtime_metrics.record_request();
-                    self.monitor_last_requests[layer] = Some(key);
-                    self.monitor_latest_request_ids[layer] = request_id;
-                    self.monitor_requests_in_flight[layer] = true;
-                    self.monitor_request_started_at[layer] = Some((request_id, Instant::now()));
+                    self.record_monitor_request_submission(
+                        layer,
+                        key,
+                        MonitorSourceIdentity {
+                            media_id: source.media_id,
+                            path: target_path,
+                            acceleration,
+                        },
+                        request_id,
+                        false,
+                    );
+                }
+                Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {
+                    // The coordinator retained the newest request. It will be retried from the
+                    // normal monitor pump after another positional source releases a group.
+                    // It remains logically in flight so a retry event still matches this exact
+                    // generation/request ID; it is not a decoder-unavailable error.
+                    self.record_monitor_request_submission(
+                        layer,
+                        key,
+                        MonitorSourceIdentity {
+                            media_id: source.media_id,
+                            path: target_path,
+                            acceleration,
+                        },
+                        request_id,
+                        true,
+                    );
                 }
                 Err(error) => {
                     self.monitor_runtime_metrics.record_error();
+                    self.monitor_request_deferred[layer] = false;
+                    self.monitor_requests_in_flight[layer] = false;
                     self.monitor_request_started_at[layer] = None;
                     self.editor.set_monitor_error(error.to_string());
                 }
@@ -5404,6 +5503,25 @@ impl App {
         self.monitor_request_started_at[layer] = None;
     }
 
+    /// Keeps a coordinator-deferred request current until its bounded retry produces the same
+    /// event. This is intentionally shared with the immediate-submit path.
+    fn record_monitor_request_submission(
+        &mut self,
+        layer: usize,
+        key: MonitorRequestKey,
+        source_identity: MonitorSourceIdentity,
+        request_id: u64,
+        deferred: bool,
+    ) {
+        self.monitor_runtime_metrics.record_request();
+        self.monitor_last_requests[layer] = Some(key);
+        self.monitor_source_identities[layer] = Some(source_identity);
+        self.monitor_latest_request_ids[layer] = request_id;
+        self.monitor_requests_in_flight[layer] = true;
+        self.monitor_request_deferred[layer] = deferred;
+        self.monitor_request_started_at[layer] = Some((request_id, Instant::now()));
+    }
+
     fn clear_native_viewer_layer(&mut self, layer: usize) {
         if let Some(renderer) = &mut self.hub_renderer {
             let _ = renderer.clear_viewer_layer(layer);
@@ -5547,6 +5665,9 @@ impl App {
                     frame.source_tick,
                 );
                 self.monitor_requests_in_flight[layer] = !latest_request_completed;
+                if latest_request_completed {
+                    self.monitor_request_deferred[layer] = false;
+                }
                 let turnaround = latest_request_completed
                     .then(|| {
                         self.monitor_request_started_at[layer]
@@ -5628,6 +5749,7 @@ impl App {
             {
                 self.monitor_runtime_metrics.record_error();
                 self.monitor_requests_in_flight[layer] = false;
+                self.monitor_request_deferred[layer] = false;
                 self.monitor_request_started_at[layer] = None;
                 self.adaptive_preview.mark_layer_unavailable(layer);
                 self.editor.set_monitor_error(error.message);
@@ -5648,6 +5770,21 @@ impl App {
     fn poll_monitor_decoder(&mut self) {
         let mut adaptive_quality_changed = false;
         for layer in 0..MONITOR_LAYER_COUNT {
+            if self.monitor_request_deferred[layer] {
+                // Capacity deferral is retried only for a retained latest request, avoiding
+                // idle endpoint locks on the ordinary monitor pump path.
+                match self.monitor_decoders[layer].retry_deferred_requests() {
+                    Ok(()) => self.monitor_request_deferred[layer] = false,
+                    Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {}
+                    Err(error) => {
+                        self.monitor_runtime_metrics.record_error();
+                        self.monitor_requests_in_flight[layer] = false;
+                        self.monitor_request_deferred[layer] = false;
+                        self.monitor_request_started_at[layer] = None;
+                        self.editor.set_monitor_error(error.to_string());
+                    }
+                }
+            }
             loop {
                 let event = match self.monitor_decoders[layer].try_recv() {
                     Ok(Some(event)) => event,
@@ -7010,11 +7147,16 @@ mod tests {
                     foreground_session_cap: 2,
                     active_background_sessions: 0,
                     background_session_cap: 2,
+                    live_source_groups: 1,
+                    source_group_cap: 4,
+                    live_lane_actors: 1,
+                    lane_actor_cap: 8,
+                    retiring_lane_actors: 0,
                 },
                 true,
             )
             .expect("transport start makes a soak report ready");
-        assert_eq!(report.schema_version, 3);
+        assert_eq!(report.schema_version, 4);
         assert_eq!(report.actual_duration_seconds, 10.0);
         assert_eq!(report.loop_count, 2);
         assert_eq!(report.runtime_diagnostics_delta.monitor_requests, 6);
@@ -7074,6 +7216,11 @@ mod tests {
                     foreground_session_cap: 2,
                     active_background_sessions: 0,
                     background_session_cap: 2,
+                    live_source_groups: 0,
+                    source_group_cap: 4,
+                    live_lane_actors: 0,
+                    lane_actor_cap: 8,
+                    retiring_lane_actors: 0,
                 },
                 false,
             )
@@ -7101,6 +7248,13 @@ mod tests {
                 active_background_sessions: 1,
                 background_session_cap: 4,
             },
+            nle_decode::MonitorSourceCoordinatorDiagnostics {
+                live_source_groups: 2,
+                source_group_cap: 4,
+                live_lane_actors: 3,
+                lane_actor_cap: 8,
+                retiring_lane_actors: 1,
+            },
         );
 
         assert_eq!(
@@ -7116,6 +7270,11 @@ mod tests {
                 foreground_session_cap: 4,
                 active_background_sessions: 1,
                 background_session_cap: 4,
+                live_source_groups: 2,
+                source_group_cap: 4,
+                live_lane_actors: 3,
+                lane_actor_cap: 8,
+                retiring_lane_actors: 1,
             }
         );
     }
@@ -7534,6 +7693,71 @@ mod tests {
                 nle_audio::AudioProcessorSpec::StereoWidth { width: 1.25 },
             ]
         );
+    }
+
+    #[test]
+    fn monitor_deferred_request_remains_current_until_retry_converges() {
+        let mut app = App::new_with_catalog(false, None);
+        let key = MonitorRequestKey {
+            project_epoch: 7,
+            media_id: 42,
+            source_tick: 1_500_000,
+            width: 1920,
+            height: 1080,
+            is_scrubbing: false,
+            prewarm_scrub_workers: false,
+            high_quality_scaling: true,
+            source_frame_rate_millihz: Some(30_000),
+        };
+        let identity = MonitorSourceIdentity {
+            media_id: 42,
+            path: PathBuf::from("deferred-source.mp4"),
+            acceleration: nle_decode::AccelerationPreference::PreferHardware,
+        };
+        app.record_monitor_request_submission(1, key, identity.clone(), 99, true);
+
+        assert_eq!(app.monitor_last_requests[1], Some(key));
+        assert_eq!(app.monitor_source_identities[1], Some(identity));
+        assert_eq!(app.monitor_latest_request_ids[1], 99);
+        assert!(app.monitor_requests_in_flight[1]);
+        assert!(app.monitor_request_deferred[1]);
+        assert_eq!(
+            app.monitor_request_started_at[1].map(|(id, _)| id),
+            Some(99)
+        );
+
+        // Retry acceptance preserves the retained request ID; frame/error handling then owns
+        // normal convergence and clears the in-flight state rather than minting a stale ID.
+        app.monitor_request_deferred[1] = false;
+        assert_eq!(app.monitor_latest_request_ids[1], 99);
+        assert!(app.monitor_requests_in_flight[1]);
+    }
+
+    #[test]
+    fn monitor_source_identity_changes_for_path_or_acceleration_only() {
+        let identity = MonitorSourceIdentity {
+            media_id: 7,
+            path: PathBuf::from("same-media.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Auto,
+        };
+        assert!(!monitor_source_identity_changed(
+            Some(&identity),
+            7,
+            Path::new("same-media.mp4"),
+            nle_decode::AccelerationPreference::Auto,
+        ));
+        assert!(monitor_source_identity_changed(
+            Some(&identity),
+            7,
+            Path::new("replacement-path.mp4"),
+            nle_decode::AccelerationPreference::Auto,
+        ));
+        assert!(monitor_source_identity_changed(
+            Some(&identity),
+            7,
+            Path::new("same-media.mp4"),
+            nle_decode::AccelerationPreference::Software,
+        ));
     }
 
     #[test]
@@ -8767,6 +8991,167 @@ mod tests {
     }
 
     #[test]
+    fn shared_source_layers_reuse_one_session_and_release_after_last_consumer() {
+        let fixture = test_catalog_path("shared-source-coordinator").with_extension("mp4");
+        let Some(parent) = fixture.parent() else {
+            return;
+        };
+        fs::create_dir_all(parent).expect("create shared-source fixture directory");
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x36:rate=24",
+                "-t",
+                "1",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "5",
+            ])
+            .arg(&fixture)
+            .output();
+        let Ok(generated) = generated else {
+            // Minimal developer environments may not include an FFmpeg CLI; decode behavior is
+            // still covered by the pinned library tests, so this integration test skips cleanly.
+            let _ = fs::remove_dir_all(parent);
+            return;
+        };
+        assert!(
+            generated.status.success(),
+            "create shared-source fixture: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let mut app = App::new_with_catalog(false, None);
+        app.editor.add_media_paths([fixture.clone()]);
+        let tracks = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+            .map(|track| track.id)
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(tracks.len(), 2);
+        let lower = app
+            .editor
+            .timeline
+            .insert_clip(
+                tracks[0],
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(900_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert lower shared-source clip");
+        let upper = app
+            .editor
+            .timeline
+            .insert_clip(
+                tracks[1],
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(900_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert upper shared-source clip");
+        app.editor.set_playhead(nle_timeline::Tick(300_000));
+        let mut preview = preview_request(&app.editor);
+        preview.output_size = [64, 36];
+        // Scrubbing does not prewarm speculative lanes, making the physical-session assertion
+        // exact: two app layers, one foreground source actor/session.
+        preview.is_scrubbing = true;
+        app.submit_monitor_decode_request(preview);
+        let request_ids = [
+            app.monitor_latest_request_ids[0],
+            app.monitor_latest_request_ids[1],
+        ];
+        assert!(request_ids.iter().all(|id| *id != 0));
+        assert_ne!(request_ids[0], request_ids[1]);
+
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < ready_deadline
+            && (0..2).any(|layer| {
+                app.editor.monitor_frame_for_layer(layer).is_none()
+                    || app.monitor_requests_in_flight[layer]
+            })
+        {
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+        for layer in 0..2 {
+            let frame = app
+                .editor
+                .monitor_frame_for_layer(layer)
+                .expect("shared frame");
+            assert_eq!(frame.media_id, Some(1));
+            assert_eq!((frame.width, frame.height), (64, 36));
+            assert!(!app.monitor_requests_in_flight[layer]);
+        }
+        let coordinator = app.monitor_source_coordinator.diagnostics();
+        let sessions = app.monitor_session_pool.diagnostics();
+        assert_eq!(coordinator.live_source_groups, 1);
+        assert_eq!(coordinator.live_lane_actors, 1);
+        assert_eq!(sessions.active_foreground_sessions, 1);
+        assert_eq!(sessions.active_sticky_sessions, 1);
+        let cached_before_release = app.monitor_frame_cache_pool.diagnostics().current_bytes;
+        assert!(cached_before_release > 0);
+
+        assert!(app.editor.set_timeline_clip_enabled(upper, false));
+        let mut lower_only = preview_request(&app.editor);
+        lower_only.output_size = [64, 36];
+        lower_only.is_scrubbing = true;
+        app.submit_monitor_decode_request(lower_only);
+        assert!(app.monitor_last_requests[0].is_some());
+        assert!(app.monitor_last_requests[1].is_none());
+        assert_eq!(
+            app.monitor_session_pool
+                .diagnostics()
+                .active_foreground_sessions,
+            1
+        );
+
+        assert!(app.editor.set_timeline_clip_enabled(lower, false));
+        let mut absent = preview_request(&app.editor);
+        absent.output_size = [64, 36];
+        absent.is_scrubbing = true;
+        app.submit_monitor_decode_request(absent);
+        let release_deadline = Instant::now() + Duration::from_secs(2);
+        while app
+            .monitor_session_pool
+            .diagnostics()
+            .active_sticky_sessions
+            != 0
+        {
+            assert!(
+                Instant::now() < release_deadline,
+                "last shared-source consumer retained a sticky session"
+            );
+            app.poll_monitor_decoder();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            app.monitor_source_coordinator
+                .diagnostics()
+                .live_source_groups,
+            0
+        );
+        assert_eq!(
+            app.monitor_frame_cache_pool.diagnostics().current_bytes,
+            cached_before_release,
+            "releasing the final source lease must not clear the shared frame cache"
+        );
+
+        drop(app);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
     fn preview_request_captures_ordered_sources_and_resolved_output_quality() {
         let mut editor = EditorState::new(Language::English, "Preview request");
         editor.add_media_paths([
@@ -9637,22 +10022,30 @@ mod tests {
         let pool_diagnostics = loop {
             let diagnostics = app.monitor_session_pool.diagnostics();
             if diagnostics.active_foreground_sessions == 4
-                && diagnostics.active_background_sessions == 3
-                && diagnostics.peak_sticky_sessions == 7
+                // The app-wide source coordinator deduplicates all three speculative lanes for
+                // the top paused source into one background actor/session.
+                && diagnostics.active_background_sessions == 1
+                && diagnostics.peak_sticky_sessions == 5
                 && diagnostics.session_cap == 8
             {
                 break diagnostics;
             }
             assert!(
                 Instant::now() < pool_deadline,
-                "four-source paused prewarm did not establish the expected 4 foreground + 3 background session pool: {diagnostics:?}"
+                "four-source paused prewarm did not establish the expected 4 foreground + 1 deduplicated background session pool: {diagnostics:?}"
             );
             app.poll_monitor_decoder();
             thread::sleep(Duration::from_millis(5));
         };
-        assert_eq!(pool_diagnostics.active_sticky_sessions, 7);
+        assert_eq!(pool_diagnostics.active_sticky_sessions, 5);
         assert_eq!(pool_diagnostics.foreground_session_cap, 4);
         assert_eq!(pool_diagnostics.background_session_cap, 4);
+        let source_diagnostics = app.monitor_source_coordinator.diagnostics();
+        assert_eq!(source_diagnostics.live_source_groups, 4);
+        assert_eq!(source_diagnostics.source_group_cap, 4);
+        assert_eq!(source_diagnostics.live_lane_actors, 5);
+        assert_eq!(source_diagnostics.lane_actor_cap, 8);
+        assert_eq!(source_diagnostics.retiring_lane_actors, 0);
         assert!(
             !app.observed_decoder_backends.is_empty(),
             "final monitor frames did not report a decoder backend"
@@ -9699,6 +10092,11 @@ mod tests {
             foreground_session_cap: pool_diagnostics.foreground_session_cap,
             active_background_sessions: pool_diagnostics.active_background_sessions,
             background_session_cap: pool_diagnostics.background_session_cap,
+            live_source_groups: source_diagnostics.live_source_groups,
+            source_group_cap: source_diagnostics.source_group_cap,
+            live_lane_actors: source_diagnostics.live_lane_actors,
+            lane_actor_cap: source_diagnostics.lane_actor_cap,
+            retiring_lane_actors: source_diagnostics.retiring_lane_actors,
             post_drop_active_sessions,
         };
         phase1_multisource_write_report(&report_path, &report)
@@ -9806,6 +10204,7 @@ mod tests {
         let mut final_resources = aggregate_playback_soak_monitor_resources(
             &app.monitor_frame_cache_pool,
             app.monitor_session_pool.diagnostics(),
+            app.monitor_source_coordinator.diagnostics(),
         );
         let mut cycles = 0_u64;
 
@@ -9872,6 +10271,7 @@ mod tests {
             let resources = aggregate_playback_soak_monitor_resources(
                 &app.monitor_frame_cache_pool,
                 app.monitor_session_pool.diagnostics(),
+                app.monitor_source_coordinator.diagnostics(),
             );
             assert!(
                 resources.active_sticky_sessions
@@ -9883,7 +10283,10 @@ mod tests {
                     && resources.active_sticky_sessions <= resources.session_cap
                     && resources.peak_sticky_sessions <= resources.session_cap
                     && resources.active_foreground_sessions <= resources.foreground_session_cap
-                    && resources.active_background_sessions <= resources.background_session_cap,
+                    && resources.active_background_sessions <= resources.background_session_cap
+                    && resources.live_source_groups <= resources.source_group_cap
+                    && resources.live_lane_actors + resources.retiring_lane_actors
+                        <= resources.lane_actor_cap,
                 "sustained cycle {cycles} exceeded the shared session caps: {resources:?}"
             );
             assert!(
@@ -9950,7 +10353,10 @@ mod tests {
             && final_resources.active_sticky_sessions <= final_resources.session_cap
             && final_resources.peak_sticky_sessions <= final_resources.session_cap
             && final_resources.active_foreground_sessions <= final_resources.foreground_session_cap
-            && final_resources.active_background_sessions <= final_resources.background_session_cap;
+            && final_resources.active_background_sessions <= final_resources.background_session_cap
+            && final_resources.live_source_groups <= final_resources.source_group_cap
+            && final_resources.live_lane_actors + final_resources.retiring_lane_actors
+                <= final_resources.lane_actor_cap;
         let passed = actual_duration_seconds >= requested_duration_seconds as f64
             && submission_distribution.p95 <= INPUT_TO_SUBMIT_P95_US_LIMIT
             && max_decoded_tick_delta_us <= 33_334
@@ -10353,6 +10759,11 @@ mod tests {
         foreground_session_cap: usize,
         active_background_sessions: usize,
         background_session_cap: usize,
+        live_source_groups: usize,
+        source_group_cap: usize,
+        live_lane_actors: usize,
+        lane_actor_cap: usize,
+        retiring_lane_actors: usize,
         post_drop_active_sessions: usize,
     }
 

@@ -120,13 +120,19 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       size, preview quality, and ordered visible layer/audio-source descriptions. The app now
       captures ordered audible-source metadata in a fixed 64-entry request snapshot, with explicit
       overflow tracking and no cap on actual audio playback.
-- [ ] Maintain one sticky decoder session per active source within a bounded session pool. A
+- [x] Maintain one sticky decoder session per active source/lane within a bounded session pool. A
       shared hard pool now limits all visible monitor decoders to four foreground and four
       speculative-background permits, with exact coherent playback-soak diagnostics and RAII
       release on every exit path. All monitor decoders now also share one app-wide hard-capped
       decoded-frame cache, so identical source/tick/output requests reuse the same pixels and the
-      byte budget is measured exactly once. Deduplicating sticky/speculative contexts by active
-      source remains.
+      byte budget is measured exactly once. A bounded source coordinator now keys physical actors
+      by media/path/acceleration, shares thread-confined foreground/background decoder state across
+      logical monitor clients, retains only each client's latest request, defers rather than lies
+      at source capacity, and asynchronously retires actors. Real same-source app coverage proves
+      independent logical results with one physical session and release after the last consumer.
+      The post-refactor authoritative ten-minute four-source gate held four source groups, five
+      live actors/sessions under the eight-actor/session cap, zero retiring actors at the final
+      sample, and zero sessions after app drop.
 - [ ] Prioritize visible/top layers and audible lanes; cancel sources no longer contributing.
 - [x] Add per-source decoded-frame slots so one slow source cannot block other sources.
 - [x] Add adaptive full/half/quarter/eighth preview resolution based on measured frame budget.
@@ -142,8 +148,9 @@ Exit gate:
 - [ ] Four independent 1080p sources can be requested concurrently without timeline latency
       regression. A preliminary opt-in local gate now creates four dynamic independent 1080p30
       MPEG-4 sources, submits one explicit Full-output request in under 20 ms, requires all four
-      source frames within five seconds, and proves the exact shared 4 foreground + 3 speculative
-      background / 8-cap session state with full post-drop release. It is not a timeline-latency
+      source frames within five seconds, and proves the exact shared 4 foreground + 1 source-owned
+      speculative background / 5 peak / 8-cap session state, four source groups, five live lane
+      actors, and full post-drop release. It is not a timeline-latency
       regression baseline, p95, sustained, or cross-hardware proof. A second opt-in local gate
       now compares 20 isolated one-source and four-source Full-1080p trials, records nearest-rank
       p50/p95/max scheduler and matching-frame timings, and enforces only a 1 ms headless
@@ -160,7 +167,14 @@ Exit gate:
       rejected stale events within a 60-event bound, zero errors, 207,360,000 current / 215,654,400
       exact peak bytes under the 1 GiB cache cap, 7 peak sessions under the 8-session cap, zero
       post-drop sessions, and 85,987,328 bytes of working-set growth under the 1.5 GiB diagnostic
-      bound. The isolated post-refactor comparison also held four-source scheduler p95 to 71 us.
+      bound. That historical run predates source-owned actor/session deduplication. The isolated
+      shared-cache comparison held four-source scheduler p95 to 71 us; the post-source-actor rerun
+      passed at 144 us with a 78 ms coarse frame-ready p95. The post-source-actor
+      authoritative run then passed for 600.020 seconds with 16,494 cycles / 65,976 requests,
+      44 us scheduler p95 (416 us max), 45 ms frame-ready p95 (64 ms max), seven bounded stale
+      events, zero errors, five peak sessions/actors under the cap of eight, four live source
+      groups, zero final retiring actors, zero post-drop sessions, and 40,943,616 bytes of
+      working-set growth.
       The exit remains
       open for realtime UI-present and cross-hardware proof; see `docs/phase1-sustained-soak.md`.
 - [ ] A deliberately slow source cannot delay a ready source or the playback clock.

@@ -153,16 +153,20 @@ try {
         'schema_version', 'source_count', 'submission_us', 'all_frames_ms',
         'active_sticky_sessions', 'peak_sticky_sessions', 'session_cap',
         'active_foreground_sessions', 'foreground_session_cap',
-        'active_background_sessions', 'background_session_cap', 'post_drop_active_sessions'
+        'active_background_sessions', 'background_session_cap',
+        'live_source_groups', 'source_group_cap', 'live_lane_actors', 'lane_actor_cap', 'retiring_lane_actors',
+        'post_drop_active_sessions'
     )) {
         Assert-JsonUnsignedIntegerProperty $report $property 'Phase 1 multisource report'
     }
     Assert-JsonIntegerProperty $report 'requested_source_tick' 'Phase 1 multisource report'
     if ($report.schema_version -ne 1 -or $report.status -ne 'passed' -or $report.source_count -ne 4 -or
         $report.submission_us -ge 20000 -or $report.all_frames_ms -gt 5000 -or
-        $report.active_sticky_sessions -ne 7 -or $report.peak_sticky_sessions -ne 7 -or $report.session_cap -ne 8 -or
+        $report.active_sticky_sessions -ne 5 -or $report.peak_sticky_sessions -ne 5 -or $report.session_cap -ne 8 -or
         $report.active_foreground_sessions -ne 4 -or $report.foreground_session_cap -ne 4 -or
-        $report.active_background_sessions -ne 3 -or $report.background_session_cap -ne 4 -or
+        $report.active_background_sessions -ne 1 -or $report.background_session_cap -ne 4 -or
+        $report.live_source_groups -ne 4 -or $report.source_group_cap -ne 4 -or
+        $report.live_lane_actors -ne 5 -or $report.lane_actor_cap -ne 8 -or $report.retiring_lane_actors -ne 0 -or
         $report.post_drop_active_sessions -ne 0) {
         throw "Phase 1 multisource report did not prove the required bounded concurrent decode state: $($report | ConvertTo-Json -Compress)"
     }

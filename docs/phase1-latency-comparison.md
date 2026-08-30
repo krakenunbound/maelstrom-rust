@@ -43,3 +43,8 @@ After the app-wide decoded-frame cache consolidation, the gate passed again on
 2026-08-29 with a four-source input-to-submit p95 of 71 us and coarse
 frame-ready p95 of 93 ms. The ignored report is
 `artifacts/phase1-latency/phase1-latency-shared-cache.json`.
+
+After source-owned actor/session deduplication, the same gate passed on
+2026-08-29 with a four-source input-to-submit p95 of 144 us and coarse
+frame-ready p95 of 78 ms. The current ignored report remains
+`artifacts/phase1-latency/phase1-latency-comparison.json`.
