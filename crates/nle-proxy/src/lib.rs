@@ -1,5 +1,11 @@
 //! Optional derived video proxies.  This crate never changes source media or exports.
 
+mod validation;
+pub use validation::{
+    ProxyValidationRequest, ProxyValidationResult, ProxyValidationSubmitError,
+    ProxyValidationWorker, VALIDATION_CAPACITY,
+};
+
 use std::{
     fs,
     io::{BufRead, BufReader, Read},

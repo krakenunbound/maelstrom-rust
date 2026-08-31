@@ -3400,6 +3400,12 @@ struct App {
     upscale_job: Option<nle_upscale::UpscaleJob>,
     proxy_job: Option<nle_proxy::ProxyJob>,
     proxy_job_media_id: Option<u32>,
+    proxy_job_path: Option<PathBuf>,
+    proxy_job_cancelled: bool,
+    proxy_validator: Option<nle_proxy::ProxyValidationWorker>,
+    proxy_validation_pending: HashMap<u32, PendingProxyValidation>,
+    proxy_validation_next_token: u64,
+    proxy_reconcile_needed: bool,
     proxy_delete_job: Option<nle_proxy::ProxyDeleteJob>,
     proxy_delete_media_id: Option<u32>,
     proxy_records: HashMap<u32, ProxyRecord>,
@@ -3436,6 +3442,12 @@ struct App {
 struct ProxyRecord {
     artifact: nle_proxy::ProxyArtifact,
     enabled: bool,
+    recheck_requested: bool,
+}
+
+struct PendingProxyValidation {
+    request: nle_proxy::ProxyValidationRequest,
+    activate: bool,
 }
 
 fn resolved_monitor_media_path<'a>(
@@ -3771,6 +3783,12 @@ impl App {
             upscale_job: None,
             proxy_job: None,
             proxy_job_media_id: None,
+            proxy_job_path: None,
+            proxy_job_cancelled: false,
+            proxy_validator: None,
+            proxy_validation_pending: HashMap::new(),
+            proxy_validation_next_token: 0,
+            proxy_reconcile_needed: false,
             proxy_delete_job: None,
             proxy_delete_media_id: None,
             proxy_records: HashMap::new(),
@@ -5154,6 +5172,9 @@ impl App {
             return;
         }
         self.proxy_discovery_suppressed.insert(media_id);
+        if self.proxy_delete_media_id == Some(media_id) {
+            return;
+        }
         if let Some(active_media_id) = self.proxy_job_media_id {
             if active_media_id != media_id {
                 self.editor.set_proxy_media_status(
@@ -5169,8 +5190,15 @@ impl App {
             }
             return;
         }
+        self.proxy_validation_pending.remove(&media_id);
+        if let Some(record) = self.proxy_records.get_mut(&media_id)
+            && record.enabled
+        {
+            record.enabled = false;
+            self.proxy_routing_changed();
+        }
         let request = nle_proxy::ProxyRequest {
-            input: requested_path,
+            input: requested_path.clone(),
             cache_root: self.proxy_cache_root.clone(),
             ffmpeg: bundled_media_tool("ffmpeg"),
             replace_existing: true,
@@ -5180,6 +5208,8 @@ impl App {
             Ok(job) => {
                 self.proxy_job = Some(job);
                 self.proxy_job_media_id = Some(media_id);
+                self.proxy_job_path = Some(requested_path);
+                self.proxy_job_cancelled = false;
                 self.editor.set_proxy_media_status(
                     media_id,
                     ProxyMediaStatus::Generating { progress: 0.0 },
@@ -5205,180 +5235,330 @@ impl App {
     }
 
     fn poll_proxy_job(&mut self) {
+        let previous_epoch = self.monitor_cache_epoch;
         let events = self
             .proxy_job
             .as_ref()
-            .map(|job| {
-                std::iter::from_fn(|| job.try_recv().ok()).collect::<Vec<nle_proxy::ProxyEvent>>()
-            })
+            .map(|job| std::iter::from_fn(|| job.try_recv().ok()).collect::<Vec<_>>())
             .unwrap_or_default();
-        if events.is_empty() {
-            return;
-        }
         let Some(media_id) = self.proxy_job_media_id else {
-            self.proxy_job.take();
             return;
         };
         let mut terminal = false;
         for event in events {
-            match event {
-                nle_proxy::ProxyEvent::Progress(progress) => self
-                    .editor
-                    .set_proxy_media_status(media_id, ProxyMediaStatus::Generating { progress }),
-                nle_proxy::ProxyEvent::Completed(artifact) => {
-                    let source_is_current = self
-                        .editor
-                        .media
-                        .iter()
-                        .find(|media| media.id == media_id)
-                        .is_some_and(|media| {
-                            media.kind == MediaKind::Video
-                                && artifact.source.matches(&media.path)
-                                && artifact.path.is_file()
-                        });
-                    if source_is_current {
-                        self.proxy_records.insert(
-                            media_id,
-                            ProxyRecord {
-                                artifact,
-                                enabled: true,
-                            },
-                        );
-                        self.editor.set_proxy_media_status(
-                            media_id,
-                            ProxyMediaStatus::Ready { enabled: true },
-                        );
-                        self.hub.status = Some(proxy_text(
-                            self.editor.language,
-                            "Proxy media ready; preview is using it",
-                            "プロキシメディアの準備完了。プレビューで使用中です",
-                        ));
-                        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
-                    } else {
-                        self.proxy_records.remove(&media_id);
-                        self.editor.set_proxy_media_status(
-                            media_id,
-                            ProxyMediaStatus::Failed {
-                                message: proxy_text(
-                                    self.editor.language,
-                                    "Proxy became stale; preview is using the original",
-                                    "プロキシが古いため、プレビューはオリジナルを使用します",
-                                ),
-                            },
-                        );
-                    }
-                    self.reconcile_proxy_records();
-                    terminal = true;
-                }
-                nle_proxy::ProxyEvent::Cancelled => {
-                    self.editor
-                        .set_proxy_media_status(media_id, ProxyMediaStatus::None);
-                    self.hub.status = Some(proxy_text(
-                        self.editor.language,
-                        "Proxy generation cancelled",
-                        "プロキシ生成をキャンセルしました",
-                    ));
-                    terminal = true;
-                }
-                nle_proxy::ProxyEvent::Failed(message) => {
-                    if let Some(record) = self.proxy_records.get_mut(&media_id) {
-                        record.enabled = false;
-                    }
-                    self.editor.set_proxy_media_status(
-                        media_id,
-                        ProxyMediaStatus::Failed {
-                            message: proxy_error_text(
-                                self.editor.language,
-                                "Proxy generation failed",
-                                "プロキシ生成に失敗しました",
-                                &message,
-                            ),
-                        },
-                    );
-                    self.hub.status = Some(match self.editor.language {
-                        Language::English => format!("Proxy generation failed: {message}"),
-                        Language::Japanese => format!("プロキシ生成に失敗しました: {message}"),
-                    });
-                    terminal = true;
-                }
-            }
+            terminal |= self.apply_proxy_event(media_id, event);
         }
         if terminal {
             self.proxy_job.take();
             self.proxy_job_media_id = None;
-            if self.screen == Screen::Editor {
-                self.sync_monitor_decode();
-            }
+            self.proxy_job_path = None;
+            self.proxy_job_cancelled = false;
+        }
+        if self.monitor_cache_epoch != previous_epoch && self.screen == Screen::Editor {
+            self.sync_monitor_decode();
         }
     }
 
-    fn set_proxy_media_enabled(&mut self, media_id: u32, enabled: bool) {
-        self.proxy_discovery_suppressed.insert(media_id);
-        let Some(record) = self.proxy_records.get_mut(&media_id) else {
-            self.editor.set_proxy_media_status(
-                media_id,
-                ProxyMediaStatus::Failed {
-                    message: proxy_text(
-                        self.editor.language,
-                        "Proxy is unavailable; preview is using the original",
-                        "プロキシを使用できないため、プレビューはオリジナルを使用します",
-                    ),
-                },
-            );
-            return;
-        };
-        let original = self
-            .editor
-            .media
-            .iter()
-            .find(|media| media.id == media_id)
-            .map(|media| media.path.clone());
-        let usable = original.as_deref().is_some_and(|path| {
-            record.artifact.path.is_file() && record.artifact.source.matches(path)
+    fn apply_proxy_event(&mut self, media_id: u32, event: nle_proxy::ProxyEvent) -> bool {
+        let terminal = !matches!(event, nle_proxy::ProxyEvent::Progress(_));
+        let source_is_current = self.editor.media.iter().any(|media| {
+            media.id == media_id
+                && media.kind == MediaKind::Video
+                && Some(&media.path) == self.proxy_job_path.as_ref()
         });
-        if enabled && !usable {
-            self.proxy_records.remove(&media_id);
-            self.editor.set_proxy_media_status(
-                media_id,
-                ProxyMediaStatus::Failed {
-                    message: proxy_text(
-                        self.editor.language,
-                        "Proxy is missing or stale; preview is using the original",
-                        "プロキシが見つからないか古いため、プレビューはオリジナルを使用します",
-                    ),
-                },
-            );
-        } else {
-            record.enabled = enabled;
-            self.editor
-                .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled });
+        // Cancellation wins even if completion was already queued by the worker.
+        if self.proxy_job_cancelled || !source_is_current {
+            if terminal && self.proxy_delete_media_id != Some(media_id) {
+                if !source_is_current {
+                    self.fail_proxy_validation(media_id);
+                } else {
+                    self.editor.set_proxy_media_status(
+                        media_id,
+                        if self.proxy_records.contains_key(&media_id) {
+                            ProxyMediaStatus::Ready { enabled: false }
+                        } else {
+                            ProxyMediaStatus::None
+                        },
+                    );
+                }
+            }
+            return terminal;
         }
+        match event {
+            nle_proxy::ProxyEvent::Progress(progress) => self
+                .editor
+                .set_proxy_media_status(media_id, ProxyMediaStatus::Generating { progress }),
+            nle_proxy::ProxyEvent::Completed(artifact) => {
+                self.proxy_records.insert(
+                    media_id,
+                    ProxyRecord {
+                        artifact,
+                        enabled: false,
+                        recheck_requested: false,
+                    },
+                );
+                self.queue_proxy_validation(media_id, true);
+                self.reconcile_proxy_records();
+            }
+            nle_proxy::ProxyEvent::Cancelled => {
+                self.editor
+                    .set_proxy_media_status(media_id, ProxyMediaStatus::None);
+                self.hub.status = Some(proxy_text(
+                    self.editor.language,
+                    "Proxy generation cancelled",
+                    "プロキシ生成をキャンセルしました",
+                ));
+            }
+            nle_proxy::ProxyEvent::Failed(message) => {
+                self.editor.set_proxy_media_status(
+                    media_id,
+                    ProxyMediaStatus::Failed {
+                        message: proxy_error_text(
+                            self.editor.language,
+                            "Proxy generation failed",
+                            "プロキシ生成に失敗しました",
+                            &message,
+                        ),
+                    },
+                );
+                self.hub.status = Some(proxy_error_text(
+                    self.editor.language,
+                    "Proxy generation failed",
+                    "プロキシ生成に失敗しました",
+                    &message,
+                ));
+            }
+        }
+        terminal
+    }
+
+    fn proxy_routing_changed(&mut self) {
         self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
         if self.screen == Screen::Editor {
             self.sync_monitor_decode();
         }
     }
 
-    fn delete_proxy_media(&mut self, media_id: u32) {
-        self.proxy_discovery_suppressed.insert(media_id);
-        if self.proxy_job_media_id == Some(media_id)
-            && let Some(job) = &self.proxy_job
-        {
-            job.cancel();
+    fn fail_proxy_validation(&mut self, media_id: u32) {
+        self.proxy_validation_pending.remove(&media_id);
+        let was_enabled = self
+            .proxy_records
+            .remove(&media_id)
+            .is_some_and(|record| record.enabled);
+        self.editor.set_proxy_media_status(
+            media_id,
+            ProxyMediaStatus::Failed {
+                message: proxy_text(
+                    self.editor.language,
+                    "Proxy is missing or stale; preview is using the original",
+                    "プロキシが見つからないか古いため、プレビューはオリジナルを使用します",
+                ),
+            },
+        );
+        if was_enabled {
+            // The owning event poll batches monitor refresh after applying the whole result set.
+            self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
         }
-        if self.proxy_delete_job.is_some() {
-            self.editor.set_proxy_media_status(
-                media_id,
-                ProxyMediaStatus::Failed {
-                    message: proxy_text(
-                        self.editor.language,
-                        "Another proxy is already being removed",
-                        "別のプロキシを削除中です",
-                    ),
-                },
-            );
+    }
+
+    /// Memory-only submission. A full queue never makes a user action wait on disk.
+    /// Passive cache reconciliation retains the current route; decoder failure still falls back.
+    fn queue_proxy_validation(&mut self, media_id: u32, activate: bool) {
+        if self.proxy_validation_pending.contains_key(&media_id) {
             return;
         }
+        let Some(record) = self.proxy_records.get(&media_id) else {
+            return;
+        };
+        let Some(original) = self
+            .editor
+            .media
+            .iter()
+            .find(|media| media.id == media_id && media.kind == MediaKind::Video)
+            .map(|media| media.path.clone())
+        else {
+            self.fail_proxy_validation(media_id);
+            return;
+        };
+        let artifact = record.artifact.clone();
+        let mut busy = false;
+        let submitted = (|| {
+            if self.proxy_validation_pending.len() >= nle_proxy::VALIDATION_CAPACITY {
+                busy = true;
+                return false;
+            }
+            if self.proxy_validator.is_none() {
+                let notify = Arc::clone(&self.project_dialog_notify);
+                let Ok(worker) = nle_proxy::ProxyValidationWorker::start(move || notify()) else {
+                    return false;
+                };
+                self.proxy_validator = Some(worker);
+            }
+            self.proxy_validation_next_token =
+                self.proxy_validation_next_token.wrapping_add(1).max(1);
+            let request = nle_proxy::ProxyValidationRequest {
+                token: self.proxy_validation_next_token,
+                original,
+                artifact,
+            };
+            if let Err(error) = self
+                .proxy_validator
+                .as_ref()
+                .unwrap()
+                .try_submit(request.clone())
+            {
+                busy = error == nle_proxy::ProxyValidationSubmitError::Busy;
+                return false;
+            }
+            self.proxy_validation_pending
+                .insert(media_id, PendingProxyValidation { request, activate });
+            true
+        })();
+        if (submitted || !busy)
+            && let Some(record) = self.proxy_records.get_mut(&media_id)
+        {
+            record.recheck_requested = false;
+        }
+        if activate {
+            self.editor.set_proxy_media_status(
+                media_id,
+                if submitted {
+                    ProxyMediaStatus::Checking
+                } else {
+                    ProxyMediaStatus::Ready { enabled: false }
+                },
+            );
+            if !submitted {
+                self.hub.status = Some(proxy_text(
+                    self.editor.language,
+                    "Proxy check unavailable or busy; using original media. Try again.",
+                    "プロキシ確認が利用できないか混雑中です。オリジナルを使用します。再試行してください。",
+                ));
+            }
+        }
+    }
+
+    fn poll_proxy_validation(&mut self) {
+        let previous_epoch = self.monitor_cache_epoch;
+        for _ in 0..nle_proxy::VALIDATION_CAPACITY {
+            let Some(worker) = self.proxy_validator.as_ref() else {
+                break;
+            };
+            match worker.try_recv() {
+                Ok(result) => self.apply_proxy_validation_result(result),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let pending = self
+                        .proxy_validation_pending
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for media_id in pending {
+                        self.fail_proxy_validation(media_id);
+                    }
+                    self.proxy_validator.take();
+                    self.hub.status = Some(proxy_text(
+                        self.editor.language,
+                        "Proxy checking stopped; using original media",
+                        "プロキシ確認が停止したため、オリジナルを使用します",
+                    ));
+                    break;
+                }
+            }
+        }
+        self.submit_deferred_proxy_checks();
+        if self.monitor_cache_epoch != previous_epoch && self.screen == Screen::Editor {
+            self.sync_monitor_decode();
+        }
+    }
+
+    fn apply_proxy_validation_result(&mut self, result: nle_proxy::ProxyValidationResult) {
+        let Some(media_id) = self
+            .proxy_validation_pending
+            .iter()
+            .find_map(|(&id, pending)| (pending.request.token == result.token).then_some(id))
+        else {
+            return;
+        };
+        let pending = self.proxy_validation_pending.remove(&media_id).unwrap();
+        // Ticket + artifact + media-path guards protect newer choices and relinked sources.
+        if !self
+            .proxy_records
+            .get(&media_id)
+            .is_some_and(|record| record.artifact == pending.request.artifact)
+        {
+            return;
+        }
+        let source_is_current = self.editor.media.iter().any(|media| {
+            media.id == media_id
+                && media.kind == MediaKind::Video
+                && media.path == pending.request.original
+        });
+        if !result.usable || !source_is_current {
+            self.fail_proxy_validation(media_id);
+        } else if pending.activate {
+            self.proxy_records.get_mut(&media_id).unwrap().enabled = true;
+            self.editor
+                .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: true });
+            self.hub.status = Some(proxy_text(
+                self.editor.language,
+                "Proxy media ready; preview is using it",
+                "プロキシメディアの準備完了。プレビューで使用中です",
+            ));
+            self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+        }
+    }
+
+    fn set_proxy_media_enabled(&mut self, media_id: u32, enabled: bool) {
+        self.proxy_discovery_suppressed.insert(media_id);
+        if self.proxy_delete_media_id == Some(media_id) {
+            return;
+        }
+        self.proxy_validation_pending.remove(&media_id);
+        if !enabled {
+            self.cancel_proxy_generation(media_id);
+        }
+        let Some(record) = self.proxy_records.get_mut(&media_id) else {
+            if self.proxy_job_media_id != Some(media_id) {
+                self.fail_proxy_validation(media_id);
+            }
+            return;
+        };
+        let was_enabled = record.enabled;
+        record.enabled = false;
+        record.recheck_requested = false;
+        self.editor
+            .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: false });
+        if was_enabled {
+            self.proxy_routing_changed();
+        }
+        if enabled && self.proxy_job_media_id != Some(media_id) {
+            self.queue_proxy_validation(media_id, true);
+        }
+    }
+
+    fn cancel_proxy_generation(&mut self, media_id: u32) {
+        if self.proxy_job_media_id == Some(media_id) {
+            self.proxy_job_cancelled = true;
+            self.proxy_validation_pending.remove(&media_id);
+            if let Some(job) = &self.proxy_job {
+                job.cancel();
+            }
+        }
+    }
+
+    fn delete_proxy_media(&mut self, media_id: u32) {
+        self.proxy_discovery_suppressed.insert(media_id);
+        if self.proxy_delete_job.is_some() {
+            self.hub.status = Some(proxy_text(
+                self.editor.language,
+                "Another proxy is already being removed",
+                "別のプロキシを削除中です",
+            ));
+            return;
+        }
+        self.proxy_validation_pending.remove(&media_id);
+        self.cancel_proxy_generation(media_id);
         let Some(record) = self.proxy_records.get_mut(&media_id) else {
             self.editor
                 .set_proxy_media_status(media_id, ProxyMediaStatus::None);
@@ -5451,11 +5631,18 @@ impl App {
     }
 
     fn reset_proxy_session(&mut self) {
+        self.proxy_reconcile_needed = false;
+        if let Some(worker) = &self.proxy_validator {
+            worker.invalidate();
+        }
+        self.proxy_validation_pending.clear();
         if let Some(job) = &self.proxy_job {
             job.cancel();
         }
         self.proxy_job.take();
         self.proxy_job_media_id = None;
+        self.proxy_job_path = None;
+        self.proxy_job_cancelled = false;
         if let Some(job) = &self.proxy_delete_job {
             job.cancel();
         }
@@ -5489,47 +5676,58 @@ impl App {
             ProxyRecord {
                 artifact,
                 enabled: false,
+                recheck_requested: false,
             },
         );
         self.editor
             .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: false });
     }
 
-    /// Runs only after background cache mutation, never in monitor submission. If pruning or an
-    /// external cleanup removed a derived file, preview ownership returns to the original source.
+    /// Queue read-only checks after cache mutation, outside monitor submission. Entries with an
+    /// explicit operation or failure are left alone; late replies must not overwrite that state.
     fn reconcile_proxy_records(&mut self) {
-        let stale = self
-            .proxy_records
-            .iter()
-            .filter_map(|(&media_id, record)| {
-                let original = self
-                    .editor
-                    .media
-                    .iter()
-                    .find(|media| media.id == media_id)
-                    .map(|media| media.path.as_path());
-                (!record.artifact.path.is_file()
-                    || original.is_none_or(|path| !record.artifact.source.matches(path)))
-                .then_some(media_id)
-            })
-            .collect::<Vec<_>>();
-        if stale.is_empty() {
+        for (&id, record) in &mut self.proxy_records {
+            if matches!(
+                self.editor.proxy_media_status(id),
+                ProxyMediaStatus::Ready { .. }
+            ) {
+                record.recheck_requested = true;
+                self.proxy_reconcile_needed = true;
+            }
+        }
+        self.submit_deferred_proxy_checks();
+    }
+
+    fn submit_deferred_proxy_checks(&mut self) {
+        if !self.proxy_reconcile_needed {
             return;
         }
-        for media_id in stale {
-            self.proxy_records.remove(&media_id);
-            self.editor.set_proxy_media_status(
-                media_id,
-                ProxyMediaStatus::Failed {
-                    message: proxy_text(
-                        self.editor.language,
-                        "Proxy is missing or stale; preview is using the original",
-                        "プロキシが見つからないか古いため、プレビューはオリジナルを使用します",
-                    ),
-                },
-            );
+        let available =
+            nle_proxy::VALIDATION_CAPACITY.saturating_sub(self.proxy_validation_pending.len());
+        // One bit per existing cache record, not another unbounded request queue. A second cache
+        // mutation while a check is in flight leaves the bit set for a subsequent fresh check.
+        let candidates = self
+            .proxy_records
+            .iter_mut()
+            .filter_map(|(&id, record)| {
+                if !matches!(
+                    self.editor.proxy_media_status(id),
+                    ProxyMediaStatus::Ready { .. }
+                ) {
+                    record.recheck_requested = false;
+                }
+                (record.recheck_requested && !self.proxy_validation_pending.contains_key(&id))
+                    .then_some(id)
+            })
+            .take(available)
+            .collect::<Vec<_>>();
+        for media_id in candidates {
+            self.queue_proxy_validation(media_id, false);
         }
-        self.monitor_cache_epoch = self.monitor_cache_epoch.wrapping_add(1).max(1);
+        self.proxy_reconcile_needed = self
+            .proxy_records
+            .values()
+            .any(|record| record.recheck_requested);
     }
 
     /// A derived source that cannot decode must never strand the monitor. Decoder errors are the
@@ -5546,6 +5744,7 @@ impl App {
             return false;
         }
         let media_id = identity.media_id;
+        self.proxy_validation_pending.remove(&media_id);
         if let Some(record) = self.proxy_records.get_mut(&media_id) {
             record.enabled = false;
         }
@@ -5832,11 +6031,7 @@ impl App {
                 self.request_proxy_media(media_id, path)
             }
             EditorAction::CancelProxyMedia { media_id } => {
-                if self.proxy_job_media_id == Some(media_id)
-                    && let Some(job) = &self.proxy_job
-                {
-                    job.cancel();
-                }
+                self.cancel_proxy_generation(media_id);
             }
             EditorAction::SetProxyMediaEnabled { media_id, enabled } => {
                 self.set_proxy_media_enabled(media_id, enabled)
@@ -7870,6 +8065,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.poll_kraken_upscale();
                 self.poll_proxy_job();
                 self.poll_proxy_delete();
+                self.poll_proxy_validation();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -7908,6 +8104,7 @@ impl ApplicationHandler<AppEvent> for App {
         self.poll_kraken_upscale();
         self.poll_proxy_job();
         self.poll_proxy_delete();
+        self.poll_proxy_validation();
         self.poll_media_dialog();
         self.poll_media_analysis();
         self.poll_monitor_decoder();
@@ -8175,6 +8372,7 @@ mod tests {
         records.insert(
             1,
             ProxyRecord {
+                recheck_requested: false,
                 artifact: nle_proxy::ProxyArtifact {
                     path: proxy.clone(),
                     source: nle_proxy::SourceFingerprint {
@@ -8285,6 +8483,287 @@ mod tests {
         );
     }
 
+    fn wait_for_proxy_validation(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !app.proxy_validation_pending.is_empty() || app.proxy_reconcile_needed {
+            app.poll_proxy_validation();
+            assert!(Instant::now() < deadline, "proxy validation did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn app_with_unchecked_proxy() -> (App, PathBuf) {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        let original = test_catalog_path("unchecked-proxy").with_extension("mp4");
+        app.editor.add_media_paths([original.clone()]);
+        app.restore_cached_proxy(1, original.clone(), cached_proxy_fixture(&original));
+        (app, original)
+    }
+
+    #[test]
+    fn proxy_activation_checks_in_background_and_rejects_missing_files() {
+        let (mut app, original) = app_with_unchecked_proxy();
+        let snapshot = serde_json::to_string(&app.editor.snapshot()).unwrap();
+        let generation = app.editor.durable_generation();
+        app.set_proxy_media_enabled(1, true);
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        wait_for_proxy_validation(&mut app);
+        assert!(matches!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Failed { .. }
+        ));
+        assert!(app.proxy_records.is_empty());
+        assert_eq!(app.editor.durable_generation(), generation);
+        assert_eq!(
+            serde_json::to_string(&app.editor.snapshot()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn proxy_validation_late_replies_cannot_override_explicit_original_or_newer_request() {
+        let (mut app, original) = app_with_unchecked_proxy();
+        app.set_proxy_media_enabled(1, true);
+        let old_token = app.proxy_validation_pending[&1].request.token;
+        app.set_proxy_media_enabled(1, false);
+        for usable in [true, false] {
+            app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+                token: old_token,
+                usable,
+            });
+            assert_eq!(
+                app.editor.proxy_media_status(1),
+                ProxyMediaStatus::Ready { enabled: false }
+            );
+        }
+        app.set_proxy_media_enabled(1, true);
+        let new_token = app.proxy_validation_pending[&1].request.token;
+        assert_ne!(old_token, new_token);
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token: old_token,
+            usable: true,
+        });
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token: new_token,
+            usable: true,
+        });
+        assert!(app.proxy_records[&1].enabled);
+    }
+
+    #[test]
+    fn proxy_validation_rejects_relinked_or_replaced_artifacts() {
+        for relink in [true, false] {
+            let (mut app, _) = app_with_unchecked_proxy();
+            app.set_proxy_media_enabled(1, true);
+            let token = app.proxy_validation_pending[&1].request.token;
+            if relink {
+                app.editor.media[0].path = PathBuf::from("different-source.mp4");
+            } else {
+                app.proxy_records.get_mut(&1).unwrap().artifact.path =
+                    PathBuf::from("newer-proxy.mp4");
+                app.editor
+                    .set_proxy_media_status(1, ProxyMediaStatus::Ready { enabled: false });
+            }
+            app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+                token,
+                usable: true,
+            });
+            if relink {
+                assert!(app.proxy_records.is_empty());
+                assert!(matches!(
+                    app.editor.proxy_media_status(1),
+                    ProxyMediaStatus::Failed { .. }
+                ));
+            } else {
+                assert_eq!(
+                    app.proxy_records[&1].artifact.path,
+                    PathBuf::from("newer-proxy.mp4")
+                );
+                assert!(!app.proxy_records[&1].enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_validation_reset_keeps_worker_but_discards_old_project_reply() {
+        let (mut app, original) = app_with_unchecked_proxy();
+        app.set_proxy_media_enabled(1, true);
+        let old_token = app.proxy_validation_pending[&1].request.token;
+        app.reset_proxy_session();
+        assert!(app.proxy_validator.is_some());
+        assert!(app.proxy_validation_pending.is_empty());
+        app.editor.set_proxy_media_status(1, ProxyMediaStatus::None);
+        app.restore_cached_proxy(1, original.clone(), cached_proxy_fixture(&original));
+        app.set_proxy_media_enabled(1, true);
+        assert!(app.proxy_validation_pending[&1].request.token > old_token);
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token: old_token,
+            usable: true,
+        });
+        assert!(!app.proxy_records[&1].enabled);
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+    }
+
+    #[test]
+    fn proxy_validation_delete_invalidates_late_activation() {
+        let (mut app, _) = app_with_unchecked_proxy();
+        // Use a guaranteed disposable, nonexistent target, not the fixture's illustrative path.
+        app.proxy_records.get_mut(&1).unwrap().artifact.path =
+            test_catalog_path("missing-proxy-delete");
+        app.set_proxy_media_enabled(1, true);
+        let token = app.proxy_validation_pending[&1].request.token;
+        app.delete_proxy_media(1);
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token,
+            usable: true,
+        });
+        assert!(!app.proxy_records[&1].enabled);
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Deleting);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.proxy_delete_job.is_some() {
+            app.poll_proxy_delete();
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(app.proxy_records.is_empty());
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::None);
+    }
+
+    #[test]
+    fn proxy_validation_capacity_keeps_original_available_without_waiting() {
+        let (mut app, original) = app_with_unchecked_proxy();
+        for id in 10..10 + nle_proxy::VALIDATION_CAPACITY as u32 {
+            app.proxy_validation_pending.insert(
+                id,
+                PendingProxyValidation {
+                    request: nle_proxy::ProxyValidationRequest {
+                        token: id as u64,
+                        original: original.clone(),
+                        artifact: cached_proxy_fixture(&original),
+                    },
+                    activate: false,
+                },
+            );
+        }
+        app.set_proxy_media_enabled(1, true);
+        assert_eq!(
+            app.proxy_validation_pending.len(),
+            nle_proxy::VALIDATION_CAPACITY
+        );
+        assert!(app.proxy_validator.is_none());
+        assert_eq!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Ready { enabled: false }
+        );
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        assert!(app.hub.status.as_ref().unwrap().contains("busy"));
+    }
+
+    #[test]
+    fn proxy_reconciliation_rechecks_mutation_during_inflight_validation() {
+        let (mut app, _) = app_with_unchecked_proxy();
+        app.reconcile_proxy_records();
+        let token = app.proxy_validation_pending[&1].request.token;
+        app.reconcile_proxy_records();
+        assert!(app.proxy_records[&1].recheck_requested);
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token,
+            usable: true,
+        });
+        app.poll_proxy_validation();
+        assert!(app.proxy_validation_pending[&1].request.token > token);
+        wait_for_proxy_validation(&mut app);
+        assert!(app.proxy_records.is_empty());
+    }
+
+    #[test]
+    fn proxy_reconciliation_drains_more_records_than_queue_capacity() {
+        let (mut app, _) = app_with_unchecked_proxy();
+        for _ in 0..nle_proxy::VALIDATION_CAPACITY + 2 {
+            let original = test_catalog_path("reconcile-overflow").with_extension("mp4");
+            app.editor.add_media_paths([original.clone()]);
+            let id = app.editor.media.last().unwrap().id;
+            app.restore_cached_proxy(id, original.clone(), cached_proxy_fixture(&original));
+        }
+        assert!(app.proxy_records.len() > nle_proxy::VALIDATION_CAPACITY);
+        app.reconcile_proxy_records();
+        assert!(app.proxy_validation_pending.len() <= nle_proxy::VALIDATION_CAPACITY);
+        wait_for_proxy_validation(&mut app);
+        assert!(
+            app.proxy_records.is_empty(),
+            "full queues must not skip stale cache entries"
+        );
+    }
+
+    #[test]
+    fn proxy_reconciliation_retains_valid_route_and_falls_back_after_failed_check() {
+        let (mut app, original) = app_with_unchecked_proxy();
+        app.proxy_records.get_mut(&1).unwrap().enabled = true;
+        app.editor
+            .set_proxy_media_status(1, ProxyMediaStatus::Ready { enabled: true });
+        let epoch = app.monitor_cache_epoch;
+        app.reconcile_proxy_records();
+        assert!(app.proxy_records[&1].enabled);
+        let token = app.proxy_validation_pending[&1].request.token;
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token,
+            usable: true,
+        });
+        assert!(app.proxy_records[&1].enabled);
+        assert_eq!(app.monitor_cache_epoch, epoch);
+        app.reconcile_proxy_records();
+        wait_for_proxy_validation(&mut app);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        assert!(app.monitor_cache_epoch > epoch);
+        assert!(matches!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn proxy_completed_generation_is_checked_and_cancellation_wins_queued_completion() {
+        for cancel in [false, true] {
+            let (mut app, original) = app_with_unchecked_proxy();
+            app.proxy_job_media_id = Some(1);
+            app.proxy_job_path = Some(original.clone());
+            app.editor
+                .set_proxy_media_status(1, ProxyMediaStatus::Generating { progress: 0.9 });
+            if cancel {
+                app.cancel_proxy_generation(1);
+            }
+            assert!(app.apply_proxy_event(
+                1,
+                nle_proxy::ProxyEvent::Completed(cached_proxy_fixture(&original))
+            ));
+            assert!(!app.proxy_records[&1].enabled);
+            assert_eq!(
+                app.editor.proxy_media_status(1),
+                if cancel {
+                    ProxyMediaStatus::Ready { enabled: false }
+                } else {
+                    ProxyMediaStatus::Checking
+                }
+            );
+            assert_eq!(app.proxy_validation_pending.is_empty(), cancel);
+        }
+    }
+
     #[test]
     fn cached_proxy_restore_never_overrides_explicit_actions_or_relinked_media() {
         let mut app = App::new_without_startup_or_audio_for_monitor_contract();
@@ -8295,6 +8774,7 @@ mod tests {
         assert!(app.proxy_records.is_empty());
         for status in [
             ProxyMediaStatus::Generating { progress: 0.5 },
+            ProxyMediaStatus::Checking,
             ProxyMediaStatus::Deleting,
             ProxyMediaStatus::Ready { enabled: true },
             ProxyMediaStatus::Failed {
@@ -8447,6 +8927,15 @@ mod tests {
         );
         reopened.set_proxy_media_enabled(1, true);
         assert_eq!(
+            reopened.editor.proxy_media_status(1),
+            ProxyMediaStatus::Checking
+        );
+        assert_eq!(
+            resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
+            source
+        );
+        wait_for_proxy_validation(&mut reopened);
+        assert_eq!(
             resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
             artifact.path
         );
@@ -8473,6 +8962,7 @@ mod tests {
         app.proxy_records.insert(
             1,
             ProxyRecord {
+                recheck_requested: false,
                 artifact: nle_proxy::ProxyArtifact {
                     path: proxy.clone(),
                     source: nle_proxy::SourceFingerprint::capture(&original)
@@ -8488,6 +8978,12 @@ mod tests {
 
         let initial_epoch = app.monitor_cache_epoch;
         app.set_proxy_media_enabled(1, true);
+        assert!(
+            !app.proxy_records[&1].enabled,
+            "activation must await background validation"
+        );
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+        wait_for_proxy_validation(&mut app);
         assert!(app.monitor_cache_epoch > initial_epoch);
         assert_eq!(
             resolved_monitor_media_path(&app.proxy_records, 1, &original),
@@ -8504,8 +9000,14 @@ mod tests {
         );
 
         let enabled_epoch = app.monitor_cache_epoch;
+        app.reconcile_proxy_records();
+        let passive_token = app.proxy_validation_pending[&1].request.token;
         fs::remove_file(&proxy).expect("simulate external proxy cleanup");
         assert!(app.fallback_from_failed_proxy_decode(0));
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token: passive_token,
+            usable: true,
+        });
         assert!(app.monitor_cache_epoch > enabled_epoch);
         assert_eq!(
             resolved_monitor_media_path(&app.proxy_records, 1, &original),
@@ -8537,6 +9039,7 @@ mod tests {
         app.proxy_records.insert(
             1,
             ProxyRecord {
+                recheck_requested: false,
                 artifact: nle_proxy::ProxyArtifact {
                     path: locked_proxy.clone(),
                     source: nle_proxy::SourceFingerprint::capture(&original)

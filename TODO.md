@@ -9,6 +9,14 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Move proxy completion, enable and cache reconciliation file checks to one owned,
+  bounded worker. Checking keeps original media active; late replies cannot undo newer
+  choices, relinks, deletion or reset. Full-cache checks drain in batches instead of being
+  skipped. Two before-failing regressions now pass; 800 release tests, both real-media
+  proxy tests, strict Clippy, formatting, fixtures and Phase 0 scenarios pass.
+  Parent-reviewed (independent agent unavailable). See `docs/proxy-media.md`.
+- [ ] Refresh the portable package with background activation/reconciliation, retaining
+  a complete recoverable backup. Do not launch the editor; GUI qualification stays pending.
 - [x] Move `ProxyJob::start` source/tool validation and fingerprinting to its existing
   worker. Two before-failing regressions now pass; pre-cancelled state and source-change/
   cancellation contracts remain intact. 786 release tests, both real-media proxy tests,
@@ -17,9 +25,10 @@ Last updated: 2026-08-31
 - [x] Rebuild the portable package from `ac52c2b` with worker-side proxy startup
   validation. Executable SHA-256 starts `D3FA11E3C8894DDA`; previous package backed
   up, runtime/static-import checks pass. No editor launch; GUI smoke remains `not_run`.
-- [ ] Finish proxy lifecycle nonblocking work: tool-path resolution, completion/enable/
-  reconciliation filesystem checks and cancellation/reset teardown still need worker-owned
-  handling with source-identity, stale-result and clean-shutdown proof.
+- [ ] Finish proxy lifecycle nonblocking work: tool-path resolution and generation/deletion
+  cancellation/reset teardown still need worker-owned handling with source-identity,
+  stale-result and clean-shutdown proof. Validation-worker final shutdown can still wait
+  for an OS filesystem call already in progress; do not claim bounded I/O cancellation.
 - [x] Rediscover matching local proxies after timeline placement/project reopen on the
   existing analysis worker; show ready but retain original-quality playback until explicit
   opt-in. Protect against stale projects, relinks and late replies after user actions.

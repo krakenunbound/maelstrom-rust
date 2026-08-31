@@ -96,9 +96,51 @@ contracts and seven Phase 0 scenarios pass. Logs/hash evidence use `proxy-worker
 `artifacts/phase1-multisource/`. Parent-reviewed; independent agent unavailable (agent limit).
 
 This establishes the proxy job's asynchronous validation contract, not a measured UI-latency
-bound or whole-workflow nonblocking guarantee. The app's tool-path resolver, completion/enable/
-reconciliation filesystem checks, and synchronous cancellation/reset teardown are separate
-remaining lifecycle work. No image-quality, codec, frame-rate, cache-cap or dependency change.
+bound or whole-workflow nonblocking guarantee. Completion/enable/reconciliation checks are moved
+in the subsequent checkpoint below; the app's tool-path resolver and synchronous generation/
+deletion cancellation/reset teardown remain separate lifecycle work. No image-quality, codec,
+frame-rate, cache-cap or dependency change.
+
+## Background activation and reconciliation checkpoint — 2026-08-31
+
+Completed generation and explicit enable now submit identity/metadata checks to one lazy, owned
+validation worker. The interface shows **Checking proxy** / **プロキシを確認中** and keeps original
+media active until the matching result succeeds. The nested menu retains Use Original and Delete
+while checking. No source path, audio/export route, saved project state, or playback-resolution
+default changes. The worker checks the current profile, nonzero bounded output size, regular-file
+metadata, recorded output size and source fingerprint; it does not claim to validate full decoding.
+
+Request and result channels each hold at most 64 entries; the app also caps pending tickets at 64.
+Submission and polling are nonblocking. A full activation queue leaves the original selected and
+asks the user to retry. Passive reconciliation retains the existing route while checking. A recheck
+bit on each existing record carries deferred cache checks across a full queue without allocating a
+second request backlog. Another cache mutation during an in-flight check requests a subsequent
+check. Result polling is capped at 64 per event and batches monitor refresh after route changes.
+
+Tickets are not reused at project reset. Ticket, artifact and requested-path guards reject late
+replies after user switches, delete, relink or replacement. Decoder failure invalidates a pending
+check before falling back. A generation cancellation flag also rejects a completion that was already
+queued when the user cancelled. Reset invalidates the validation worker's epoch without joining it;
+queued obsolete work skips filesystem inspection and an in-flight obsolete result is discarded.
+The worker remains owned until final shutdown. Dropping its result receiver before joining unblocks
+a full publication queue; an OS filesystem call already in progress can still delay final shutdown.
+
+Two regressions fail before their fixes: activation must remain on the original until validation,
+and reconciliation must not skip stale records when the queue is full. Four worker tests cover
+bounded blocked-worker submission, old-epoch suppression, metadata rejection and full-result-queue
+shutdown. Ten additional app tests cover pending status, missing files, user overrides, relink/
+replacement, reset, delete, queued generation completion/cancellation, capacity, passive fallback,
+and cache mutation while checks are in flight. Existing real generated-proxy reopen/enable and
+decode-failure tests exercise the asynchronous path; the EN/JA UI status remains session-only.
+
+Final verification: 800 release workspace tests pass (24 opt-in tests ignored), strict all-target
+release Clippy and formatting pass, seven fixture contracts and seven Phase 0 scenarios pass.
+Both opt-in real-media proxy tests also pass. Before/after logs and hash evidence use
+`proxy-async-validation-` in ignored `artifacts/phase1-multisource/`; final scenario evidence is
+`artifacts/phase0-scenarios/proxy-async-validation-final-scenarios.json`.
+Parent review found and repaired the full-cache edge case. Independent review was unavailable
+(agent thread limit). These are worker/state/real-media gates, not a measured GUI-latency bound,
+cross-hardware guarantee, or closure of the remaining tool-resolution/teardown work.
 
 ## Portable package checkpoint
 

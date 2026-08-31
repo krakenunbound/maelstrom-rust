@@ -991,6 +991,7 @@ pub enum ProxyMediaStatus {
     Generating {
         progress: f32,
     },
+    Checking,
     Deleting,
     Ready {
         enabled: bool,
@@ -6653,6 +6654,15 @@ fn panel_title(ui: &mut Ui, title: &str, subtitle: &str) {
 fn proxy_media_status_badge(ui: &mut Ui, language: Language, status: &ProxyMediaStatus) {
     let (label, color, detail) = match status {
         ProxyMediaStatus::None => return,
+        ProxyMediaStatus::Checking => (
+            t(language, "Checking proxy", "プロキシを確認中"),
+            Color32::from_rgb(225, 181, 82),
+            t(
+                language,
+                "Checking proxy in the background; preview is using the original",
+                "バックグラウンドでプロキシを確認中。プレビューはオリジナルを使用します",
+            ),
+        ),
         ProxyMediaStatus::Generating { progress } => (
             format!(
                 "{} {:>3}%",
@@ -6761,7 +6771,16 @@ fn proxy_media_menu(ui: &mut Ui, state: &mut EditorState, media_id: MediaId, pat
                     .color(Color32::from_rgb(225, 181, 82)),
                 );
             }
-            ProxyMediaStatus::Ready { enabled } => {
+            ProxyMediaStatus::Checking | ProxyMediaStatus::Ready { .. } => {
+                let status = state.proxy_media_status(media_id);
+                let checking = status == ProxyMediaStatus::Checking;
+                if checking {
+                    ui.label(RichText::new(t(state.language, "Checking proxy…", "プロキシを確認中…"))
+                        .small().color(Color32::from_rgb(225, 181, 82)))
+                        .on_hover_text(t(state.language, "Preview is using the original. Choose Use Original Media to cancel this check.",
+                            "プレビューはオリジナルを使用中です。「オリジナルを使用」で確認をキャンセルできます。"));
+                }
+                let enabled = checking || status == ProxyMediaStatus::Ready { enabled: true };
                 let (english, japanese) = if enabled {
                     ("Use Original Media", "オリジナルを使用")
                 } else {
@@ -6785,7 +6804,7 @@ fn proxy_media_menu(ui: &mut Ui, state: &mut EditorState, media_id: MediaId, pat
             }
             ProxyMediaStatus::Failed { message } => {
                 ui.label(
-                    RichText::new(t(state.language, "Proxy generation failed", "プロキシ生成に失敗"))
+                    RichText::new(t(state.language, "Proxy unavailable", "プロキシを使用できません"))
                         .small()
                         .color(Color32::from_rgb(225, 108, 108)),
                 )
@@ -23360,6 +23379,10 @@ mod tests {
             editor.proxy_media_status(1),
             ProxyMediaStatus::Generating { progress: 0.42 }
         );
+        editor.set_proxy_media_status(1, ProxyMediaStatus::Checking);
+        assert_eq!(editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+        assert_eq!(editor.snapshot(), before);
+        assert_eq!(editor.durable_generation(), generation);
         editor.set_proxy_media_status(1, ProxyMediaStatus::Ready { enabled: true });
         assert_eq!(editor.snapshot(), before);
         assert_eq!(editor.durable_generation(), generation);

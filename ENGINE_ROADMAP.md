@@ -309,7 +309,16 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       Proxy job startup now validates source/tool files and captures the source fingerprint on its
       worker, returning filesystem failures asynchronously. Two regressions fail before/pass after;
       786 release tests and both real-media proxy tests pass. This is not a whole-lifecycle
-      nonblocking claim: app-side filesystem checks and synchronous teardown remain open.
+      nonblocking claim: tool-path resolution and generation/deletion teardown remain open.
+      Completion/enable/reconciliation checks now use one owned worker with 64-entry request,
+      result and app-ticket bounds. Checking retains original media and both EN/JA menu actions;
+      ticket/artifact/path guards reject obsolete replies, and reset invalidates without joining
+      the validation worker. Full-cache checks drain across capacity, and repeated cache mutation
+      requests another check. Two before-failing regressions pass; 800 release tests, strict Clippy,
+      real-media proxy tests, fixture contracts and Phase 0 scenarios pass. No resolution/profile,
+      audio/export path, project schema or dependency change. Parent-reviewed; independent agent
+      unavailable. Final validation-worker shutdown may still wait on an in-flight OS file call;
+      no GUI-latency or whole-lifecycle nonblocking guarantee is claimed.
       Unused Media Pool items retain deferred analysis. This still
       supports one generation job and one 720p profile; portable/external attachment, persistent
       enable choices, generation queues and multiple profiles remain later product work.
