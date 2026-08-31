@@ -646,7 +646,15 @@ Replace “topmost clip wins” with a generation-aware retained compositor.
 - [x] Composite ordered video layers with transparent empty regions over project background black.
 - [x] Implement position, scale, rotation, anchor point, crop, opacity, and horizontal/vertical flip.
 - [x] Implement project-size fitting modes: fit, fill, stretch, and original pixels.
-- [ ] Implement premultiplied-alpha handling and correct image/video alpha semantics.
+- [x] Implement premultiplied-alpha handling and correct image/video alpha semantics. Straight
+      decoded/generated RGBA is retained at CPU, upload and FFmpeg-overlay boundaries. The viewer
+      runs a retained encoded-sRGB premultiply pass only after changed uploads, uses explicit
+      premultiplied source-over blending, and selects transfer-correct sRGB/non-sRGB presentation.
+      Export premultiplies only around filtered scale/rotation and restores straight RGBA before
+      explicit `overlay=alpha=straight` boundaries. Real GPU edge/presentation and generated FFmpeg
+      edge, transform, cross-dissolve, title and matte regressions pass. This does not complete the
+      Phase 4 linear working space, texture pooling, memory-pressure or cross-adapter gates. See
+      `docs/premultiplied-alpha.md`.
 - [x] Add still-image layers with bounded texture downscaling.
 - [ ] Add nearest/bilinear/bicubic preview sampling options where supported.
 - [x] Double-buffer viewer outputs so graph execution never blocks timeline drawing.

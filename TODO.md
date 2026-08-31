@@ -9,6 +9,14 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Correct transparent-edge handling across the retained viewer compositor and generated export
+  graphs. Straight RGBA remains the asset/FFmpeg-overlay contract; changed viewer uploads receive a
+  retained encoded-sRGB premultiply pass, media/mattes use premultiplied source-over, and sRGB plus
+  non-sRGB presentation surfaces preserve the same encoded result. Export premultiplies only around
+  filtered transforms and restores straight alpha before overlays. Real GPU and pinned-FFmpeg
+  regressions cover filtered edges, both presentation formats, generated stills, transforms,
+  cross-dissolves, titles and mattes. Texture pooling, memory-pressure, cross-adapter and Phase 4
+  linear-working-space gates remain open. See `docs/premultiplied-alpha.md`.
 - [x] Requalify the corrected four-source live-audio continuity gate for the maximum
   30-second duration at tracked-clean commit `f78c816`. The local Software-backend run
   sustained four Full-1080p sources through a real default output device, including a

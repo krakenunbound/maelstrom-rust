@@ -121,7 +121,10 @@ fn apply_curve_lut(encoded: vec3<f32>, correction_index: u32) -> vec3<f32> {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sample = textureSample(source_texture, source_sampler, input.uv);
-    var encoded = linear_to_srgb(sample.rgb);
+    let alpha = sample.a;
+    // Composition textures contain premultiplied encoded-sRGB values. Color operations remain
+    // defined on straight encoded color until the Phase 4 linear working-space migration.
+    var encoded = select(vec3<f32>(0.0), sample.rgb / alpha, alpha > 0.0);
     for (var index = 0u; index < min(color_stack.count, 8u); index = index + 1u) {
         let correction = color_stack.corrections[index];
         if (correction.effect.x == 1.0) {
@@ -161,10 +164,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             encoded = apply_curve_lut(encoded, index);
         }
     }
-    return vec4<f32>(srgb_to_linear(encoded), sample.a * input.opacity);
+    let output_alpha = alpha * input.opacity;
+    return vec4<f32>(encoded * output_alpha, output_alpha);
+}
+
+@fragment
+fn fs_premultiply(input: VertexOutput) -> @location(0) vec4<f32> {
+    let straight = textureSample(source_texture, source_sampler, input.uv);
+    return vec4<f32>(straight.rgb * straight.a, straight.a);
+}
+
+@fragment
+fn fs_blit_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
+    let sample = textureSample(source_texture, source_sampler, input.uv);
+    // Decode before an sRGB target re-encodes so presentation preserves the compositor bytes.
+    return vec4<f32>(srgb_to_linear(sample.rgb), sample.a);
+}
+
+@fragment
+fn fs_blit_encoded(input: VertexOutput) -> @location(0) vec4<f32> {
+    // A non-sRGB fallback target performs no transfer conversion.
+    return textureSample(source_texture, source_sampler, input.uv);
 }
 
 @fragment
 fn fs_matte(input: MatteVertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.color, input.opacity);
+    return vec4<f32>(input.color * input.opacity, input.opacity);
 }

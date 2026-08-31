@@ -596,8 +596,12 @@ struct MatteVertex {
 struct LayerTexture {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    premultiply_bind_group: wgpu::BindGroup,
+    premultiplied_view: wgpu::TextureView,
+    _premultiplied_texture: wgpu::Texture,
     correction_buffer: wgpu::Buffer,
     curve_buffer: wgpu::Buffer,
+    premultiply_needed: bool,
 }
 struct OutputTarget {
     _texture: wgpu::Texture,
@@ -609,10 +613,12 @@ struct OutputTarget {
 
 /// GPU resources for a fixed four-layer project-monitor composition.
 pub struct ViewerCompositorRenderer {
+    premultiply_pipeline: wgpu::RenderPipeline,
     compose_pipeline: wgpu::RenderPipeline,
     matte_pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
+    premultiply_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
     matte_vertex_buffer: wgpu::Buffer,
@@ -632,6 +638,7 @@ pub struct ViewerCompositorRenderer {
 impl ViewerCompositorRenderer {
     pub fn new(device: &wgpu::Device, presentation_format: wgpu::TextureFormat) -> Self {
         let texture_layout = texture_layout(device);
+        let premultiply_layout = premultiply_layout(device);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("viewer compositor sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -652,6 +659,12 @@ impl ViewerCompositorRenderer {
             wgpu::TextureFormat::Rgba8Unorm,
             "compose",
         );
+        let premultiply_pipeline = premultiply_pipeline(
+            device,
+            &shader,
+            &premultiply_layout,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let matte_pipeline =
             matte_pipeline(device, &shader, wgpu::TextureFormat::Rgba8Unorm, "matte");
         let blit_pipeline = blit_pipeline(
@@ -662,10 +675,12 @@ impl ViewerCompositorRenderer {
             "blit",
         );
         Self {
+            premultiply_pipeline,
             compose_pipeline,
             matte_pipeline,
             blit_pipeline,
             texture_layout,
+            premultiply_layout,
             sampler,
             vertex_buffer: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewer compositor vertices"),
@@ -774,6 +789,7 @@ impl ViewerCompositorRenderer {
             self.layers[layer] = Some(create_layer_texture(
                 device,
                 &self.texture_layout,
+                &self.premultiply_layout,
                 &self.sampler,
                 width,
                 height,
@@ -801,6 +817,10 @@ impl ViewerCompositorRenderer {
                 depth_or_array_layers: 1,
             },
         );
+        self.layers[layer]
+            .as_mut()
+            .expect("viewer layer allocated")
+            .premultiply_needed = true;
         self.input_generation = self.input_generation.wrapping_add(1);
         self.presentation.record_upload(layer);
         Ok(())
@@ -850,6 +870,31 @@ impl ViewerCompositorRenderer {
             self.input_generation,
         ) {
             return false;
+        }
+        for texture in self.layers.iter_mut().flatten() {
+            if !texture.premultiply_needed {
+                continue;
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewer compositor premultiply pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture.premultiplied_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.premultiply_pipeline);
+            pass.set_bind_group(0, &texture.premultiply_bind_group, &[]);
+            pass.draw(0..VERTICES_PER_LAYER as u32, 0..1);
+            texture.premultiply_needed = false;
         }
         let back = 1 - self.front_output;
         let mut vertices = [ViewerVertex::zeroed(); MAX_COMPOSITE_LAYERS * VERTICES_PER_LAYER];
@@ -1094,6 +1139,83 @@ fn texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+fn premultiply_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("viewer premultiply texture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+fn premultiplied_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
+fn premultiply_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    texture_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("viewer premultiply pipeline layout"),
+        bind_group_layouts: &[Some(texture_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("viewer premultiply pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_blit"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_premultiply"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn compose_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1127,7 +1249,7 @@ fn compose_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(premultiplied_blend()),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -1168,7 +1290,7 @@ fn matte_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(premultiplied_blend()),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -1206,7 +1328,7 @@ fn blit_pipeline(
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(blit_fragment_entry_point(format)),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -1217,6 +1339,14 @@ fn blit_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn blit_fragment_entry_point(format: wgpu::TextureFormat) -> &'static str {
+    if format.is_srgb() {
+        "fs_blit_srgb"
+    } else {
+        "fs_blit_encoded"
+    }
 }
 
 const fn composition_required(
@@ -1271,6 +1401,7 @@ fn matte_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 fn create_layer_texture(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
+    premultiply_layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     width: u32,
     height: u32,
@@ -1285,11 +1416,26 @@ fn create_layer_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
+    let premultiplied_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("viewer compositor premultiplied input"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let premultiplied_view = premultiplied_texture.create_view(&Default::default());
     let correction_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("viewer color correction uniform"),
         size: std::mem::size_of::<GpuColorCorrectionStack>() as u64,
@@ -1308,7 +1454,7 @@ fn create_layer_texture(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(&premultiplied_view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -1324,11 +1470,29 @@ fn create_layer_texture(
             },
         ],
     });
+    let premultiply_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("viewer premultiply input bind group"),
+        layout: premultiply_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
     LayerTexture {
         _texture: texture,
         bind_group,
+        premultiply_bind_group,
+        premultiplied_view,
+        _premultiplied_texture: premultiplied_texture,
         correction_buffer,
         curve_buffer,
+        premultiply_needed: true,
     }
 }
 
@@ -1865,11 +2029,11 @@ mod tests {
         }
     }
 
-    fn readback_output(
+    fn readback_first_pixel(
         device: &wgpu::Device,
         buffer: &wgpu::Buffer,
         submission: wgpu::SubmissionIndex,
-    ) -> Result<(), String> {
+    ) -> Result<[u8; 4], String> {
         let (sent, received) = mpsc::channel();
         buffer
             .slice(..)
@@ -1887,12 +2051,26 @@ mod tests {
             .map_err(|error| format!("readback callback: {error}"))?
             .map_err(|error| format!("mapped output: {error}"))?;
         let pixels = buffer.slice(..).get_mapped_range();
-        let correct = (125..=130).contains(&pixels[0])
-            && (125..=130).contains(&pixels[1])
-            && (125..=130).contains(&pixels[2]);
+        let pixel = pixels
+            .get(..4)
+            .ok_or_else(|| "viewer GPU readback omitted its first pixel".to_owned())?
+            .try_into()
+            .expect("four-byte pixel");
         drop(pixels);
         buffer.unmap();
-        if correct {
+        Ok(pixel)
+    }
+
+    fn readback_output(
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        submission: wgpu::SubmissionIndex,
+    ) -> Result<(), String> {
+        let pixel = readback_first_pixel(device, buffer, submission)?;
+        if pixel[..3]
+            .iter()
+            .all(|channel| (125..=130).contains(channel))
+        {
             Ok(())
         } else {
             Err(
@@ -2094,6 +2272,47 @@ mod tests {
     #[test]
     fn viewer_shader_is_valid_current_wgsl() {
         naga::front::wgsl::parse_str(VIEWER_SHADER).expect("viewer WGSL");
+    }
+
+    #[test]
+    fn viewer_shader_premultiplies_in_the_current_encoded_srgb_space() {
+        assert!(VIEWER_SHADER.contains("fn fs_premultiply"));
+        assert!(VIEWER_SHADER.contains("straight.rgb * straight.a"));
+        assert!(VIEWER_SHADER.contains("sample.rgb / alpha"));
+        assert!(VIEWER_SHADER.contains("encoded * output_alpha"));
+        assert!(VIEWER_SHADER.contains("fn fs_blit_srgb"));
+        assert!(VIEWER_SHADER.contains("fn fs_blit_encoded"));
+        assert!(VIEWER_SHADER.contains("srgb_to_linear(sample.rgb)"));
+        assert!(VIEWER_SHADER.contains("input.color * input.opacity"));
+    }
+
+    #[test]
+    fn blit_transfer_matches_the_presentation_format() {
+        assert_eq!(
+            blit_fragment_entry_point(wgpu::TextureFormat::Rgba8UnormSrgb),
+            "fs_blit_srgb"
+        );
+        assert_eq!(
+            blit_fragment_entry_point(wgpu::TextureFormat::Bgra8UnormSrgb),
+            "fs_blit_srgb"
+        );
+        assert_eq!(
+            blit_fragment_entry_point(wgpu::TextureFormat::Rgba8Unorm),
+            "fs_blit_encoded"
+        );
+        assert_eq!(
+            blit_fragment_entry_point(wgpu::TextureFormat::Bgra8Unorm),
+            "fs_blit_encoded"
+        );
+    }
+
+    #[test]
+    fn compose_and_matte_use_premultiplied_source_over_blending() {
+        let blend = premultiplied_blend();
+        assert_eq!(blend.color.src_factor, wgpu::BlendFactor::One);
+        assert_eq!(blend.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(blend.alpha.src_factor, wgpu::BlendFactor::One);
+        assert_eq!(blend.alpha.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
     }
 
     #[test]
@@ -2579,6 +2798,289 @@ mod tests {
         assert_eq!(stack.count, 2);
         assert_eq!(stack.corrections[0].light, [-0.25, 2.5, 0.0, 0.0]);
         assert_eq!(stack.corrections[1].light, [0.1, 1.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU adapter; run with --ignored --nocapture"]
+    fn gpu_filters_premultiplied_edges_without_dark_halos() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("viewer GPU adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("premultiplied edge test device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("premultiplied edge test device");
+        let mut renderer =
+            ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 2, 1, &[255, 0, 0, 255, 0, 0, 0, 0])
+            .expect("straight-alpha edge upload");
+        let frame = ViewerFrame {
+            project_size: PixelSize::new(1, 1),
+            logical_canvas_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::ONE),
+            black_mattes_before: [0.0; MAX_COMPOSITE_LAYERS + 1],
+            white_mattes_before: [0.0; MAX_COMPOSITE_LAYERS + 1],
+            layers: [
+                Some(ViewerLayerPrimitive {
+                    quad: CompositeQuad {
+                        clip_id: ClipId(1),
+                        positions: [
+                            Point { x: 0.0, y: 0.0 },
+                            Point { x: 1.0, y: 0.0 },
+                            Point { x: 1.0, y: 1.0 },
+                            Point { x: 0.0, y: 1.0 },
+                        ],
+                        uvs: [
+                            Uv { u: 0.0, v: 0.0 },
+                            Uv { u: 1.0, v: 0.0 },
+                            Uv { u: 1.0, v: 1.0 },
+                            Uv { u: 0.0, v: 1.0 },
+                        ],
+                        opacity: 1.0,
+                    },
+                    content_uv: [
+                        Uv { u: 0.0, v: 0.0 },
+                        Uv { u: 1.0, v: 0.0 },
+                        Uv { u: 1.0, v: 1.0 },
+                        Uv { u: 0.0, v: 1.0 },
+                    ],
+                    color_corrections: [ViewerColorCorrection::default();
+                        MAX_COLOR_CORRECTIONS_PER_LAYER],
+                    color_correction_count: 0,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("premultiplied edge readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        assert!(renderer.prepare(
+            &device,
+            &queue,
+            &mut encoder,
+            Some(frame),
+            1,
+            PixelSize::new(1, 1),
+        ));
+        let output = &renderer.outputs.as_ref().expect("output after prepare")
+            [renderer.front_output]
+            ._texture;
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let pixel = readback_first_pixel(&device, &readback, queue.submit([encoder.finish()]))
+            .expect("premultiplied edge readback");
+        assert!(
+            (125..=130).contains(&pixel[0]) && pixel[1] <= 1 && pixel[2] <= 1 && pixel[3] == 255,
+            "filtered straight edge must contribute half-strength red over black, got {pixel:?}"
+        );
+
+        let display = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("encoded edge presentation target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let display_view = display.create_view(&Default::default());
+        let display_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("encoded edge presentation readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("encoded edge presentation pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &display_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&renderer.blit_pipeline);
+            pass.set_bind_group(
+                0,
+                &renderer.outputs.as_ref().expect("composed output")[renderer.front_output]
+                    .blit_bind_group,
+                &[],
+            );
+            pass.draw(0..VERTICES_PER_LAYER as u32, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &display,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &display_readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let displayed =
+            readback_first_pixel(&device, &display_readback, queue.submit([encoder.finish()]))
+                .expect("encoded edge presentation readback");
+        assert!(
+            (125..=130).contains(&displayed[0])
+                && displayed[1] <= 1
+                && displayed[2] <= 1
+                && displayed[3] == 255,
+            "sRGB presentation changed encoded compositor energy: {displayed:?}"
+        );
+
+        let mut unorm_renderer =
+            ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        unorm_renderer
+            .upload_layer_rgba(&device, &queue, 0, 2, 1, &[255, 0, 0, 255, 0, 0, 0, 0])
+            .expect("straight-alpha edge upload for non-sRGB fallback");
+        let unorm_display = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("encoded edge non-sRGB presentation target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let unorm_display_view = unorm_display.create_view(&Default::default());
+        let unorm_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("encoded edge non-sRGB presentation readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        assert!(unorm_renderer.prepare(
+            &device,
+            &queue,
+            &mut encoder,
+            Some(frame),
+            1,
+            PixelSize::new(1, 1),
+        ));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("encoded edge non-sRGB presentation pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &unorm_display_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&unorm_renderer.blit_pipeline);
+            pass.set_bind_group(
+                0,
+                &unorm_renderer.outputs.as_ref().expect("composed output")
+                    [unorm_renderer.front_output]
+                    .blit_bind_group,
+                &[],
+            );
+            pass.draw(0..VERTICES_PER_LAYER as u32, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &unorm_display,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &unorm_readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let unorm_displayed =
+            readback_first_pixel(&device, &unorm_readback, queue.submit([encoder.finish()]))
+                .expect("non-sRGB presentation readback");
+        assert!(
+            (125..=130).contains(&unorm_displayed[0])
+                && unorm_displayed[1] <= 1
+                && unorm_displayed[2] <= 1
+                && unorm_displayed[3] == 255,
+            "non-sRGB fallback changed encoded compositor energy: {unorm_displayed:?}"
+        );
     }
 
     #[test]

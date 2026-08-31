@@ -1357,7 +1357,7 @@ fn build_ffmpeg_job_with_title_assets(
             let (center_x, center_y) = quad_center(video.quad);
             let (overlay_x, overlay_y) = transition_overlay_position(video, center_x, center_y);
             filters.push(format!(
-                "[{current_video}][{layer}]overlay=x='{overlay_x}':y='{overlay_y}':eval=frame:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
+                "[{current_video}][{layer}]overlay=x='{overlay_x}':y='{overlay_y}':eval=frame:alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
                 tick_seconds(video.timeline_start),
                 tick_seconds(video.timeline_end)
             ));
@@ -1367,7 +1367,7 @@ fn build_ffmpeg_job_with_title_assets(
                 filters.push(dip_matte_filter(width, height, &fps, matte, &layer));
                 let next = format!("vbase{}dip", video_number + 1);
                 filters.push(format!(
-                    "[{current_video}][{layer}]overlay=eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
+                    "[{current_video}][{layer}]overlay=alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
                     tick_seconds(matte.start),
                     tick_seconds(matte.end),
                 ));
@@ -1384,7 +1384,7 @@ fn build_ffmpeg_job_with_title_assets(
         let center_y = height as f32 * title.title.position_y;
         let end = title_end(&title.title)?;
         filters.push(format!(
-            "[{current_video}][{layer}]overlay=x='{center_x:.3}-overlay_w/2':y='{center_y:.3}-overlay_h/2':eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
+            "[{current_video}][{layer}]overlay=x='{center_x:.3}-overlay_w/2':y='{center_y:.3}-overlay_h/2':alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
             tick_seconds(title.title.start),
             tick_seconds(end),
         ));
@@ -1560,8 +1560,12 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: &str, label: &str) -> 
             tick_seconds(video.input_duration)
         )
     };
+    // Source assets remain straight RGBA at the public boundary. Premultiply before every
+    // resampling operation so transparent texels cannot darken filtered edges, return to straight
+    // alpha for the existing pointwise color stack. Rotation gets the same guarded round trip;
+    // FFmpeg's overlay consumes the final straight-alpha layer.
     format!(
-        "[{input}:v]{input_timing},crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},format=rgba{color},colorchannelmixer=aa={:.6}{fades}{transition},rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),setpts=PTS+{}/TB[{label}]",
+        "[{input}:v]{input_timing},format=rgba,premultiply=inplace=1,crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},unpremultiply=inplace=1{color},colorchannelmixer=aa={:.6}{fades}{transition},premultiply=inplace=1,rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),unpremultiply=inplace=1,setpts=PTS+{}/TB[{label}]",
         video.source_size.width as f32 * transform.crop_left,
         video.source_size.height as f32 * transform.crop_top,
         if transform.flip_h { ",hflip" } else { "" },
@@ -2681,7 +2685,11 @@ mod tests {
         let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
         assert!(graph.contains("crop=w=448.000"));
         assert!(graph.contains(",hflip"));
+        assert!(graph.contains("format=rgba,premultiply=inplace=1,crop="));
+        assert!(graph.contains(",hflip,unpremultiply=inplace=1"));
         assert!(graph.contains("colorchannelmixer=aa=0.500000"));
+        assert!(graph.contains(",premultiply=inplace=1,rotate=1.570796"));
+        assert!(graph.contains("alpha=straight:eof_action=pass"));
         assert!(graph.contains("rotate=1.570796"));
         assert!(graph.contains("geq=r='r(X\\,Y)'"));
         assert!(graph.contains("pow("));
@@ -3025,7 +3033,7 @@ mod tests {
         let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
         assert!(
             graph.contains(
-                "rotate=0.000000000:c=none:ow=rotw(0.000000000):oh=roth(0.000000000),setpts=PTS+3.000000/TB"
+                "rotate=0.000000000:c=none:ow=rotw(0.000000000):oh=roth(0.000000000),unpremultiply=inplace=1,setpts=PTS+3.000000/TB"
             )
         );
         assert!(graph.contains("between(t,3.000000,18.000000)"));
@@ -3127,7 +3135,7 @@ mod tests {
         );
         assert!(
             graph.contains(
-                "select='eq(n\\,0)',loop=loop=-1:size=1:start=0,fps=30/1,trim=duration=1.500000,crop="
+                "select='eq(n\\,0)',loop=loop=-1:size=1:start=0,fps=30/1,trim=duration=1.500000,format=rgba,premultiply=inplace=1,crop="
             ),
             "{graph}"
         );
@@ -3215,7 +3223,7 @@ mod tests {
         );
         assert!(
             graph.contains(
-                "fps=30/1:round=up,trim=start=0:duration=2.500000,setpts=PTS-STARTPTS,crop="
+                "fps=30/1:round=up,trim=start=0:duration=2.500000,setpts=PTS-STARTPTS,format=rgba,premultiply=inplace=1,crop="
             ),
             "{graph}"
         );
@@ -4074,6 +4082,12 @@ mod tests {
         assert!(graph.contains("trim=duration=1.000000"), "{graph}");
         assert!(graph.contains("setpts=PTS+2.000000/TB[title0]"), "{graph}");
         assert!(
+            graph.contains(
+                "[vbase0][title0]overlay=x='480.000-overlay_w/2':y='810.000-overlay_h/2':alpha=straight:"
+            ),
+            "{graph}"
+        );
+        assert!(
             graph.contains("min(0.800000\\,if(lt(T\\,0.250000)\\,T/0.250000\\,1))"),
             "{graph}"
         );
@@ -4660,6 +4674,172 @@ mod tests {
 
         let _ = fs::remove_file(&still);
         let _ = fs::remove_file(&output);
+    }
+
+    #[test]
+    fn real_ffmpeg_premultiplied_filtering_preserves_transparent_edge_energy() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
+        let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let ffmpeg = root.join("bin").join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        if !ffmpeg.exists() {
+            return;
+        }
+        let graph = concat!(
+            "color=c=black:s=64x64:r=1[base];",
+            "color=c=black@0:s=16x16:r=1,format=rgba,",
+            "geq=r='if(lt(X,8),255,0)':g=0:b=0:a='if(lt(X,8),255,0)',",
+            "premultiply=inplace=1,scale=64:64,unpremultiply=inplace=1[layer];",
+            "[base][layer]overlay=alpha=straight,format=rgb24[out]"
+        );
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "nullsrc=s=64x64:r=1",
+                "-filter_complex",
+                graph,
+                "-map",
+                "[out]",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ])
+            .output()
+            .expect("run premultiplied FFmpeg edge contract");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), 64 * 64 * 3);
+        let red = |x: usize| output.stdout[(32 * 64 + x) * 3];
+        assert!(
+            red(31) >= 160 && red(32) >= 30 && red(35) <= 2,
+            "premultiplied edge lost filtered color energy: x31={}, x32={}, x35={}",
+            red(31),
+            red(32),
+            red(35)
+        );
+    }
+
+    #[test]
+    fn generated_still_graph_preserves_transparent_edge_energy() {
+        let _ffmpeg_guard = real_ffmpeg_test_guard();
+        let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let ffmpeg = root.join("bin").join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        if !ffmpeg.exists() {
+            return;
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir();
+        // The approved developer bundle intentionally omits the PNG decoder; BMP preserves this
+        // RGBA fixture and is supported by both the media classifier and pinned FFmpeg runtime.
+        let still = temp.join(format!("maelstrom-alpha-edge-{nonce}.bmp"));
+        let filter = temp.join(format!("maelstrom-alpha-edge-{nonce}.filter"));
+        let output = temp.join(format!("maelstrom-alpha-edge-{nonce}.mp4"));
+        let image = image::RgbaImage::from_fn(16, 16, |x, _| {
+            if x < 8 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        image.save(&still).expect("write alpha-edge still");
+
+        let mut editor = EditorState::new(Language::English, "Alpha edge export");
+        editor.add_media_paths([still.clone()]);
+        let track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        editor
+            .timeline
+            .insert_clip(track, MediaId(1), Tick(0), Tick(1_000_000), Tick(0))
+            .unwrap();
+        let request = ExportRequest {
+            snapshot: editor.snapshot(),
+            settings: ProjectSettings {
+                fps: [24, 1],
+                size: [64, 64],
+            },
+            output: output.clone(),
+            ffmpeg: ffmpeg.clone(),
+            encoders: vec![H264Encoder::OpenH264],
+        };
+        let plan = ExportPlan::from_request(&request).expect("plan alpha-edge still");
+        let (mut args, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        let encoder = args.iter().position(|arg| arg == "-c:v").unwrap();
+        args[encoder + 1] = "mpeg4".to_owned();
+        fs::write(&filter, &graph).unwrap();
+        let cancel = AtomicBool::new(false);
+        let (events, _) = mpsc::channel();
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let render = run_child(
+            &ffmpeg,
+            &args,
+            &filter,
+            plan.duration,
+            &cancel,
+            &events,
+            &notify,
+        );
+        let sample = Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-ss", "0.5", "-i"])
+            .arg(&output)
+            .args([
+                "-vf",
+                "format=rgb24,crop=2:1:31:32",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ])
+            .output()
+            .expect("sample generated alpha-edge export");
+        for path in [&filter, &still, &output] {
+            let _ = fs::remove_file(path);
+        }
+        assert!(render.is_ok(), "{render:?}\n{graph}");
+        assert!(
+            sample.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sample.stderr)
+        );
+        assert_eq!(sample.stdout.len(), 6);
+        assert!(
+            sample.stdout[0] >= 150 && sample.stdout[3] >= 30,
+            "generated alpha edge lost filtered energy: {:?}\n{graph}",
+            sample.stdout
+        );
     }
 
     #[test]
