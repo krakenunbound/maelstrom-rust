@@ -14,10 +14,20 @@ Last updated: 2026-08-31
   replies and errors. Five new regression tests, 770 release tests, strict Clippy,
   ten repeated prewarm checks, and independent review pass.
   Evidence: `docs/silent-monitor-prewarm.md`.
-- [ ] Rerun the restricted-CPU resource gate after the silent-prewarm fix. The preserved
-  four-CPU baseline failed: 289 stale/non-converging events exceeded its 69 allowance;
-  a separate short trace identified 17 late copies of already displayed top-layer frames.
-  Do not relabel the failed run as passing. Package remains the previous CPU-guard build.
+- [x] Rerun restricted-CPU resource gates after silent prewarming: both ten-minute
+  Full-1080p runs pass (4 CPUs: 72,528 requests, 924 us submit p95; 8 CPUs: 86,620,
+  98 us), with zero drops/errors and zero sessions after App drop. A 30-second
+  four-CPU run still fails at 1,042 us; retain that variability evidence.
+- [x] Repair the native-audio harness's full-duration video workload. All four
+  timeline clips now cover measurement plus warmup, with exact four-source/Full
+  assertions before every timed submission. Two new regressions, 772 release
+  tests, strict Clippy, and formatting pass. Production code/limits are unchanged.
+- [ ] Requalify restricted-CPU native audio with the corrected full-duration workload.
+  The 30-second four-CPU attempt failed at 11,418 us and insufficient presentations;
+  video fixture clips ended after five seconds while audio continued. Audio had no
+  underruns/clock loss, but this is not a passing four-video/audio gate. Eight-CPU
+  audio remains unrun. Historical reports do not prove four-video load after five
+  seconds including warmup. Package remains the previous CPU-guard build.
 - [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
   initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,
   strict Clippy, 304 hardware pixel/timestamp cases, and independent review pass.
@@ -26,7 +36,8 @@ Last updated: 2026-08-31
   `03E01F2EB32BFA3B`. GUI smoke remains `not_run`; previous executable/status archived.
   Evidence and limits: `docs/cpu-budget-conversion.md`.
 - [ ] Qualify restricted-CPU sustained/audio behavior after the CPU-count correction.
-  Keep Full resolution and existing filters; logical-CPU affinity is not a substitute
+  Sustained local runs now pass after silent prewarming; audio and timing variability
+  remain open. Keep Full resolution and filters; logical-CPU affinity is not a substitute
   for actual lower-core hardware or windowed playback qualification.
 - [x] Pack full-resolution monitor RGBA directly into its final shared allocation, preserving
   exact pixels/alpha/letterboxing and cache ownership. Native 1080p packing p50 falls locally

@@ -381,7 +381,15 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       errors. Five regressions, 770 release tests, strict Clippy, repeated focused tests,
       and independent review pass. The preceding four-CPU ten-minute run failed its
       stale/non-converging-event allowance (289 versus 69); its evidence is preserved.
-      Restricted-CPU reruns and packaged/windowed qualification remain pending.
+      Subsequent clean-source ten-minute runs pass at four/eight allowed CPUs:
+      72,528/86,620 Full-1080p requests with exactly matching presentations, zero
+      drops/errors, and submit p95 924/98 us. The separate four-CPU 30-second run
+      fails at 1,042 us. Native-audio qualification exposed a five-second video
+      clip-coverage defect in its longer-duration harness. A test-only correction
+      extends all four clips through measurement plus warmup and asserts exact sources
+      and Full resolution before every measured submission. Two new regressions and
+      772 release tests/Clippy/formatting pass; corrected native-audio requalification
+      and packaged/windowed/cross-machine proof remain pending.
       See `docs/silent-monitor-prewarm.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
@@ -484,6 +492,11 @@ Exit gate:
       after release; it completed 373 monitor presentations with 1,688 us clock drift, a 22 ms maximum
       progress interval, zero monitor/audio faults, and zero post-drop sessions. The deterministic
       barrier is compiled only by the test-only `nle-decode/test-hooks` feature.
+      Coverage caveat discovered 2026-08-31: historical audio fixtures had only five
+      seconds of video timeline coverage, including warmup. Their audio counters and
+      early barrier observations remain evidence, but they do not prove sustained
+      four-video load after that boundary. The test now extends video coverage and
+      asserts all four sources per submission; corrected qualification is pending.
       The exit remains open for realtime UI-present and cross-hardware proof; see
       `docs/phase1-sustained-soak.md` and `docs/phase1-live-audio.md`.
 - [x] A deliberately slow source cannot delay a ready source or the playback clock. The bounded

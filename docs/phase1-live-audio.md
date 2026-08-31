@@ -1,5 +1,23 @@
 # Phase 1 live-audio continuity gate
 
+## Coverage correction (2026-08-31)
+
+Historical runs used five-second video timeline clips even when the audio test
+ran longer. After the audio-driven playhead left those clips, submissions could
+contain no video sources. Those reports retain their observed audio counters and
+early slow-source isolation evidence, but do **not** prove continuous four-video
+load beyond five seconds (including transport warmup). Requalification is pending.
+
+The corrected test extends all four video clips through the requested duration
+plus ten seconds of warmup allowance, while wrapping decoder timestamps inside
+the original five-second media. Every measured submission now asserts four exact
+source/layer identities and Full resolution. Two ordinary regressions cover the
+long timeline and unchanged default five-second fixture. The release workspace
+passes 772 tests (24 opt-in tests ignored), strict Clippy, and formatting. This
+test-only correction changes no product code or performance threshold.
+
+## Running the gate
+
 `scripts/Run-Phase1LiveAudio.ps1` is an opt-in native runtime gate. It uses
 the four established Full-1080p video-only sources and creates a deterministic
 60-second, stereo AAC tone at `artifacts/phase1-multisource/live-audio-60s.m4a`.

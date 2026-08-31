@@ -70,11 +70,66 @@ zero. The playback implementation and performance gate are unchanged by this
 test-only correction. The failed run is retained in
 `artifacts/phase1-sustained/silent-prewarm-workspace-verified.log`.
 
-Restricted-CPU reruns remain pending. Do not treat the production fix as sustained,
-native-audio, windowed, or cross-machine qualification until the corresponding
-results are recorded here. The local `run-silent-prewarm-soak.ps1` adapter preserves
+The local `run-silent-prewarm-soak.ps1` adapter preserves
 the committed gate's assertions and fixtures, requires an exact clean source
 commit before/after, and samples affinity from the actual Cargo test process.
+
+### Restricted-CPU measurements
+
+All runs below used clean source `b28cb4ebb1a98367fb9a287018c4c5e86ec12d51`,
+the same four Full-1080p fixtures and unchanged 1,000-us submission limit.
+
+| Allowed CPUs / duration | Result | Cycles / requests | Submit p95 | Frame-ready p95 | Drops / errors |
+|---|---|---|---|---|---|
+| 4 / 30.029 s | **Failed** | 687 / 2,748 | 1,042 us | 61 ms | 0 / 0 |
+| 4 / 600.053 s | Passed | 18,132 / 72,528 | 924 us | 50 ms | 0 / 0 |
+| 8 / 600.028 s | Passed | 21,655 / 86,620 | 98 us | 41 ms | 0 / 0 |
+
+Requested, completed, presented, and uploaded frame counts match exactly in all
+three runs. The long runs retain five sessions below the eight-session cap,
+bounded cache and working-set growth, and zero sessions after App drop. Actual
+affinity was observed 532 times at mask `F` and 545 times at `FF`; scaler probes
+confirmed one and two scaling threads respectively. Independent review and the
+v2 arithmetic/provenance audits pass, including all four source-file identities.
+The short run's failure remains evidence of four-CPU timing variability; the
+long-run pass does not erase it or prove reliable windowed/cross-machine latency.
+
+The two long-run verification manifests under `artifacts/phase1-sustained/` are
+`silent-prewarm-{4,8}-600s-1-verification-v2.json`. The corresponding 30-second
+failure has its own report and verification file. The shared test executable
+SHA-256 is `5899ABC2BF08DE40952776955F8DD9E25F60B462CB0F19F8114763FC21E687C5`,
+archived in `silent-prewarm-b28-test-binary.zip` before changing the test harness.
+These are post-run local snapshots, not signed attestations.
+
+### Native-audio test follow-up
+
+The subsequent four-CPU 30-second audio attempt **failed**, and the queued
+eight-CPU audio test was not run. Audio itself had zero underruns, callback-lock
+failures, or late discards; clock drift was 2,080 us and maximum observed clock
+stall was 37 ms. The delayed video source recovered after 751 ms, while other
+sources presented 45 frames and the audio clock advanced 750,000 ticks.
+
+Video submission p95 was 11,418 us, and per-source presentations
+`[97, 97, 97, 82]` were below the 120 minimum. Investigation found a harness defect:
+the video fixture clips end at five seconds while the audio timeline lasts forty
+seconds. Once the advancing playhead leaves those clips, preview requests contain
+no video sources; changing the request's source timestamps does not recreate
+them. Only 388 of the possible four-layer requests were sent across 586 timed
+submission calls. Thus this is neither a passing audio/video gate nor evidence
+of a full-duration four-video workload. Its measured latency failure remains real.
+
+The report, stdout/stderr, and 28 live mask-`F` observations are retained under
+`artifacts/phase1-multisource/silent-prewarm-4-live-audio*`, including the failure
+verification manifest. Its audit recomputes the raw samples and verifies the
+archived executable, pinned fixtures/runtime, and observed test-process affinity.
+The test-only correction now extends video timeline coverage through measurement
+plus warmup and asserts four exact sources on every timed submission. It preserves
+all current thresholds, Full resolution, the continuous audio clock, and bounded
+source timestamp wrapping. Two new regression tests and all 772 release workspace
+tests pass (24 opt-in tests ignored), together with strict Clippy and formatting.
+Corrected restricted-CPU native-audio runs remain pending; the earlier failed run
+is not replaced by the unit-test result. See `docs/phase1-live-audio.md` for the
+coverage limitation on historical audio reports.
 
 The existing package remains unchanged at executable SHA-256
 `03E01F2EB32BFA3B301C161C638829257C2DDD1B0A78C604E070F25D365D6DFA`.

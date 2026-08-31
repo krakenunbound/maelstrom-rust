@@ -14085,7 +14085,11 @@ mod tests {
             .saturating_mul(1_000_000)
             .min(i64::MAX as u64) as i64;
 
-        let mut app = phase1_multisource_app(&sources, MONITOR_LAYER_COUNT);
+        let mut app = phase1_multisource_app_with_duration(
+            &sources,
+            MONITOR_LAYER_COUNT,
+            clip_duration_ticks,
+        );
         app.editor.add_media_paths([audio_source.path.clone()]);
         let audio_media_id = app
             .editor
@@ -14239,8 +14243,7 @@ mod tests {
                     for source in request.sources.iter_mut().flatten() {
                         source.source_tick = video_tick;
                     }
-                    assert_eq!(request.selected_quality, PreviewQuality::Full);
-                    assert_eq!(request.resolved_quality, PreviewQuality::Full);
+                    assert_phase1_live_audio_preview(&request, video_tick);
                     if slow_barrier.is_none() {
                         slow_request_id = app.monitor_next_request_id;
                         slow_barrier = Some(nle_decode::install_test_decode_barrier(
@@ -15286,7 +15289,16 @@ mod tests {
     }
 
     fn phase1_multisource_app(sources: &[Phase1MultisourceSource], source_count: usize) -> App {
+        phase1_multisource_app_with_duration(sources, source_count, 5_000_000)
+    }
+
+    fn phase1_multisource_app_with_duration(
+        sources: &[Phase1MultisourceSource],
+        source_count: usize,
+        duration_ticks: i64,
+    ) -> App {
         assert!((1..=MONITOR_LAYER_COUNT).contains(&source_count));
+        assert!(duration_ticks > 0);
         let mut app = App::new_with_catalog(false, None);
         app.editor.add_media_paths(
             sources
@@ -15316,12 +15328,78 @@ mod tests {
                     track,
                     nle_timeline::MediaId(media_id),
                     nle_timeline::Tick(0),
-                    nle_timeline::Tick(5_000_000),
+                    nle_timeline::Tick(duration_ticks),
                     nle_timeline::Tick(0),
                 )
                 .expect("insert Phase 1 multisource fixture clip");
         }
         app
+    }
+
+    fn assert_phase1_live_audio_preview(request: &PreviewRequest, video_tick: i64) {
+        assert_eq!(request.selected_quality, PreviewQuality::Full);
+        assert_eq!(request.resolved_quality, PreviewQuality::Full);
+        for (layer, source) in request.sources.iter().enumerate() {
+            let source = source.expect("live-audio preview must retain every video source");
+            assert_eq!(source.layer, layer);
+            assert_eq!(source.priority, layer as u8 + 1);
+            assert_eq!(source.media_id, layer as u32 + 1);
+            assert_eq!(source.source_tick, video_tick);
+        }
+    }
+
+    fn phase1_multisource_test_sources() -> [Phase1MultisourceSource; MONITOR_LAYER_COUNT] {
+        std::array::from_fn(|layer| Phase1MultisourceSource {
+            path: PathBuf::from(format!("phase1-multisource-test-{layer}.mp4")),
+            size_bytes: 1,
+        })
+    }
+
+    #[test]
+    fn phase1_multisource_duration_retains_four_video_targets_for_live_audio() {
+        const LIVE_AUDIO_FIXTURE_DURATION_TICKS: i64 = 40_000_000;
+        let sources = phase1_multisource_test_sources();
+        let mut app = phase1_multisource_app_with_duration(
+            &sources,
+            MONITOR_LAYER_COUNT,
+            LIVE_AUDIO_FIXTURE_DURATION_TICKS,
+        );
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+
+        for tick in [5_000_000, 30_000_000, 39_999_999] {
+            app.editor.set_playhead(nle_timeline::Tick(tick));
+            assert_phase1_live_audio_preview(&preview_request(&app.editor), tick);
+        }
+    }
+
+    #[test]
+    fn phase1_multisource_default_duration_remains_five_seconds() {
+        let sources = phase1_multisource_test_sources();
+        let mut app = phase1_multisource_app(&sources, MONITOR_LAYER_COUNT);
+        app.editor.set_preview_quality(PreviewQuality::Full);
+        app.editor.set_paused_preview_quality(PreviewQuality::Full);
+
+        app.editor.set_playhead(nle_timeline::Tick(4_999_999));
+        assert_phase1_live_audio_preview(&preview_request(&app.editor), 4_999_999);
+        app.editor.set_playhead(nle_timeline::Tick(5_000_000));
+        let end_preview = preview_request(&app.editor);
+        assert_eq!(end_preview.selected_quality, PreviewQuality::Full);
+        assert_eq!(end_preview.resolved_quality, PreviewQuality::Full);
+        for (layer, source) in end_preview.sources.iter().enumerate() {
+            let source = source.expect("five-second fixture must include its end tick");
+            assert_eq!(source.layer, layer);
+            assert_eq!(source.media_id, layer as u32 + 1);
+        }
+        assert!(
+            app.editor
+                .timeline
+                .tracks
+                .iter()
+                .filter(|track| track.kind == nle_timeline::TrackKind::Video)
+                .flat_map(|track| &track.clips)
+                .all(|clip| clip.duration == nle_timeline::Tick(5_000_000))
+        );
     }
 
     fn phase1_latency_trial(
