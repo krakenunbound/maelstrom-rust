@@ -103,10 +103,13 @@ Prior four-source ready p95 was 63 ms: **these results do not demonstrate an
 end-to-end scrub-latency improvement** despite the lower isolated packing cost.
 Five-millisecond polling and host variation limit these comparisons.
 
-The ten-minute resource soak at the prior threaded-scaler checkpoint does not
-qualify this changed source. Rerun that gate next. Windowed playback, lower-core
-contention, physical input/scanout, native audio under this workload, and broader
-hardware qualification remain open. GUI launch permission is still pending.
+The prior threaded-scaler soak did not qualify this changed source. A subsequent
+run at `e0f35d155c42af307581d216e6798127e4e8d43c` now passes the local ten-minute
+cache/session resource gate: 600.034 seconds, 21,072 four-source cycles, zero
+errors, bounded memory/sessions, and zero post-drop sessions. See
+`phase1-sustained-soak.md` for raw evidence and limitations. Windowed playback,
+lower-core contention, physical input/scanout, native audio under this workload,
+and broader hardware qualification remain open. GUI launch permission is pending.
 
 ## Evidence and local package
 

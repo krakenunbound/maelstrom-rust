@@ -269,3 +269,80 @@ were prepared without launch in
 `artifacts/phase1-multisource/windowed-6ab6b596-521d-43b1-8b7a-66a61d90f641/`.
 Their configuration/package hashes verify, with status `prepared` and no GUI reports.
 Windowed execution still requires explicit authorization through the exact batch launcher.
+
+## Direct RGBA packing resource qualification (2026-08-31)
+
+The unchanged production source at `e0f35d155c42af307581d216e6798127e4e8d43c`
+passed a 600.0337152-second headless run after single-allocation RGBA packing.
+It completed 21,072 forward/backward cycles across all four Full-1920x1080
+sources, totaling 84,288 requests. The exact eight mid-GOP tick positions and
+high-quality conversion remained unchanged. Scheduler p50/p95/max was
+44/79/396 us; coarse matching-frame timing was 30/41/58 ms. Both distributions
+were recomputed from their 21,072 raw samples. Maximum decoded-tick deviation
+was 17,667 us, below the unchanged 33,334 us bound.
+
+The frame cache peaked at 215,654,400 bytes and retained 207,360,000 bytes at
+the final sample, below the 1,073,741,824-byte cap. Sessions peaked at five of
+eight and fell to zero after App drop. Final coordinator state was four source
+groups, five live actors (four foreground and one background), and no retiring
+actors. This is not a post-drop actor or actor high-water claim.
+
+All 88,064 completed frames were logically presented through the fallback viewer.
+There were zero monitor errors and three rejected stale events within the
+85-event allowance. Hold/late counters were 10,611/10,614, within the unchanged
+request-count limits. These counters do not prove lossless visible playback.
+The observed decoder backend was Software; no editor window, native GPU viewer,
+or audio device participated. Zero audio counters are therefore not an audio test.
+
+The wrapper retained 522 working-set samples through 600.200 seconds. Its first
+sample after five seconds was at 5.934 seconds: 350,576,640 bytes. Peak working
+set was 385,839,104 bytes, giving 35,262,464 bytes of growth under the
+1,610,612,736-byte cache-plus-headroom diagnostic allowance. This is sampled
+test-process memory, not an application RAM hard cap or leak-free certification.
+
+The run-specific `run-rgba-packing-soak.ps1` adapter checks all 36 packing
+checkpoint identities and re-probes the four existing five-second MPEG-4 fixtures.
+It preserves the committed runner's assertions, duration, timeout, process
+ownership, memory sampling, and cleanup. Exact single-match substitutions supply
+fixed root paths, skip fixture regeneration, and use distinct output filenames.
+No historical report or fixture was overwritten; all 36 identities were checked
+again after completion. No acceptance rule was relaxed.
+
+The adapter is local evidence routing, not a concurrency-safe standalone release
+runner: its hash/non-overwrite preflight precedes the committed runner's fixture
+mutex. This run was observed in isolation with clean tracked source at the stated
+commit before launch. The runner's in-lock fixture provenance matches the prior
+manifest; the source, test binary, runner, and adapter hashes were checked during
+the run and after completion. Before reusing this adapter concurrently, move its
+preflight under the same lock. The baseline commit in the earlier packing manifest
+describes the pre-change baseline, not the source being qualified by this run.
+
+The separate `verify-rgba-packing-soak.ps1` audit recomputes raw timing and memory
+summaries, checks continuous four-source exercise, exact tick/counter/resource
+contracts, reconciles fixture/report/test hashes, and confirms tracked process
+exit. Independent review also checks the local qualification evidence. All four
+observed Cargo/runtime/test PIDs exited; no task-owned compiler, test harness,
+editor, FFmpeg, or FFprobe remained. No product code changed during qualification.
+
+Ignored evidence under `artifacts/phase1-sustained/`:
+
+- `rgba-packing-wrapper.json`: SHA-256
+  `BDDC6E3D10A0AF3AB0CC8453C522A68C4D16D628ED9839865345E2FB46E75877`
+- `rgba-packing-app-report.json`: SHA-256
+  `7201F3020172B36B8660835BD80CFEE2AC8DEBAC909F6921CA051C4BE0312267`
+- `rgba-packing-test.stdout.txt`, `rgba-packing-test.stderr.txt`,
+  `rgba-packing-parent-audit.log`,
+  `run-rgba-packing-soak.ps1`, `verify-rgba-packing-soak.ps1`, and
+  `rgba-packing-verification.json` (post-run provenance snapshot, not an execution
+  attestation).
+
+Exact release test executable SHA-256:
+`C979487D887AC730A9C951D71953DD724AF9D93D4ADB7938168E45D55691DC20`.
+All 24 post-run snapshot entries were rehashed successfully. Verification-manifest
+SHA-256: `768527FE2FB3D5366AAEF5E6F0BA0C5AD32A932F3CEFEC65B781B8DE977058AB`.
+The editor package is unchanged at SHA-256
+`4715E17526744CC803748660E8BD978FA8C2917E682435E88E15146A3006F49A`;
+GUI smoke remains `not_run`. This qualifies local ten-minute cache/session
+resources, not real-time display, physical input/scanout, native audio, lower-core
+contention, or cross-hardware performance. Windowed testing still needs explicit
+launch authorization and refreshed prepared-case identities for this package.

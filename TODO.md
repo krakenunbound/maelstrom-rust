@@ -18,8 +18,13 @@ Last updated: 2026-08-31
   demonstrate end-to-end scrub improvement. Rebuilt package hash starts `4715E17526744CC8`;
   runtime/hash checks pass, GUI smoke remains `not_run`, no editor launch.
   Evidence: `docs/monitor-rgba-packing.md`.
-- [ ] Requalify ten-minute cache/session resources after single-allocation RGBA packing.
-  Prior sustained results below belong to earlier source and do not qualify this checkpoint.
+- [x] Requalify ten-minute cache/session resources after single-allocation RGBA packing at
+  source `e0f35d155c42af307581d216e6798127e4e8d43c`. 600.034 seconds, 21,072 four-source
+  Full-1080p cycles / 84,288 requests, zero errors, 79 us scheduler p95, and 41 ms coarse
+  matching-frame p95. Cache peak 215,654,400 bytes below 1 GiB; five peak sessions below eight
+  and zero after App drop. Working-set growth 35,262,464 bytes below the diagnostic bound.
+  Three rejected stale events are within the unchanged 85-event allowance. Package unchanged;
+  no GUI launched. Evidence: `docs/phase1-sustained-soak.md`.
 - [x] Requalify local ten-minute cache/session resources after accurate threaded conversion
   at source commit `b3e9228939f4b3edf2c2d98a74cf1be0d5338ba5`. 600.047 seconds,
   20,184 four-source Full-1080p cycles, 80,736 requests, 77 us scheduler p95,

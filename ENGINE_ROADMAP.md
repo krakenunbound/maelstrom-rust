@@ -374,7 +374,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       strict Clippy, and independent review pass. The stage counter now includes final shared
       allocation; historical counters omitted that cost. Three four-source Full-1080p latency
       runs pass at 63-67 ms frame-ready p95, without demonstrated end-to-end scrub improvement.
-      Sustained/windowed/lower-core qualification of this changed source remains pending.
+      Subsequent local resource qualification passes 600.034 seconds / 21,072 four-source
+      cycles, with bounded cache/session use, zero errors, and zero post-drop sessions.
+      This is not visible real-time playback proof; windowed/lower-core qualification remains
+      pending. See `docs/phase1-sustained-soak.md` for the resource evidence and limits.
       See `docs/monitor-rgba-packing.md`.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
