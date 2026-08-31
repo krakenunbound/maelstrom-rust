@@ -303,7 +303,9 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       never automatically enabled. Epoch/path/user-action guards reject stale discoveries; saved
       projects and audio/export keep original paths. Six new regressions include real generated
       proxy save/reopen/explicit-opt-in; 783 release tests, strict Clippy, fixture contracts and
-      updated Phase 0 scenarios pass. Unused Media Pool items retain deferred analysis. This still
+      updated Phase 0 scenarios pass. The rebuilt package contains this behavior (SHA-256 starts
+      `CDFC00DB47444A5B`); static/runtime checks pass, but GUI qualification remains pending.
+      Unused Media Pool items retain deferred analysis. This still
       supports one generation job and one 720p profile; portable/external attachment, persistent
       enable choices, generation queues and multiple profiles remain later product work.
       See `docs/proxy-media.md`.

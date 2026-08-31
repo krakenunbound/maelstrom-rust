@@ -15,8 +15,10 @@ Last updated: 2026-08-31
   Six new regressions include real proxy generation/save/reopen. 783 release tests,
   strict Clippy, formatting, seven fixture contracts and updated Phase 0 scenarios pass.
   Parent-reviewed; independent review unavailable. See `docs/proxy-media.md`.
-- [ ] Update the portable package with cached-proxy rediscovery; preserve its previous
-  contents and keep GUI qualification separate from build/runtime checks.
+- [x] Update the portable package with cached-proxy rediscovery from `fb5c94d`.
+  Executable SHA-256 starts `CDFC00DB47444A5B`; previous 23-file package archived and
+  hash-verified. Runtime/static-import checks and launcher check-only mode pass.
+  No editor launch; GUI qualification remains open (`smoke_status: not_run`).
 - [x] Preserve exact rational export clocks for video, stills, titles, background
   and transition mattes. Both new regressions fail on rounded decimal clocks and
   pass on original fractions; seven live clock cases, 777 release tests, strict

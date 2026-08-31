@@ -73,3 +73,19 @@ report is `artifacts/phase0-scenarios/cached-proxy-scenarios.json`. Initial test
 passing evidence. No production dependency, schema, codec profile, resolution default, or model
 changed. Cache lookup checks identity/metadata, not full-file decode validity; the established
 enable/decode fallback remains necessary for files externally corrupted after generation.
+
+## Portable package checkpoint
+
+Built from clean commit `fb5c94d589edeed5aeaa99845c535b5531776a2d` without opening the editor.
+The executable SHA-256 is `CDFC00DB47444A5BF0F68D1F6A824D4B20F374EED747F5C034059AF0A53DDCCC`,
+matching the release build and package-status record. All 23 files are inventoried; only the
+executable/status differ from the previous package. Thirteen pinned runtime hashes, the authorized
+VC runtime copy, fifteen AMD64/static-import inventories, FFmpeg/FFprobe version calls, and the
+exact launcher's `--verify-runtime` branch pass. Models, libraries and license notices are unchanged.
+
+The previous complete package is recoverable from
+`artifacts/phase1-multisource/package-cached-proxy-fb5c94d/previous-package.zip`
+(SHA-256 `FC49684B3474D7BB98E4CB27BB887BC3B142E9324D0013B566543887347D51DF`).
+The adjacent `verification.json` records file/import hashes and the check scope. No binaries or
+private models were pushed. `smoke_status` stays `not_run`: local static checks do not establish
+GUI behavior, dynamic GPU-library loading, clean-host compatibility, or windowed performance.
