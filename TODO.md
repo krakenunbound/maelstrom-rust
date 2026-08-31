@@ -15,8 +15,14 @@ Last updated: 2026-08-31
   worker-policy regressions fail before/pass after; 773 release tests and strict
   Clippy/formatting pass. Parent-reviewed; independent agent unavailable.
   Evidence: `docs/monitor-worker-scheduling.md`.
-- [ ] Qualify the production worker policy with uninstrumented four/eight-CPU
-  Full-resolution audio and sustained resource gates before package delivery.
+- [x] Qualify production worker policy with uninstrumented four/eight-CPU Full
+  audio runs: 30 seconds each, submit p95 55/51 us, zero audio/monitor faults.
+  Four-CPU ten-minute resources pass: 56,464 matching frame requests/presentations,
+  74 us submit p95, bounded cache/sessions, and zero post-drop sessions.
+- [ ] Finish eight-CPU sustained resources and a paired frame-readiness comparison
+  before package delivery. Four-CPU resource frame-ready p95 is 60 ms versus a
+  historical 50 ms; no end-to-end scrub speedup claimed. Independent review and
+  windowed/cross-hardware proof remain open. Package is still unchanged.
 - [x] Make speculative monitor prewarming silent without removing decode/cache/session
   warming. Both standalone and coordinated workers retain visible foreground/reverse
   replies and errors. Five new regression tests, 770 release tests, strict Clippy,
@@ -31,14 +37,16 @@ Last updated: 2026-08-31
   exact four-source/Full
   assertions before every timed submission. Two new regressions, 772 release
   tests, strict Clippy, and formatting pass. Production code/limits are unchanged.
-- [ ] Requalify restricted-CPU native audio with the corrected full-duration workload.
+- [x] Requalify restricted-CPU native audio with the corrected full-duration workload.
   The corrected 30-second four-CPU run delivered 2,340 actual layer requests but
   failed at 16,148 us submission p95, one callback-lock failure, and 480 underrun
   frames. Two archived test-only traces locate most submission delay at
   `SourceLaneActor::submit`'s `wake.try_send`; controlled wake-boost evidence now
   supports the targeted worker policy above. Attribute audio lock ownership separately.
-  No quality/threshold changes. Production eight-CPU audio remains unrun; package
-  remains the previous CPU-guard build. Evidence: `docs/restricted-live-audio-submission.md`.
+  No quality/threshold changes. Production four/eight-CPU runs now pass as recorded
+  above; the historical failure remains preserved. Package remains the previous
+  CPU-guard build. Evidence: `docs/restricted-live-audio-submission.md` and
+  `docs/monitor-worker-scheduling.md`.
 - [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
   initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,
   strict Clippy, 304 hardware pixel/timestamp cases, and independent review pass.
@@ -47,8 +55,9 @@ Last updated: 2026-08-31
   `03E01F2EB32BFA3B`. GUI smoke remains `not_run`; previous executable/status archived.
   Evidence and limits: `docs/cpu-budget-conversion.md`.
 - [ ] Qualify restricted-CPU sustained/audio behavior after the CPU-count correction.
-  Sustained local runs now pass after silent prewarming; audio and timing variability
-  remain open. Keep Full resolution and filters; logical-CPU affinity is not a substitute
+  Both native-audio runs and four-CPU sustained resources now pass with the worker
+  policy; eight-CPU sustained resources and frame-readiness comparison remain open.
+  Keep Full resolution and filters; logical-CPU affinity is not a substitute
   for actual lower-core hardware or windowed playback qualification.
 - [x] Pack full-resolution monitor RGBA directly into its final shared allocation, preserving
   exact pixels/alpha/letterboxing and cache ownership. Native 1080p packing p50 falls locally

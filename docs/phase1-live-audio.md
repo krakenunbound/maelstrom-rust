@@ -8,7 +8,9 @@ contain no video sources. Those reports retain their observed audio counters and
 early slow-source isolation evidence, but do **not** prove continuous four-video
 load beyond five seconds (including transport warmup). The corrected four-CPU
 30-second run retained all four sources but failed submission latency and one
-audio buffer; see `docs/restricted-live-audio-submission.md`.
+audio buffer; see `docs/restricted-live-audio-submission.md`. After the worker
+scheduling correction, uninstrumented four/eight-CPU runs pass at 55/51 us
+submission p95 with zero observed audio faults; see `docs/monitor-worker-scheduling.md`.
 
 The corrected test extends all four video clips through the requested duration
 plus ten seconds of warmup allowance and one second of boundary slack, while

@@ -84,5 +84,47 @@ executables, and arithmetic/hash verification snapshots are retained. The latter
 three runs use the same archived `wake-no-boost-test-binary.zip`. These are local
 post-run snapshots, not signed execution attestations.
 
-Uninstrumented production four/eight-CPU audio and sustained resource reruns are
-pending. The package is unchanged and no editor was launched.
+## Uninstrumented production qualification
+
+Clean source `2a7c72d9eb4a40b077ce39afbe24eb2f490f8606` passes both 30-second
+native-audio gates. No test-only probe or scheduling override is present:
+
+| Allowed CPUs | Duration | Four-layer submissions / layer requests | Submit p95 / max | Clock drift / max stall |
+|---|---:|---:|---:|---:|
+| 4 | 30.001509 s | 586 / 2,344 | 55 / 465 us | 1,509 us / 30 ms |
+| 8 | 30.001842 s | 586 / 2,344 | 51 / 322 us | 1,842 us / 23 ms |
+
+Both preserve all four Full-resolution sources, pass the deliberate slow-source
+isolation/recovery checks, and have zero observed audio underruns, callback-lock
+failures, late discards, or monitor errors. Cache peaks are 1,069,977,600 bytes
+under 1 GiB; four peak sessions remain below eight, with zero after App drop.
+Each test process has 26 actual affinity observations (`F` / `FF`). These passes
+do not prove the earlier intermittent audio-lock failure can never recur.
+
+The four-CPU ten-minute **resource** gate also passes at that clean source:
+600.034830 seconds, 14,116 cycles, and 56,464 requested/completed/presented/uploaded
+frames. Submission p50/p95/max is 55/74/2,066 us; frame-ready p50/p95/max is
+45/60/146 ms. Zero frames were dropped and zero decode errors occurred. There
+were still 10,843 hold observations and 10,847 late-frame observations; this is
+not a zero-latency playback claim. Cache peak is 215,654,400 bytes under 1 GiB;
+five sessions/actors remain below eight, zero sessions survive App drop, and
+working-set growth is 31,223,808 bytes under the 1.5 GiB diagnostic allowance.
+The wrapper captured 517 live memory/affinity samples, all at mask `F`.
+
+Frame-ready p95 of 60 ms is higher than the earlier `b28cb4e` four-CPU resource
+run's 50 ms, and cycle count is lower (14,116 versus 18,132). Those separate runs
+are not a controlled timing comparison. Do not claim faster end-to-end scrubbing;
+perform a paired frame-readiness comparison before drawing that conclusion.
+
+Reports/audits use `worker-policy-{4,8}-live-audio*` under the multisource artifact
+directory and `worker-policy-4-600s-1-*` under `artifacts/phase1-sustained/`.
+The raw-percentile, fixture/runtime, actual-affinity, bounds and cleanup audits
+pass. All three runs use test-executable SHA-256
+`D78291F2C48C4C823C15DCF5B727E1689B0399B77BA65CC375D67B6AE0E98D40`,
+archived as `worker-policy-audio-test-binary.zip` in the multisource directory.
+The resource soak contains no native audio; audio evidence is from the separate
+30-second runs above. Neither test launches the GUI.
+
+Eight-CPU sustained resources, paired frame-readiness, independent review,
+windowed/cross-hardware behavior, and package delivery remain open. The package
+is unchanged and no editor was launched.

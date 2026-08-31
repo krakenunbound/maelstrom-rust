@@ -1,5 +1,10 @@
 # Restricted-CPU live-audio submission investigation
 
+Follow-up: `docs/monitor-worker-scheduling.md` records CPU-cycle evidence, the
+controlled wake-boost experiment, the production correction, and passing
+uninstrumented four/eight-CPU audio plus four-CPU sustained resource gates.
+The historical failures below are preserved, not replaced by those passes.
+
 ## Corrected workload and observed failure
 
 The clean source `c0ebbf385071778c5fd0fc40e568556b28e6ebcb` extends all four

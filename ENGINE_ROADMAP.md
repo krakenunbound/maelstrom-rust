@@ -401,7 +401,12 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       without changing Full resolution or base/process/UI/audio priorities. Standalone
       and coordinated workers now apply the policy at startup; live-thread regressions
       fail before/pass after. 773 release tests, Clippy and formatting pass. Production
-      audio/resource, independent-review, and windowed/cross-hardware proof remain open.
+      four/eight-CPU native-audio runs pass at 55/51 us submission p95 with zero audio
+      faults. Four-CPU ten-minute resources pass: 56,464 matching requests/presentations,
+      74 us submit p95, zero drops/errors, bounded cache/sessions and zero after drop.
+      Frame-ready p95 is 60 ms versus a historical 50 ms, not a paired comparison.
+      Eight-CPU sustained, paired frame-readiness, independent-review, package, and
+      windowed/cross-hardware proof remain open; no end-to-end scrub speedup claimed.
       See `docs/monitor-worker-scheduling.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
