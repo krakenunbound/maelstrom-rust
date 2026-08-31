@@ -34,9 +34,14 @@ Last updated: 2026-08-31
 - [x] Rebuild the portable package from `ac52c2b` with worker-side proxy startup
   validation. Executable SHA-256 starts `D3FA11E3C8894DDA`; previous package backed
   up, runtime/static-import checks pass. No editor launch; GUI smoke remains `not_run`.
-- [ ] Finish shared runtime-tool path resolution without interface-thread filesystem checks.
-  Validation and generation/deletion workers now own proxy lifecycle teardown. Final shutdown
-  can still wait for an OS filesystem call already in progress; do not claim bounded I/O cancellation.
+- [x] Resolve one complete FFmpeg/FFprobe pair on the startup-resources worker and route its
+  canonical absolute FFmpeg path to Quick Export, Kraken Upscale and proxy generation. Adjacent
+  package tools take priority, `FFMPEG_DIR/bin` is the developer fallback, pairs are never mixed,
+  and ambient `PATH` lookup is forbidden. Two new regressions pass with 806 release tests, both
+  real-media proxy tests, strict Clippy, formatting, seven fixture contracts and seven Phase 0
+  scenarios. No editor launch. See `docs/runtime-media-tools.md`.
+- [ ] Refresh the portable package with shared runtime-tool resolution and rerun its runtime,
+  static-import, launcher check-only and backup-integrity gates without launching the editor.
 - [x] Rediscover matching local proxies after timeline placement/project reopen on the
   existing analysis worker; show ready but retain original-quality playback until explicit
   opt-in. Protect against stale projects, relinks and late replies after user actions.

@@ -323,21 +323,54 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn kraken_ffmpeg() -> PathBuf {
-    bundled_media_tool("ffmpeg")
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaTools {
+    ffmpeg: PathBuf,
+    ffprobe: PathBuf,
 }
 
-fn bundled_media_tool(name: &str) -> PathBuf {
-    let executable_name = if cfg!(windows) {
+fn media_tool_file_name(name: &str) -> String {
+    if cfg!(windows) {
         format!("{name}.exe")
     } else {
         name.to_owned()
-    };
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(&executable_name)))
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from(executable_name))
+    }
+}
+
+fn media_tools_in_directory(directory: &Path) -> Option<MediaTools> {
+    let ffmpeg = fs::canonicalize(directory.join(media_tool_file_name("ffmpeg"))).ok()?;
+    let ffprobe = fs::canonicalize(directory.join(media_tool_file_name("ffprobe"))).ok()?;
+    (ffmpeg.is_absolute() && ffprobe.is_absolute() && ffmpeg.is_file() && ffprobe.is_file())
+        .then_some(MediaTools { ffmpeg, ffprobe })
+}
+
+/// Resolves one complete adjacent tool pair on the startup-resources worker. Never mix tools from
+/// different runtimes and never fall back to ambient PATH lookup: every media job receives the
+/// same validated absolute executable path.
+fn resolve_media_tools_from(
+    current_executable: Option<&Path>,
+    ffmpeg_root: Option<&Path>,
+) -> Result<MediaTools, String> {
+    if let Some(directory) = current_executable.and_then(Path::parent)
+        && let Some(tools) = media_tools_in_directory(directory)
+    {
+        return Ok(tools);
+    }
+    if let Some(root) = ffmpeg_root
+        && let Some(tools) = media_tools_in_directory(&root.join("bin"))
+    {
+        return Ok(tools);
+    }
+    Err(
+        "A complete FFmpeg/FFprobe runtime was not found beside Maelstrom or in FFMPEG_DIR/bin"
+            .to_owned(),
+    )
+}
+
+fn resolve_media_tools() -> Result<MediaTools, String> {
+    let current_executable = std::env::current_exe().ok();
+    let ffmpeg_root = std::env::var_os("FFMPEG_DIR").map(PathBuf::from);
+    resolve_media_tools_from(current_executable.as_deref(), ffmpeg_root.as_deref())
 }
 
 fn preferred_h264_encoders(profile: Option<&HardwareProfile>) -> Vec<nle_export::H264Encoder> {
@@ -3369,6 +3402,7 @@ struct App {
     startup_resources_started: bool,
     startup_resources_ready: bool,
     preloaded_models: model_preload::PreloadedModels,
+    media_tools: Result<MediaTools, String>,
     audio_engine_initialized: bool,
     audio_transport: Option<AudioTransportState>,
     monitor_textures: [Option<egui::TextureHandle>; MONITOR_LAYER_COUNT],
@@ -3503,6 +3537,7 @@ struct StartupResources {
     thumbnail_error: Option<String>,
     preloaded_models: model_preload::PreloadedModels,
     model_errors: Vec<String>,
+    media_tools: Result<MediaTools, String>,
 }
 
 fn load_startup_resources(catalog_path: Option<PathBuf>) -> StartupResources {
@@ -3514,6 +3549,7 @@ fn load_startup_resources_from(
     catalog_path: Option<PathBuf>,
     model_directory: Option<&Path>,
 ) -> StartupResources {
+    let media_tools = resolve_media_tools();
     let model_preload = model_preload::preload_models(model_directory);
     let mut catalog = catalog_path.as_deref().map(load_catalog_with_paths);
     if let (Some(path), Some((projects, paths))) = (catalog_path.as_deref(), catalog.as_mut()) {
@@ -3554,6 +3590,7 @@ fn load_startup_resources_from(
         thumbnail_error,
         preloaded_models: model_preload.models,
         model_errors: model_preload.errors,
+        media_tools,
     }
 }
 
@@ -3635,6 +3672,14 @@ impl App {
         );
         // No startup worker will send on this receiver in this isolated app path.
         app.startup_resources_tx = None;
+        let test_tool_root = std::env::temp_dir().join(format!(
+            "maelstrom-not-opened-media-tools-{}",
+            std::process::id()
+        ));
+        app.media_tools = Ok(MediaTools {
+            ffmpeg: test_tool_root.join(media_tool_file_name("ffmpeg")),
+            ffprobe: test_tool_root.join(media_tool_file_name("ffprobe")),
+        });
         app
     }
 
@@ -3753,6 +3798,7 @@ impl App {
             startup_resources_started: false,
             startup_resources_ready: false,
             preloaded_models: model_preload::PreloadedModels::default(),
+            media_tools: Err("Media tools are still loading".to_owned()),
             audio_engine_initialized: false,
             audio_transport: None,
             monitor_textures: std::array::from_fn(|_| None),
@@ -4940,6 +4986,17 @@ impl App {
             self.hub.status = Some(message.to_owned());
             return;
         }
+        if let Err(error) = self.media_ffmpeg() {
+            let message = proxy_error_text(
+                self.editor.language,
+                "Quick Export is unavailable",
+                "クイック書き出しを利用できません",
+                &error,
+            );
+            self.editor.set_export_failed(message.clone());
+            self.hub.status = Some(message);
+            return;
+        }
         self.editor.set_export_running(0.0);
         let tx = self.project_dialog_tx.clone();
         let notify = Arc::clone(&self.project_dialog_notify);
@@ -4958,7 +5015,19 @@ impl App {
     }
 
     fn start_video_export(&mut self, output: PathBuf) {
-        self.start_video_export_with_ffmpeg(output, bundled_media_tool("ffmpeg"));
+        match self.media_ffmpeg() {
+            Ok(ffmpeg) => self.start_video_export_with_ffmpeg(output, ffmpeg),
+            Err(error) => {
+                let message = proxy_error_text(
+                    self.editor.language,
+                    "Quick Export is unavailable",
+                    "クイック書き出しを利用できません",
+                    &error,
+                );
+                self.editor.set_export_failed(message.clone());
+                self.hub.status = Some(message);
+            }
+        }
     }
 
     /// Keeps the normal export path and test harness on one request construction path. The
@@ -5068,6 +5137,15 @@ impl App {
                 .set_kraken_upscale_failed("Select a video clip or media card");
             return;
         }
+        if let Err(error) = self.media_ffmpeg() {
+            self.editor.set_kraken_upscale_failed(proxy_error_text(
+                self.editor.language,
+                "Kraken Upscale is unavailable",
+                "Kraken Upscale を利用できません",
+                &error,
+            ));
+            return;
+        }
         self.editor.set_kraken_upscale_running(0.0);
         let tx = self.project_dialog_tx.clone();
         let notify = Arc::clone(&self.project_dialog_notify);
@@ -5091,10 +5169,22 @@ impl App {
                 .set_kraken_upscale_failed("Select a video clip or media card");
             return;
         };
+        let ffmpeg = match self.media_ffmpeg() {
+            Ok(ffmpeg) => ffmpeg,
+            Err(error) => {
+                self.editor.set_kraken_upscale_failed(proxy_error_text(
+                    self.editor.language,
+                    "Kraken Upscale is unavailable",
+                    "Kraken Upscale を利用できません",
+                    &error,
+                ));
+                return;
+            }
+        };
         let request = nle_upscale::UpscaleRequest {
             input,
             output,
-            ffmpeg: kraken_ffmpeg(),
+            ffmpeg,
             quality: nle_upscale::Quality::from_u8(self.editor.kraken_upscale_quality),
             goal: nle_upscale::goal_from_index(self.editor.kraken_upscale_goal),
         };
@@ -5190,6 +5280,23 @@ impl App {
             }
             return;
         }
+        let ffmpeg = match self.media_ffmpeg() {
+            Ok(ffmpeg) => ffmpeg,
+            Err(error) => {
+                self.editor.set_proxy_media_status(
+                    media_id,
+                    ProxyMediaStatus::Failed {
+                        message: proxy_error_text(
+                            self.editor.language,
+                            "Proxy generation is unavailable",
+                            "プロキシ生成を利用できません",
+                            &error,
+                        ),
+                    },
+                );
+                return;
+            }
+        };
         self.proxy_validation_pending.remove(&media_id);
         if let Some(record) = self.proxy_records.get_mut(&media_id)
             && record.enabled
@@ -5200,7 +5307,7 @@ impl App {
         let request = nle_proxy::ProxyRequest {
             input: requested_path.clone(),
             cache_root: self.proxy_cache_root.clone(),
-            ffmpeg: bundled_media_tool("ffmpeg"),
+            ffmpeg,
             replace_existing: true,
         };
         let notify = Arc::clone(&self.project_dialog_notify);
@@ -6015,6 +6122,15 @@ impl App {
                 )
             });
         }
+        match &resources.media_tools {
+            Ok(tools) => tracing::info!(
+                ffmpeg = %tools.ffmpeg.display(),
+                ffprobe = %tools.ffprobe.display(),
+                "startup media tools resolved"
+            ),
+            Err(error) => tracing::warn!(%error, "startup media tools unavailable"),
+        }
+        self.media_tools = resources.media_tools;
         self.startup_resources_ready = true;
         self.refresh_app_resources_ready();
     }
@@ -6047,6 +6163,13 @@ impl App {
             self.startup_resources_ready,
             self.audio_engine_initialized,
         );
+    }
+
+    fn media_ffmpeg(&self) -> Result<PathBuf, String> {
+        self.media_tools
+            .as_ref()
+            .map(|tools| tools.ffmpeg.clone())
+            .map_err(Clone::clone)
     }
 
     fn handle_editor_action(&mut self, action: EditorAction) {
@@ -8445,6 +8568,9 @@ mod tests {
     #[test]
     fn proxy_start_failure_arrives_asynchronously_without_changing_original_media() {
         let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        let ffmpeg = app.media_ffmpeg().expect("injected absolute worker path");
+        assert!(ffmpeg.is_absolute());
+        assert!(!ffmpeg.exists());
         let original = test_catalog_path("missing-proxy-source").with_extension("mp4");
         app.editor.add_media_paths([original.clone()]);
         let snapshot = serde_json::to_string(&app.editor.snapshot()).unwrap();
@@ -11236,6 +11362,67 @@ mod tests {
         assert!(!startup_resources_are_ready(true, false, true));
         assert!(!startup_resources_are_ready(true, true, false));
         assert!(startup_resources_are_ready(true, true, true));
+    }
+
+    #[test]
+    fn startup_media_tools_prefer_one_complete_adjacent_absolute_pair() {
+        let root = test_catalog_path("startup-media-tools")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let app_dir = root.join("app");
+        let developer_root = root.join("developer-runtime");
+        let developer_bin = developer_root.join("bin");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::create_dir_all(&developer_bin).unwrap();
+        let current_executable = app_dir.join(media_tool_file_name("Maelstrom"));
+        fs::write(&current_executable, []).unwrap();
+        for directory in [&app_dir, &developer_bin] {
+            fs::write(directory.join(media_tool_file_name("ffmpeg")), []).unwrap();
+            fs::write(directory.join(media_tool_file_name("ffprobe")), []).unwrap();
+        }
+
+        let adjacent =
+            resolve_media_tools_from(Some(&current_executable), Some(developer_root.as_path()))
+                .unwrap();
+        assert_eq!(
+            adjacent.ffmpeg,
+            fs::canonicalize(app_dir.join(media_tool_file_name("ffmpeg"))).unwrap()
+        );
+        assert_eq!(
+            adjacent.ffprobe,
+            fs::canonicalize(app_dir.join(media_tool_file_name("ffprobe"))).unwrap()
+        );
+        assert!(adjacent.ffmpeg.is_absolute());
+        assert!(adjacent.ffprobe.is_absolute());
+
+        fs::remove_file(app_dir.join(media_tool_file_name("ffprobe"))).unwrap();
+        let fallback =
+            resolve_media_tools_from(Some(&current_executable), Some(developer_root.as_path()))
+                .unwrap();
+        assert_eq!(
+            fallback.ffmpeg,
+            fs::canonicalize(developer_bin.join(media_tool_file_name("ffmpeg"))).unwrap()
+        );
+        assert_eq!(
+            fallback.ffprobe,
+            fs::canonicalize(developer_bin.join(media_tool_file_name("ffprobe"))).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_media_tools_never_fall_back_to_process_path_lookup() {
+        let root = test_catalog_path("missing-startup-media-tools")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let error = resolve_media_tools_from(
+            Some(&root.join("app").join(media_tool_file_name("Maelstrom"))),
+            Some(&root.join("developer-runtime")),
+        )
+        .unwrap_err();
+        assert!(error.contains("complete FFmpeg/FFprobe runtime"));
     }
 
     #[test]

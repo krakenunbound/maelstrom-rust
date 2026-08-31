@@ -190,4 +190,7 @@ contracts, and seven Phase 0 scenarios pass. Evidence uses the `proxy-lifecycle-
 artifacts. Parent-reviewed; independent agent unavailable (agent thread limit). No editor was
 launched. This establishes nonblocking UI cancellation/reset ownership, not bounded OS filesystem
 I/O: metadata, cache enumeration/removal, and final application shutdown can still wait on the OS.
-Shared runtime-tool path resolution also remains a separate app-wide follow-up.
+Shared runtime-tool discovery is now app-owned startup work. Quick Export, Kraken Upscale, and
+proxy generation reuse one complete canonical FFmpeg/FFprobe pair and never fall back to ambient
+`PATH`; see [`runtime-media-tools.md`](runtime-media-tools.md). Final shutdown can still wait for an
+OS filesystem call already in progress, so this does not claim bounded filesystem cancellation.
