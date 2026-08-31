@@ -366,6 +366,15 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       record four-source frame-ready p95 63 ms and scheduler p95 153-274 us. This is not a
       global CPU reservation or sustained/windowed/cross-machine qualification.
       See `docs/threaded-monitor-conversion.md`.
+- [x] Honor restricted Windows process CPU availability in the scaler's existing guard.
+      Rust 1.92 reports 28 CPUs under a four-CPU affinity mask; FFmpeg correctly reports
+      four. Bounding the former by the latter restores serial conversion below eight
+      available CPUs without changing quality or the two-thread cap. Actual default
+      scaler probes pass at 1/4/7/8/28 CPUs; 765 release tests, strict Clippy, 304
+      hardware pixel/timestamp cases, and independent review pass. Eighteen Full-1080p
+      before/after latency runs pass the existing scheduler gate but do not demonstrate
+      faster scrubbing. Restricted-CPU sustained/audio and windowed/cross-machine
+      qualification remain open. See `docs/cpu-budget-conversion.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
       single-allocation packing cuts local native-1080p packing p50 from 2.658 to 1.363 ms and

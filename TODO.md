@@ -9,6 +9,16 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
+  initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,
+  strict Clippy, 304 hardware pixel/timestamp cases, and independent review pass.
+  Eighteen before/after Full-1080p latency runs pass the scheduler gate; no speedup
+  is demonstrated. Package rebuilt, runtime/hash checks pass; executable hash starts
+  `03E01F2EB32BFA3B`. GUI smoke remains `not_run`; previous executable/status archived.
+  Evidence and limits: `docs/cpu-budget-conversion.md`.
+- [ ] Qualify restricted-CPU sustained/audio behavior after the CPU-count correction.
+  Keep Full resolution and existing filters; logical-CPU affinity is not a substitute
+  for actual lower-core hardware or windowed playback qualification.
 - [x] Pack full-resolution monitor RGBA directly into its final shared allocation, preserving
   exact pixels/alpha/letterboxing and cache ownership. Native 1080p packing p50 falls locally
   from 2.658 to 1.363 ms; native 4K from 11.659 to 5.820 ms. 1,296 small-layout comparisons,
@@ -60,7 +70,8 @@ Last updated: 2026-08-31
   `8F0965B4489D34A11`; smoke remains `not_run`; runtime/hash/cleanup checks pass.
   Evidence and performance tradeoff: `docs/hardware-decode-parity.md`.
   Commit: `fb5335df898f69993f3ff5545260f0e47f157b1d`.
-- [ ] Requalify windowed playback after accurate threaded conversion and direct RGBA packing.
+- [ ] Requalify windowed playback after accurate threaded conversion, direct RGBA packing,
+  and the Windows CPU-count correction.
   Prior local ten-minute resource qualification does not establish real-time display. Four
   Intel/NVIDIA one/four-source cases are prepared without launch; explicit permission to run
   the editor through the exact launcher is pending. Regenerate prepared package identities for

@@ -184,7 +184,20 @@ impl ScalingContext {
 
 fn selected_threads(src_width: u32, src_height: u32, dst_width: u32, dst_height: u32) -> u32 {
     let available = thread::available_parallelism().map_or(1, |count| count.get());
+    #[cfg(target_os = "windows")]
+    let available = {
+        // SAFETY: av_cpu_count has no pointer arguments and requires no prior initialization.
+        bounded_cpu_count(available, unsafe { ffmpeg::ffi::av_cpu_count() })
+    };
     thread_policy(src_width, src_height, dst_width, dst_height, available)
+}
+
+/// Bounds Rust's CPU report by FFmpeg's affinity-aware count on Windows.
+#[cfg(any(target_os = "windows", test))]
+fn bounded_cpu_count(rust_available: usize, ffmpeg_available: i32) -> usize {
+    let rust_available = rust_available.max(1);
+    let ffmpeg_available = usize::try_from(ffmpeg_available).unwrap_or(1).max(1);
+    rust_available.min(ffmpeg_available)
 }
 
 fn thread_policy(
@@ -322,6 +335,55 @@ impl Drop for RawSwsContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires a process CPU-affinity budget and MAELSTROM_EXPECT_AVAILABLE_CPUS"]
+    fn supplied_cpu_budget_selects_bounded_scaler_threads() {
+        let expected_cpus = std::env::var("MAELSTROM_EXPECT_AVAILABLE_CPUS")
+            .expect("explicit expected CPU budget")
+            .parse::<usize>()
+            .expect("positive CPU count");
+        assert!(expected_cpus > 0);
+        let rust_cpus = thread::available_parallelism().unwrap().get();
+        // SAFETY: libavutil's CPU-count query has no pointer arguments or initialization needs.
+        let ffmpeg_cpus = unsafe { ffmpeg::ffi::av_cpu_count() };
+        let scaler = ScalingContext::get(
+            Pixel::YUV420P,
+            1_920,
+            1_080,
+            Pixel::RGBA,
+            1_920,
+            1_080,
+            crate::scaling_flags(true),
+        )
+        .unwrap();
+        let actual_threads = scaler.selected_thread_count();
+        eprintln!(
+            "CPU budget: expected={expected_cpus}, rust={rust_cpus}, ffmpeg={ffmpeg_cpus}, scaler_threads={actual_threads}"
+        );
+        assert_eq!(
+            ffmpeg_cpus as usize, expected_cpus,
+            "test process must inherit the requested CPU budget"
+        );
+        assert_eq!(
+            actual_threads,
+            thread_policy(1_920, 1_080, 1_920, 1_080, expected_cpus)
+        );
+    }
+
+    #[test]
+    fn bounded_cpu_count_is_conservative_and_respects_threshold() {
+        assert_eq!(bounded_cpu_count(0, 8), 1);
+        assert_eq!(bounded_cpu_count(8, 0), 1);
+        assert_eq!(bounded_cpu_count(8, -1), 1);
+        assert_eq!(bounded_cpu_count(28, 4), 4);
+        assert_eq!(bounded_cpu_count(4, 8), 4);
+
+        let at_threshold = bounded_cpu_count(28, 8);
+        assert_eq!(at_threshold, 8);
+        assert_eq!(thread_policy(1_920, 1_080, 1_920, 1_080, at_threshold), 2);
+    }
 
     #[test]
     fn thread_policy_requires_both_full_hd_areas() {

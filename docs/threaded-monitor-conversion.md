@@ -15,8 +15,10 @@ allocates and initializes a legacy context once with an explicit two-thread limi
 then uses `sws_scale_frame` to dispatch its slices. It deliberately does not use
 FFmpeg's dynamically configured frame-conversion mode.
 
-Policy: both input and output must contain at least 1920x1080 pixels, and Rust must
-report at least eight available logical CPUs. Smaller/low-core cases retain the
+Policy: both input and output must contain at least 1920x1080 pixels, with at least
+eight available logical CPUs. On Windows, Rust's reported count is now bounded by
+FFmpeg's affinity-aware count; see `cpu-budget-conversion.md` for the reproduced
+guard failure and restricted-CPU verification. Smaller/low-core cases retain the
 old serial wrapper. Threaded setup failure also retains that exact serial path;
 it never changes quality. Context initialization and conversion remain on decoder
 workers. Fresh output allocation is checked; preallocated output is validated and
