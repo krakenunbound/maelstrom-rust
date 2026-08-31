@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Add a clean-commit Phase 0 timeline-foundation runner around the existing release gates.
+  The retained schema-1 run at `6576d91` passed ten independent 50,000-clip history trials
+  (press/release p95 0.2672/0.7453 ms), wide/detail/playhead CPU p95
+  0.4578/0.2900/0.2787 ms, and the real H.264 plus 20,002-bar gate at 0.4839 ms p95.
+  The report omits the private media path and explicitly excludes GUI, scanout, package and
+  cross-hardware claims. See `docs/performance-reports.md`.
 - [x] Make proxy generation/deletion cancel and reset nonblocking for interface actions.
   Child supervision, bounded pipe/event queues and kill/wait ownership stay on workers;
   reset retains bounded cleanup slots and rejects overlapping cache mutation until finished.

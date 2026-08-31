@@ -222,6 +222,13 @@ Exit gate:
       Three consecutive parallel release workspace runs passed 720 tests each; strict
       all-target workspace Clippy and independent review passed.
       The specific local export failure is repaired; live/cross-hardware/soak gates remain open.
+      A versioned clean-commit timeline-foundation runner now repeats the existing 50,000-clip
+      history gate ten times, runs wide/detail/playhead CPU evidence, and adds a real H.264 plus
+      20,002-bar interaction check without serializing the private media path. Its retained
+      schema-1 run at commit `6576d91e25d34f8a3203382d9bd483ffe9e77056` passed with
+      0.2672/0.7453 ms press/edit-release p95, 0.4578/0.2900/0.2787 ms
+      wide/detail/playhead p95, and 0.4839 ms combined p95. This renews the current headless
+      foundation evidence only; GUI-present, packaged, cross-hardware and soak gates remain open.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope

@@ -115,6 +115,13 @@ evidence to `artifacts/phase0-foundation/timeline-foundation.json`. A passing re
 release CPU/decode evidence only. It does not establish GUI-present input latency, GPU completion,
 physical input latency, DWM/scanout, packaged smoke, or cross-hardware performance.
 
+The retained local schema-1 run on clean commit
+`6576d91e25d34f8a3203382d9bd483ffe9e77056` passed ten independent history trials with
+0.2672/0.7453 ms press/edit-release p95, 0.4578/0.2900/0.2787 ms wide/detail/playhead p95, and
+0.4839 ms p95 for the real 1920×1080 H.264 plus 20,002-bar case. The report contains no private
+media path. Its SHA-256 is
+`9D69B9EA33F0E621E47AE31C04B32BC3345343CDBA3E1C491F6143B7340205E2`.
+
 ## Phase 0 cross-adapter compositor qualification
 
 The headless DX12 qualification exercises the production `ViewerCompositorRenderer` offscreen,
