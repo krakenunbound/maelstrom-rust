@@ -1,5 +1,10 @@
 # Ten-bit codec timing and preview color conversion
 
+Follow-up: [hardware/native-resolution parity](hardware-decode-parity.md) adds
+explicit Windows hardware proof and fixes a separate planar/NV12 conversion
+inconsistency. Current reference filters include `accurate_rnd`; the checkpoint
+and package hashes below describe the earlier 2026-08-30 matrix/range fix.
+
 Independent sequential decoding exposed a DNxHR preview color error: the decoded
 frames declare BT.709, but the monitor scaler used its default BT.601 matrix.
 Preview conversion now reads each decoded frame's matrix and range before scaling.

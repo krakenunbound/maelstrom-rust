@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use super::tests::{hardware_test_guard, open_supplied_media_windows_hardware_monitor};
 use super::*;
 use std::{
     fs,
@@ -259,7 +261,12 @@ fn parse_timestamp_microseconds(timestamp: &str) -> Option<i64> {
     i64::try_from(microseconds).ok()
 }
 
-fn cli_sequential_reference(path: &Path, frame_count: usize) -> CliSequentialReference {
+fn cli_sequential_reference_with_filter(
+    path: &Path,
+    frame_count: usize,
+    canvas: (u32, u32),
+    filter: &str,
+) -> CliSequentialReference {
     let raw_timestamps = ffprobe_frame_timestamps(path);
     assert_eq!(
         raw_timestamps.len(),
@@ -282,7 +289,7 @@ fn cli_sequential_reference(path: &Path, frame_count: usize) -> CliSequentialRef
             "0:v:0",
             "-an",
             "-vf",
-            "scale=64:36:flags=bicubic,format=rgba,pad=64:48:0:6:color=black@0",
+            filter,
             "-frames:v",
             &frame_count.to_string(),
             "-fps_mode",
@@ -299,7 +306,7 @@ fn cli_sequential_reference(path: &Path, frame_count: usize) -> CliSequentialRef
         path.display(),
         String::from_utf8_lossy(&output.stderr)
     );
-    let bytes_per_frame = 64 * 48 * 4;
+    let bytes_per_frame = canvas.0 as usize * canvas.1 as usize * 4;
     assert_eq!(
         output.stdout.len(),
         frame_count * bytes_per_frame,
@@ -316,6 +323,54 @@ fn cli_sequential_reference(path: &Path, frame_count: usize) -> CliSequentialRef
         timestamps,
         rgba,
     }
+}
+
+fn cli_sequential_reference(path: &Path, frame_count: usize) -> CliSequentialReference {
+    cli_sequential_reference_with_filter(
+        path,
+        frame_count,
+        (64, 48),
+        "scale=64:36:flags=bicubic+accurate_rnd,format=rgba,pad=64:48:0:6:color=black@0",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn ffprobe_video_dimensions(path: &Path) -> (u32, u32) {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("start FFprobe video dimensions inspection");
+    assert!(
+        output.status.success(),
+        "FFprobe could not inspect dimensions for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dimensions_text = String::from_utf8(output.stdout).expect("FFprobe dimensions were UTF-8");
+    let dimensions = dimensions_text
+        .trim()
+        .split_once(',')
+        .unwrap_or_else(|| panic!("FFprobe did not return width,height for {}", path.display()));
+    (
+        dimensions
+            .0
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid FFprobe width {:?}", dimensions.0)),
+        dimensions
+            .1
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid FFprobe height {:?}", dimensions.1)),
+    )
 }
 
 fn assert_real_codec_frame(
@@ -348,6 +403,12 @@ fn assert_real_codec_frame(
         .unwrap_or_else(|| panic!("missing CLI reference frame for {}", request.source_tick));
     let expected = reference.rgba[index].as_ref();
     let actual = frame.rgba.as_ref();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label} scrub target {} RGBA byte count",
+        request.source_tick
+    );
     if actual != expected {
         let first = actual
             .iter()
@@ -466,6 +527,193 @@ fn assert_real_codec_vfr_seek_matches_cli_reference(
     eprintln!(
         "{label}: {} VFR boundaries, {cases} exact CLI-reference seek cases",
         reference.timestamps.len()
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn assert_windows_hardware_vfr_output_matches_cli_reference(
+    label: &str,
+    path: PathBuf,
+    requested_backend: DecodeBackend,
+    request_id: u64,
+    output_size: (u32, u32),
+    reference: &CliSequentialReference,
+) -> usize {
+    let mut first = scrub_request(path.clone(), request_id);
+    first.source_tick = reference.timestamps[0];
+    first.source_frame_duration_tick = None;
+    first.acceleration = AccelerationPreference::PreferHardware;
+    first.width = output_size.0;
+    first.height = output_size.1;
+    let decode_and_check = |monitor: &mut StickyMonitor,
+                            request: &DecodeRequest,
+                            timings: &DecoderStageTimingAccumulators| {
+        let previous_transfers = timings.snapshot().hardware_transfer.samples;
+        let frame = decode_scrub_frame(monitor, request, timings);
+        assert_real_codec_frame(&frame, request, reference, label);
+        assert_eq!(
+            (frame.width, frame.height),
+            output_size,
+            "{label} dimensions"
+        );
+        assert_eq!(monitor.backend, requested_backend, "{label} actual backend");
+        assert_eq!(monitor.fallback_reason, None, "{label} fallback reason");
+        assert!(
+            timings.snapshot().hardware_transfer.samples > previous_transfers,
+            "{label} did not transfer a hardware frame"
+        );
+    };
+    let mut cases = 0;
+    let timings = DecoderStageTimingAccumulators::default();
+    let mut monitor =
+        open_supplied_media_windows_hardware_monitor(path.clone(), requested_backend, output_size)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{label}: could not open {}: {error}",
+                    requested_backend.display_name()
+                )
+            });
+    assert_eq!(monitor.backend, requested_backend, "{label} actual backend");
+    assert_eq!(monitor.fallback_reason, None, "{label} fallback reason");
+    assert!(
+        monitor.transfer_hardware_frames,
+        "{label} hardware frame transfer"
+    );
+
+    // Forward, reverse (including repeated final), then return to the final frame.
+    let targets = reference
+        .timestamps
+        .iter()
+        .chain(reference.timestamps.iter().rev())
+        .chain(reference.timestamps.last())
+        .copied();
+    for (index, target) in targets.enumerate() {
+        let mut request = first.clone();
+        request.request_id += index as u64;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        decode_and_check(&mut monitor, &request, &timings);
+        cases += 1;
+    }
+    drop(monitor);
+
+    for (index, target) in [reference.timestamps[3], reference.timestamps[6]]
+        .into_iter()
+        .enumerate()
+    {
+        let mut request = first.clone();
+        request.request_id += 300 + index as u64;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        let mut fresh_monitor = open_supplied_media_windows_hardware_monitor(
+            path.clone(),
+            requested_backend,
+            output_size,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{label}: could not open fresh {}: {error}",
+                requested_backend.display_name()
+            )
+        });
+        assert_eq!(
+            fresh_monitor.backend, requested_backend,
+            "{label} fresh actual backend"
+        );
+        assert_eq!(
+            fresh_monitor.fallback_reason, None,
+            "{label} fresh fallback reason"
+        );
+        let fresh_timings = DecoderStageTimingAccumulators::default();
+        decode_and_check(&mut fresh_monitor, &request, &fresh_timings);
+        cases += 1;
+    }
+    assert!(
+        timings.snapshot().hardware_transfer.samples > 0,
+        "{label} reusable monitor did not transfer a hardware frame"
+    );
+    assert_eq!(cases, 19, "{label} hardware parity case count");
+    eprintln!(
+        "{label} {} {}x{}: {} VFR boundaries, {cases} exact CLI-reference seek cases",
+        requested_backend.display_name(),
+        output_size.0,
+        output_size.1,
+        reference.timestamps.len()
+    );
+    cases
+}
+
+#[cfg(target_os = "windows")]
+fn assert_windows_hardware_vfr_seek_matches_cli_reference(
+    label: &str,
+    path: PathBuf,
+    expected_codec: &str,
+    requested_backend: DecodeBackend,
+    request_id: u64,
+) {
+    let properties = ffprobe_stream_properties(&path);
+    assert!(
+        properties.iter().any(|value| value == "8"),
+        "{label} must declare eight frames"
+    );
+    assert!(
+        properties.iter().any(|value| value == expected_codec),
+        "{label} expected FFprobe codec {expected_codec:?}, got {properties:?}"
+    );
+    if expected_codec == "hevc" {
+        assert!(
+            properties.iter().any(|value| value == "Main 10"),
+            "{label} expected HEVC Main 10, got {properties:?}"
+        );
+    }
+    let native_size = ffprobe_video_dimensions(&path);
+    assert!(
+        native_size.0 > 0
+            && native_size.1 > 0
+            && native_size.0 <= 1_920
+            && native_size.1 <= 1_080
+            && u64::from(native_size.0) * 9 == u64::from(native_size.1) * 16,
+        "{label} must be a positive 16:9 source no larger than 1920x1080, got {}x{}",
+        native_size.0,
+        native_size.1
+    );
+    let reference = cli_sequential_reference(&path, 8);
+    assert!(
+        reference.stream_origin > 0,
+        "{label} stream origin must be positive"
+    );
+    let gaps: std::collections::BTreeSet<_> = reference
+        .timestamps
+        .windows(2)
+        .map(|timestamps| timestamps[1] - timestamps[0])
+        .collect();
+    assert!(
+        gaps.len() > 1 && gaps.iter().all(|gap| *gap > 0),
+        "{label} must retain distinct positive VFR timestamp gaps: {gaps:?}"
+    );
+    let scaled_cases = assert_windows_hardware_vfr_output_matches_cli_reference(
+        label,
+        path.clone(),
+        requested_backend,
+        request_id,
+        (64, 48),
+        &reference,
+    );
+    let native_filter = "scale=iw:ih:flags=bicubic+accurate_rnd,format=rgba";
+    let native_reference =
+        cli_sequential_reference_with_filter(&path, 8, native_size, native_filter);
+    let native_cases = assert_windows_hardware_vfr_output_matches_cli_reference(
+        label,
+        path,
+        requested_backend,
+        request_id + 1_000,
+        native_size,
+        &native_reference,
+    );
+    assert_eq!(
+        scaled_cases + native_cases,
+        38,
+        "{label} hardware parity case count"
     );
 }
 
@@ -795,6 +1043,78 @@ fn scrub_seek_real_codec_vfr_hevc_main10_matches_independent_cli_reference() {
     );
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR H.264 fixture"]
+fn supplied_windows_d3d11va_h264_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA must name the H.264 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "D3D11VA supplied H.264 VFR",
+        path,
+        "h264",
+        DecodeBackend::D3D11VA,
+        8_000,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR H.264 fixture"]
+fn supplied_windows_dxva2_h264_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA must name the H.264 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "DXVA2 supplied H.264 VFR",
+        path,
+        "h264",
+        DecodeBackend::DXVA2,
+        8_100,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HEVC_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR HEVC fixture"]
+fn supplied_windows_d3d11va_hevc_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HEVC_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HEVC_VFR_TEST_MEDIA must name the HEVC VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "D3D11VA supplied HEVC VFR",
+        path,
+        "hevc",
+        DecodeBackend::D3D11VA,
+        8_200,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HEVC_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR HEVC fixture"]
+fn supplied_windows_dxva2_hevc_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HEVC_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HEVC_VFR_TEST_MEDIA must name the HEVC VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "DXVA2 supplied HEVC VFR",
+        path,
+        "hevc",
+        DecodeBackend::DXVA2,
+        8_300,
+    );
+}
+
 #[test]
 fn scaler_color_metadata_changes_match_independent_cli_reference() {
     if !ffmpeg_available_for_scrub_seek_test() {
@@ -864,7 +1184,7 @@ fn scaler_color_metadata_changes_match_independent_cli_reference() {
             .arg(&fixture.path)
             .args([
                 "-vf",
-                "scale=8:8:flags=bicubic,format=rgba",
+                "scale=8:8:flags=bicubic+accurate_rnd,format=rgba",
                 "-frames:v",
                 "1",
                 "-f",

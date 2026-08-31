@@ -339,6 +339,16 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       tests, strict Clippy, seven fixture contracts, and seven Phase 0 scenarios pass locally.
       This does not close broad codec/hardware, HDR, or preview/export color parity gates.
       See `docs/codec-color-qualification.md`.
+- [x] Remove local native-resolution planar/NV12 preview color inconsistency.
+      Explicit D3D11VA/DXVA2 H.264 and HEVC Main 10 checks exposed 3,350,500
+      differing RGBA bytes (maximum channel error 79) at native 1080p despite
+      matching small previews. Accurate scaler conversion fixes the GPU-free
+      layout regression and passes 152 exact independent software-CLI comparisons
+      across native/padded outputs and forward/reverse/final/fresh seeks. Backend,
+      fallback, actual hardware transfer, request identity, and timestamp checks
+      remain strict. Conversion CPU cost is measured separately; this is local
+      default-adapter evidence, not full playback, cross-GPU, HDR, or export parity.
+      See `docs/hardware-decode-parity.md`.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for

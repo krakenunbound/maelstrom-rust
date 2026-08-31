@@ -1,6 +1,8 @@
 //! Latest-wins in-process FFmpeg monitor decoding.
 
 #[cfg(test)]
+mod scaler_layout_tests;
+#[cfg(test)]
 mod scrub_seek_tests;
 
 use std::{
@@ -3818,10 +3820,13 @@ fn configure_scaler_color(
 }
 
 const fn scaling_flags(high_quality_scaling: bool) -> ScalingFlags {
+    // Unscaled planar YUV and hardware-transferred NV12 otherwise select different
+    // RGB conversion shortcuts, including visibly different chroma-edge sampling.
+    // Keep both layouts on the accurate path without changing resolution or filter.
     if high_quality_scaling {
-        ScalingFlags::BICUBIC
+        ScalingFlags::BICUBIC.union(ScalingFlags::ACCURATE_RND)
     } else {
-        ScalingFlags::BILINEAR
+        ScalingFlags::BILINEAR.union(ScalingFlags::ACCURATE_RND)
     }
 }
 
@@ -4014,7 +4019,7 @@ mod tests {
         ));
     }
 
-    fn hardware_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn hardware_test_guard() -> std::sync::MutexGuard<'static, ()> {
         HARDWARE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5366,9 +5371,10 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn open_supplied_media_windows_hardware_monitor(
+    pub(super) fn open_supplied_media_windows_hardware_monitor(
         path: PathBuf,
         requested_backend: DecodeBackend,
+        output_size: (u32, u32),
     ) -> Result<StickyMonitor, String> {
         let input = ffmpeg::format::input(&path)
             .map_err(|error| format!("could not open supplied test media: {error}"))?;
@@ -5406,7 +5412,6 @@ mod tests {
                 decoder,
             )
         };
-        let output_size = (40, 30);
         let scaled_size = fitted_size(
             decoder.width(),
             decoder.height(),
@@ -5446,11 +5451,12 @@ mod tests {
         };
         let _hardware = hardware_test_guard();
         for backend in [DecodeBackend::D3D11VA, DecodeBackend::DXVA2] {
-            let mut monitor =
-                open_supplied_media_windows_hardware_monitor(PathBuf::from(&path), backend)
-                    .unwrap_or_else(|error| {
-                        panic!("could not open {}: {error}", backend.display_name())
-                    });
+            let mut monitor = open_supplied_media_windows_hardware_monitor(
+                PathBuf::from(&path),
+                backend,
+                (40, 30),
+            )
+            .unwrap_or_else(|error| panic!("could not open {}: {error}", backend.display_name()));
             assert_eq!(monitor.backend, backend);
             assert!(monitor.transfer_hardware_frames);
 
@@ -5493,8 +5499,9 @@ mod tests {
         newest.source_tick = 1_000_000;
         assert!(same_decode_generation(&original, &newest));
 
-        let hardware = open_supplied_media_windows_hardware_monitor(path, DecodeBackend::D3D11VA)
-            .expect("open D3D11VA monitor for forced runtime fallback");
+        let hardware =
+            open_supplied_media_windows_hardware_monitor(path, DecodeBackend::D3D11VA, (40, 30))
+                .expect("open D3D11VA monitor for forced runtime fallback");
         assert_eq!(hardware.backend, DecodeBackend::D3D11VA);
         let mut sessions = HashMap::from([(original.media_id, hardware)]);
         let commands = Arc::new(Mutex::new(Some(MonitorCommand::Request(newest.clone()))));
@@ -5800,8 +5807,14 @@ mod tests {
 
     #[test]
     fn scaler_policy_selects_requested_ffmpeg_filter() {
-        assert_eq!(scaling_flags(true), ScalingFlags::BICUBIC);
-        assert_eq!(scaling_flags(false), ScalingFlags::BILINEAR);
+        assert_eq!(
+            scaling_flags(true),
+            ScalingFlags::BICUBIC.union(ScalingFlags::ACCURATE_RND)
+        );
+        assert_eq!(
+            scaling_flags(false),
+            ScalingFlags::BILINEAR.union(ScalingFlags::ACCURATE_RND)
+        );
     }
 
     #[test]

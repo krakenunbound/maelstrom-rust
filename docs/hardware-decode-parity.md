@@ -1,0 +1,153 @@
+# Hardware decode timing and native-resolution color parity
+
+## Correction — 2026-08-31
+
+Native-size H.264 preview conversion depended on decoder output layout. The
+software decoder supplies planar YUV420P; Windows hardware transfer supplies
+NV12. Both contain the same image, but the default unscaled RGB conversion paths
+produce different chroma edges. On the first generated 1920x1080 BT.709 frame,
+3,350,500 of 8,294,400 RGBA bytes differ, with maximum channel error 79/255.
+Small 64x48 checks missed this: downscaled output matched exactly already.
+
+Independent FFmpeg experiments isolate conversion from decoding: software decode
+followed by lossless NV12 layout conversion produces exactly the hardware RGB
+output. Enabling `accurate_rnd` instead makes planar and NV12 RGB output identical.
+The app now adds `ACCURATE_RND` to its existing bicubic/bilinear scaler flags.
+Resolution, selected filtering, source data, hardware selection, cache limits,
+and UI scheduling remain unchanged. No additional conversion buffer or decoder
+is introduced. This improves consistency; it is not a lower-resolution shortcut.
+
+The [pinned FFmpeg 8.1 header](https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1/libswscale/swscale.h)
+documents accurate conversion flags and their optimization tradeoff. Exact
+layout parity here is measured on the local runtime, not claimed for every CPU,
+GPU, pixel format, or FFmpeg version. `BITEXACT` is not added, so this is not a
+cross-platform bit-exact guarantee.
+
+## Regression and reference contract
+
+- A GPU-free regression creates equivalent row-stride-aware YUV420P/NV12 frames
+  with patterned luma and sharp chroma edges. Native and downscaled outputs must
+  match exactly in both quality modes. Removing only the production flag change
+  reproduces the native-size failure; restoring it passes.
+- Four opt-in tests explicitly open D3D11VA or DXVA2. Unsupported hardware,
+  missing input, software fallback, absent hardware transfer, or pixel/timestamp
+  mismatch fails; none is counted as a software success.
+- Each codec/backend runs 19 forward/reverse/repeated-final/fresh-seek cases at
+  64x48 and 19 at native 1920x1080: **152 exact comparisons** in the local matrix.
+  Every decoded frame must increment hardware-transfer samples, retain the
+  requested backend without fallback, and preserve request/target identity.
+  This real-hardware matrix uses high-quality bicubic; bilinear layout parity
+  is covered by the separate GPU-free regression, not claimed as hardware proof.
+- Independent sequential FFmpeg software decoding supplies all RGBA bytes.
+  References explicitly use bicubic plus accurate conversion to describe the
+  corrected color policy, not the former layout-dependent default. FFprobe
+  supplies presentation timestamps. The existing one-microsecond rounding
+  tolerance applies only to timestamps; pixel tolerance remains zero.
+- Fixture bounds are eight frames, positive shifted origin, irregular increasing
+  timestamps, 16:9 dimensions at most 1920x1080, H.264 or HEVC Main 10. This is
+  finite qualification, not arbitrary-file conformance.
+
+The test helper opens the requested hardware device with the production helper
+and the system's default adapter. D3D11VA and DXVA2 are **two backend APIs**, not
+proof that both installed physical GPUs decoded these samples. CUVID, QSV decode,
+VideoToolbox, AV1, HDR, export parity, and broader source/reference-machine coverage
+remain open. No editor launch or physical presentation measurement occurred.
+
+## Reproduction
+
+Use the workspace's approved FFmpeg bundle. The generated test patterns require
+no third-party media or model downloads. Run from `H:\Maelstrom Rust`:
+
+```powershell
+$ffmpeg = 'H:\Maelstrom Rust\.deps\ffmpeg-project-8.1\bin\ffmpeg.exe'
+$artifacts = 'H:\Maelstrom Rust\artifacts\phase1-multisource'
+$selected = "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)'"
+& $ffmpeg -v error -n -f lavfi -i 'testsrc2=size=1920x1080:rate=24' `
+  -vf "$selected,setpts=PTS+7/TB" -frames:v 8 -fps_mode vfr -an `
+  -c:v h264_qsv -global_quality 20 -g 8 -bf 2 -color_range tv `
+  -colorspace bt709 -color_primaries bt709 -color_trc bt709 -map_metadata -1 `
+  "$artifacts\codec-vfr-h264-bt709-1080p-hardware.mp4"
+& $ffmpeg -v error -n -f lavfi -i 'testsrc2=size=1920x1080:rate=24' `
+  -vf "$selected,format=p010le,setpts=PTS+7/TB" -frames:v 8 -fps_mode vfr -an `
+  -c:v hevc_qsv -profile:v main10 -global_quality 20 -g 8 -bf 2 -color_range tv `
+  -colorspace bt709 -color_primaries bt709 -color_trc bt709 -map_metadata -1 `
+  "$artifacts\codec-vfr-hevc-main10-bt709-1080p-hardware.mp4"
+$env:FFMPEG_DIR = 'H:\Maelstrom Rust\.deps\ffmpeg-project-8.1'
+$env:LIBCLANG_PATH = 'H:\Maelstrom Rust\.deps\libclang-bindgen'
+$env:PATH = "$env:FFMPEG_DIR\bin;$env:LIBCLANG_PATH;$env:PATH"
+$env:MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA = "$artifacts\codec-vfr-h264-bt709-1080p-hardware.mp4"
+$env:MAELSTROM_HEVC_VFR_TEST_MEDIA = "$artifacts\codec-vfr-hevc-main10-bt709-1080p-hardware.mp4"
+& 'C:\Users\The Kraken\.cargo\bin\cargo.exe' test -p nle-decode --release supplied_windows_ -- --ignored --test-threads=1 --nocapture
+& 'C:\Users\The Kraken\.cargo\bin\cargo.exe' test -p nle-decode --release scaler_layout -- --include-ignored --test-threads=1 --nocapture
+```
+
+Use a dedicated shell for these environment settings. `-n` preserves existing
+fixtures; reuse them or choose new filenames rather than overwriting evidence.
+QSV encoding requires compatible local hardware and is not a deterministic public
+fixture-manifest contract. The actual muxed timestamps are read, not assumed from
+the input selection recipe. The local H.264/HEVC files contain B pictures and a
+seven-second origin; their hashes are:
+
+| Fixture | SHA-256 |
+|---|---|
+| H.264 High, 8-bit | `503B39F6C101F8395B49AD424711357DC317C2CAEFCFCC9E5F795A0D46CDCAA6` |
+| HEVC Main 10 | `1AF892D8C40634E354A05FD80A446298C5501914D2E39ECD641D792B6538C486` |
+
+## Verification boundary
+
+The release workspace passes 744 tests, with 21 opt-in tests ignored. The four
+hardware tests and full-HD timing diagnostic were run separately, not inferred
+from ignored results. Strict all-target workspace Clippy and formatting pass.
+All seven deterministic fixture contracts and all seven Phase 0 scenarios pass.
+The missing-required-input negative control fails as intended rather than
+reporting an empty hardware test as successful.
+The independent four-source Full-1080p app gate passes with 161 microseconds
+submission, 62 ms until all frames, five peak sessions under eight, and zero
+sessions after teardown. These are headless worker measurements, not scanout.
+
+The older isolated latency-comparison test currently fails because no decoder
+backend was observed despite retained frames being present. Paused prewarm
+workers can populate the shared cache before the foreground reply; cached frames
+intentionally omit backend provenance. The probe only waits for retained frames,
+not a provenance-bearing decode. Its failure is preserved in
+`hardware-parity-latency.log`; no passing latency report or windowed qualification
+is claimed from that run. Fixing the measurement without inventing cache
+provenance remains a separate open task.
+
+The accurate scaler has a measurable CPU cost. The diagnostic measures only the
+existing scaler timing span, excluding hardware transfer, demux/decode, RGBA
+packing, GPU upload, and display. It is not a throughput/real-time acceptance gate.
+Each timing run uses eight warmups and 120 measured conversions per layout/filter:
+
+| Native 1080p conversion | Original p50 / p95, ms | Corrected p50 range / p95 range, ms (three runs) |
+|---|---|---|
+| Planar, bilinear | 1.050 / 1.135 | 2.694–2.721 / 2.814–2.959 |
+| NV12, bilinear | 2.859 / 2.963 | 2.767–2.779 / 2.920–3.128 |
+| Planar, bicubic | 1.146 / 1.263 | 4.721–4.776 / 4.917–4.995 |
+| NV12, bicubic | 2.869 / 2.978 | 4.800–4.818 / 5.057–11.299 |
+
+The NV12 tail outlier is retained, not retried away. The earlier corrected
+exploratory run also had an 11.680 ms p95. Accurate conversion increases worker
+CPU cost; optimization and sustained/windowed requalification remain necessary
+before any no-lag claim. The user-selected bilinear/bicubic distinction stays
+intact; the fix does not quietly choose the cheaper filter.
+
+Before/after logs, failed assertions, generated media, and independent raw output
+are retained under ignored `artifacts/phase1-multisource/` with prefix
+`hardware-parity-`. Broader playback/latency and preview/export color gates remain
+open.
+
+## Packaged checkpoint
+
+The 36,141,568-byte portable executable matches the release build, SHA-256
+`8F0965B4489D34A11BEB5D7279DEF9DB8766AB611061EF7C119FAC793398A79A`.
+The package was built with `-SkipSmoke`; its status is explicitly `not_run`.
+The full-path launcher runtime check and packaged FFmpeg/FFprobe loader checks
+pass. No editor was launched, and historical windowed evidence is not relabeled
+as evidence for this new executable. Independent review found no blocking defect.
+
+The local evidence manifest is `hardware-parity-verification.json`, SHA-256
+`EE6610FEF4C3CD3E322ABBA37FED5921A769C4BE452F0454A8A19135557BD10B`.
+It binds fixture, log, Phase 0 report, and package hashes, records the failed
+latency probe separately, and confirms no editor/compiler/test/media process
+remained at verification.
