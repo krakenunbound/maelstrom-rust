@@ -25,9 +25,15 @@ Last updated: 2026-08-31
   submission gains repeat; readiness differences reverse direction, so no consistent
   penalty or end-to-end speedup is established. All temporary hooks removed; fresh
   773 release tests, strict Clippy and formatting pass. See `docs/monitor-worker-scheduling.md`.
-- [ ] Complete independent review and package delivery; requalify windowed/cross-hardware
-  performance. Short paired results do not prove readiness non-inferiority or lag-free
-  playback. Package is still unchanged; do not launch the editor without permission.
+- [x] Rebuild the portable package with silent prewarming and worker wake scheduling,
+  without launching it. Executable SHA-256 starts `5DD49EF46A5BEBD6`; all 23 previous
+  package files are backed up and verified. Pinned runtime hashes, 15 AMD64 PE
+  inventories, FFmpeg/FFprobe loader checks and launcher check-only mode pass.
+  Only executable/status changed; `smoke_status` remains `not_run`.
+  Evidence: `docs/monitor-worker-scheduling.md`.
+- [ ] Complete independent review and requalify windowed/cross-hardware performance.
+  Short paired results do not prove readiness non-inferiority or lag-free playback.
+  The rebuilt package is prepared, not GUI-qualified; explicit launch approval is pending.
 - [x] Make speculative monitor prewarming silent without removing decode/cache/session
   warming. Both standalone and coordinated workers retain visible foreground/reverse
   replies and errors. Five new regression tests, 770 release tests, strict Clippy,
@@ -49,8 +55,8 @@ Last updated: 2026-08-31
   `SourceLaneActor::submit`'s `wake.try_send`; controlled wake-boost evidence now
   supports the targeted worker policy above. Attribute audio lock ownership separately.
   No quality/threshold changes. Production four/eight-CPU runs now pass as recorded
-  above; the historical failure remains preserved. Package remains the previous
-  CPU-guard build. Evidence: `docs/restricted-live-audio-submission.md` and
+  above; the historical failure remains preserved. The package now contains the
+  fixes but has no new GUI qualification. Evidence: `docs/restricted-live-audio-submission.md` and
   `docs/monitor-worker-scheduling.md`.
 - [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
   initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,

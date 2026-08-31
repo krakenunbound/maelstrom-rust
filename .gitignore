@@ -11,6 +11,7 @@
 /artifacts/phase1-multisource/
 /artifacts/phase1-latency/
 /artifacts/phase1-sustained/
+/artifacts/package-worker-policy-c603358/
 
 # Local AI weights and model packages are never public source. Keep only the
 # registry contract and its licensing guidance in Git.

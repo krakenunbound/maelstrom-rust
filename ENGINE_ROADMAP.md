@@ -412,8 +412,12 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       A 14.6% cycle-rate loss in the first eight-CPU pair is not repeated in the
       reverse-order pair (+3.1%). No consistent readiness penalty, non-inferiority,
       or end-to-end scrub speedup is established. Hooks removed; fresh 773 release
-      tests, Clippy and formatting pass. Independent review, package delivery and
-      windowed/cross-hardware proof remain open.
+      tests, Clippy and formatting pass. Portable package rebuilt from clean `c603358`;
+      executable SHA-256 starts `5DD49EF46A5BEBD6`. All 23 prior package files are
+      recoverably archived; only executable/status changed. Pinned runtime hashes,
+      15 AMD64 static import inventories, FFmpeg/FFprobe loader checks and the exact
+      launcher's check-only mode pass. Smoke remains `not_run`; no editor launch.
+      Independent review and windowed/cross-hardware proof remain open.
       See `docs/monitor-worker-scheduling.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked

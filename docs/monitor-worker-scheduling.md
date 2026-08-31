@@ -190,5 +190,49 @@ All temporary source hooks and environment switches are removed; the three
 affected source files match the clean production commit. Fresh release workspace
 tests (773 passed, 24 ignored), strict all-target Clippy and formatting pass.
 No new production scheduling change is justified by these mixed readiness
-results. Independent review, windowed/cross-hardware behavior and package
-delivery remain open. The package is unchanged and no editor was launched.
+results. Independent review and windowed/cross-hardware behavior remain open.
+The package was unchanged at the end of this comparison; subsequent assembly
+is recorded below. No editor was launched.
+
+## Portable package checkpoint
+
+The portable Windows package was rebuilt from clean source
+`c60335829ba3d8c25d22ecd6ee8cc7b1a9750b30` using the reviewed
+`scripts/package-windows.ps1 -SkipSmoke` path. It now includes silent speculative
+prewarming and the Windows monitor-worker wake policy, in addition to the
+existing CPU-count/conversion fixes. The packaged executable matches the release
+build at SHA-256
+`5DD49EF46A5BEBD6226B17AD2A8CE0A4E1749C1738681017DA5369B3C21F37B2`.
+
+All 23 files in the prior package were archived and checked byte-for-byte before
+the packaging script replaced its validated, non-reparse output directory.
+Recovery archive:
+`artifacts/package-worker-policy-c603358/previous-package.zip`, SHA-256
+`3D0BAB2361CD791CB06B72183285154098FD9B12EFA46841678DF98E0AFF0BDC`.
+Only `Maelstrom.exe` and `PACKAGE-STATUS.json` differ between the old and new
+23-file packages. Models, licenses, runtime libraries and other support files
+are unchanged. No system DLL was installed, downloaded, or replaced.
+
+The package passes these local, non-GUI checks:
+
+- All 13 bundled FFmpeg command/runtime files match the pinned build checksum
+  inventory; the additional app-local VC runtime matches the authorized installed
+  Visual Studio CRT. The frozen LGPL FFmpeg 8.1 line is unchanged.
+- All 15 PE files are AMD64. Static imports resolve to adjacent packaged files,
+  known Windows modules present on this host, or explicitly classified Windows
+  API-set contracts. Contract resolution and dynamically loaded GPU libraries
+  are not proved by this static inspection. API-set names are virtual aliases,
+  not necessarily files on disk; see [Microsoft's API-set documentation](https://learn.microsoft.com/en-us/windows/win32/apiindex/windows-apisets).
+- Packaged FFmpeg and FFprobe run their version checks successfully. The exact
+  full-path launcher passes `--verify-runtime`, whose inspected branch returns
+  without launching the editor. All 12 required adjacent DLLs are present.
+- The empty packaged model registry matches the source; optional restricted
+  runtime/model locations and the launcher remain untouched.
+
+`artifacts/package-worker-policy-c603358/verification.json` records complete
+file hashes, the backup, static imports, architecture, loader checks and scope.
+This is an unsigned local snapshot, not a clean-machine installation test.
+`PACKAGE-STATUS.json` deliberately remains `smoke_status: not_run`; historical
+smoke reports do not qualify this new executable. Windowed playback validation
+still requires explicit approval to use
+`H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`. No GUI launch occurred.
