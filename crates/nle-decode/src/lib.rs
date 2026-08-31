@@ -8,6 +8,7 @@ mod rgba_packing_tests;
 mod scaler_layout_tests;
 #[cfg(test)]
 mod scrub_seek_tests;
+mod worker_scheduling;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -2180,6 +2181,7 @@ fn monitor_scheduler_loop(
     session_pool: MonitorSessionPool,
     worker_index: usize,
 ) {
+    worker_scheduling::configure_monitor_worker();
     if initialize_ffmpeg().is_err() {
         return;
     }
@@ -2319,6 +2321,7 @@ fn source_lane_actor_loop(
     shared: Arc<SourceLaneActorShared>,
     session_pool: MonitorSessionPool,
 ) {
+    worker_scheduling::configure_monitor_worker();
     if initialize_ffmpeg().is_err() {
         return;
     }
@@ -5038,6 +5041,14 @@ mod tests {
         wait_for_worker_completions(&decoder, &[0, 1, 2, 3]);
         assert_eq!(pool.diagnostics().active_foreground_sessions, 1);
         assert_eq!(pool.diagnostics().active_background_sessions, 3);
+        #[cfg(windows)]
+        for worker in &decoder.workers {
+            assert_eq!(
+                worker_scheduling::monitor_worker_policy(worker.scheduler.as_ref().unwrap())
+                    .unwrap(),
+                (true, 0)
+            );
+        }
         assert!(cache.diagnostics().current_bytes > 0);
         assert!(decoder.observed_frame_backends().next().is_some());
         assert_eq!(notifications.load(Ordering::Relaxed), 1);
@@ -5079,6 +5090,27 @@ mod tests {
         // warms the cache before the other speculative clients need separate sticky sessions.
         assert_eq!(pool.diagnostics().active_background_sessions, 1);
         assert_eq!(coordinator.diagnostics().live_lane_actors, 2);
+        #[cfg(windows)]
+        {
+            // Release ownership locks before assertions so a regression cannot poison teardown.
+            let policies = {
+                let state = coordinator.state.lock().unwrap();
+                state
+                    .groups
+                    .values()
+                    .flat_map(|group| [&group.foreground, &group.background])
+                    .map(|weak| {
+                        let actor = weak.upgrade().expect("prewarm actor remains live");
+                        let scheduler = actor.scheduler.lock().unwrap();
+                        worker_scheduling::monitor_worker_policy(scheduler.as_ref().unwrap())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(policies.len(), 2);
+            for policy in policies {
+                assert_eq!(policy.unwrap(), (true, 0));
+            }
+        }
         assert!(cache.diagnostics().current_bytes > 0);
         assert!(decoder.observed_frame_backends().next().is_some());
         assert_eq!(notifications.load(Ordering::Relaxed), 1);

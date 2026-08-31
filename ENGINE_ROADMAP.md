@@ -395,6 +395,14 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       not its internal cause. Passing audio and packaged/windowed/cross-machine
       proof remain pending. See `docs/restricted-live-audio-submission.md`.
       See `docs/silent-monitor-prewarm.md`.
+- [x] Keep Windows monitor compute workers at their existing base priority rather
+      than automatically boosting them on wake. A same-binary four-CPU audio control
+      fails at 14,262 us submission p95; disabling boosts passes twice at 89/59 us,
+      without changing Full resolution or base/process/UI/audio priorities. Standalone
+      and coordinated workers now apply the policy at startup; live-thread regressions
+      fail before/pass after. 773 release tests, Clippy and formatting pass. Production
+      audio/resource, independent-review, and windowed/cross-hardware proof remain open.
+      See `docs/monitor-worker-scheduling.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
       single-allocation packing cuts local native-1080p packing p50 from 2.658 to 1.363 ms and

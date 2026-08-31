@@ -9,6 +9,14 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Disable automatic Windows wake-priority boosts only on video monitor workers,
+  preserving base/process/UI/audio priorities and full image quality. Same-binary
+  control failed at 14,262 us; test-only no-boost runs passed at 89/59 us. Actual
+  worker-policy regressions fail before/pass after; 773 release tests and strict
+  Clippy/formatting pass. Parent-reviewed; independent agent unavailable.
+  Evidence: `docs/monitor-worker-scheduling.md`.
+- [ ] Qualify the production worker policy with uninstrumented four/eight-CPU
+  Full-resolution audio and sustained resource gates before package delivery.
 - [x] Make speculative monitor prewarming silent without removing decode/cache/session
   warming. Both standalone and coordinated workers retain visible foreground/reverse
   replies and errors. Five new regression tests, 770 release tests, strict Clippy,
@@ -27,9 +35,9 @@ Last updated: 2026-08-31
   The corrected 30-second four-CPU run delivered 2,340 actual layer requests but
   failed at 16,148 us submission p95, one callback-lock failure, and 480 underrun
   frames. Two archived test-only traces locate most submission delay at
-  `SourceLaneActor::submit`'s `wake.try_send`; determine lock contention versus
-  scheduling delay before choosing a fix. Attribute audio lock ownership separately.
-  No quality/threshold/priority changes. Eight-CPU audio remains unrun; package
+  `SourceLaneActor::submit`'s `wake.try_send`; controlled wake-boost evidence now
+  supports the targeted worker policy above. Attribute audio lock ownership separately.
+  No quality/threshold changes. Production eight-CPU audio remains unrun; package
   remains the previous CPU-guard build. Evidence: `docs/restricted-live-audio-submission.md`.
 - [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
   initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,
