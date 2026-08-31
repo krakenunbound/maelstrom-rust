@@ -221,6 +221,13 @@ Exit gate:
       The same test passed before and after that run. Preserve and diagnose this intermittent
       failure using `artifacts/phase1-multisource/shared-clip-export-stall/`; do not treat the
       serial pass as closure of the export reliability gate.
+      The clean-HEAD timeline-foundation runner was renewed at `4f4fd5e` on 2026-08-31. Ten
+      50,000-clip history trials passed with 0.2565/1.2552 ms press/edit-release p95;
+      wide/detail/playhead CPU p95 was 0.4885/0.3386/0.4274 ms; real 1920x1088 H.264 plus 20,002
+      bars was 0.5108 ms p95. The schema-1 report hash is
+      `36675C22C160CD4A0B90EBAB89DA33F859B50046B0CFCF204BF7FD161DE49399`. This renews the
+      source-tree CPU/decode subset only; package, GUI, soak and export reliability keep the broad
+      foundation gate open.
       Follow-up reproduced the saved command without Rust: six of twenty runs timed out at
       the unbounded `apad`/timestamp-trim boundary. Final mixed audio and silence now use finite
       48 kHz sample padding/trimming plus a sample-derived clock. Twenty corrected saved-command
@@ -684,8 +691,16 @@ Replace “topmost clip wins” with a generation-aware retained compositor.
 
 Exit gate:
 
-- [ ] At least four transformed 1080p layers composite correctly on the discrete reference profile.
+- [x] At least four transformed 1080p layers composite correctly on the discrete reference profile.
+      The 2026-08-31 schema-2 headless DX12 qualification pre-uploaded four 1920x1080 sources,
+      used Bicubic sampling, excluded five warmups, measured 30 changed generations, and matched
+      deterministic RGBA readback on RTX 3090. CPU encode p95 was 0.2001 ms and GPU pass p95 was
+      0.2775 ms against the 33.333 ms frame budget. This is offscreen compositor evidence, not app
+      presentation, DWM or physical scanout. See `docs/performance-reports.md`.
 - [ ] At least two layers operate on the integrated reference profile using Auto preview quality.
+      The same qualification passed the two-layer compositor prerequisite on Intel UHD 770 at
+      0.2347 ms CPU / 6.9969 ms GPU p95, but explicitly did not exercise app Auto selection or
+      presentation; this gate remains open.
 - [ ] Disabling a layer or changing a transform appears on the next available preview generation.
 - [ ] Missing/late layers hold or become transparent without stalling ready layers or input.
 - [x] Timeline and full-frame CPU budgets remain green.
@@ -909,7 +924,7 @@ Exit gate:
 - [x] Fit/fill/stretch/original sizing
 - [ ] Correct premultiplied-alpha semantics across every video/image source
 - [x] Still-image import, timeline editing, retained preview, and export
-- [ ] Sampling-quality choices
+- [x] Sampling-quality choices
 - [x] Double-buffered output
 - [x] Bounded render-target pool
 

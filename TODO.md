@@ -9,6 +9,18 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Qualify the retained compositor at full 1920x1080 on both reference adapters. The schema-2
+  headless DX12 gate pre-uploads its sources, excludes five warmups, then measures 30 changed
+  generations using Bicubic sampling and verifies the center pixel. Intel UHD 770 passed two
+  transformed layers at 0.2347 ms CPU / 6.9969 ms GPU p95; RTX 3090 passed four transformed layers
+  at 0.2001 ms CPU / 0.2775 ms GPU p95. This closes the discrete four-layer compositor gate and
+  only the integrated two-layer compositor prerequisite: app Auto quality, presentation, DWM and
+  physical scanout remain unproven. See `docs/performance-reports.md`.
+- [x] Renew the clean-HEAD Phase 0 timeline-foundation evidence at `4f4fd5e`. Ten 50,000-clip
+  history trials passed at 0.2565/1.2552 ms press/edit-release p95; wide/detail/playhead CPU p95 was
+  0.4885/0.3386/0.4274 ms; real H.264 plus 20,002 bars was 0.5108 ms p95. The ignored report hash is
+  `36675C22C160CD4A0B90EBAB89DA33F859B50046B0CFCF204BF7FD161DE49399`; GUI, package, scanout and
+  cross-hardware evidence remain outside this gate. See `docs/performance-reports.md`.
 - [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
   EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
   part of monitor request, cache, sticky scaler and hardware-transfer identity without changing
@@ -349,8 +361,9 @@ Last updated: 2026-08-31
 - [x] Add bounded compositor-owned render-target/texture reuse and retained CPU command scratch;
   `egui_wgpu` owns the callback encoder, so the compositor allocates no command buffers to pool.
 - [x] Implement correct premultiplied-alpha image/video semantics.
-- [ ] Add nearest, bilinear, and bicubic preview sampling where supported.
-- [ ] Prove four transformed 1080p layers on the discrete reference profile.
+- [x] Add nearest, bilinear, and bicubic preview sampling where supported.
+- [x] Prove four transformed 1080p layers on the discrete reference profile with the schema-2
+  headless compositor qualification. Presentation and physical scanout are separate gates.
 - [ ] Prove at least two layers with Auto quality on the integrated reference profile.
 - [ ] Prove missing or late layers never stall ready layers or input.
 
@@ -366,6 +379,10 @@ Last updated: 2026-08-31
   roadmap order.
 - [ ] Evaluate optional GPU Optical Flow interpolation (`fruc_vulkan`) for slow motion and
   frame-rate conversion; preserve the working FFmpeg runtime during isolated qualification.
+  - The approved local `n8.1-maelstrom-20260824` runtime currently exposes `fps`, `framerate`, and
+    `minterpolate`, but not `fruc_vulkan`. Treat upstream FFmpeg master as a separately qualified
+    candidate; do not replace or destabilize the working 8.1 runtime merely because the GPU is
+    nominally compatible.
   - Automatically detect usable devices, driver capabilities, and filter availability in the
     actual runtime. Do not enable by GPU model-name matching alone. Probe Vulkan optical-flow
     features, queues, supported formats/dimensions, and successful filter/session initialization.

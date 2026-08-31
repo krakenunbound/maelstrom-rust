@@ -64,17 +64,27 @@ try {
     $env:MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT = $resolvedReportPath
     Push-Location -LiteralPath $repoRoot
     $repoLocationPushed = $true
-    & $cargo test -p nle-render viewer_compositor::tests::phase0_cross_adapter_viewer_compositor_qualification -- --ignored --exact --test-threads=1
+    & $cargo test --release -p nle-render viewer_compositor::tests::phase0_cross_adapter_viewer_compositor_qualification -- --ignored --exact --test-threads=1
     $testExitCode = $LASTEXITCODE
 
     if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
         throw "Cross-adapter qualification exited with code $testExitCode without writing its report. Both DX12 IntegratedGpu and DiscreteGpu adapters are required."
     }
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw | ConvertFrom-Json
-    if ($testExitCode -ne 0 -or $report.schema_version -ne 1 -or $report.status -ne 'passed' -or
-        $report.scope -ne 'headless_viewer_compositor' -or $report.physical_scanout_observed -ne $false -or
-        $null -eq $report.machine -or @($report.adapters).Count -ne 2) {
+    if ($testExitCode -ne 0 -or $report.schema_version -ne 2 -or $report.status -ne 'passed' -or
+        $report.scope -ne 'headless_transformed_multilayer_viewer_compositor' -or $report.physical_scanout_observed -ne $false -or
+        $report.app_auto_preview_observed -ne $false -or $null -eq $report.machine -or $null -eq $report.workload -or
+        @($report.adapters).Count -ne 2) {
         throw "Cross-adapter qualification failed or has an invalid report shape: $resolvedReportPath"
+    }
+    $workload = $report.workload
+    if ([int]$workload.source_width -ne 1920 -or [int]$workload.source_height -ne 1080 -or
+        [int]$workload.output_width -ne 1920 -or [int]$workload.output_height -ne 1080 -or
+        $workload.sampling -ne 'Bicubic' -or [int]$workload.warmup_submissions -ne 5 -or
+        [int]$workload.measured_submissions -ne 30 -or [int]$workload.target_fps -ne 30 -or
+        -not [bool]$workload.uploads_excluded_from_timing -or -not [bool]$workload.warmup_excluded_from_timing -or
+        -not [double]::IsFinite([double]$workload.frame_budget_ms) -or [math]::Abs([double]$workload.frame_budget_ms - (1000.0 / 30.0)) -gt 0.001) {
+        throw "Cross-adapter report has an invalid schema-2 workload: $resolvedReportPath"
     }
     $deviceTypes = @($report.adapters | ForEach-Object { [string]$_.device_type })
     foreach ($requiredType in @('IntegratedGpu', 'DiscreteGpu')) {
@@ -85,16 +95,37 @@ try {
     foreach ($adapter in @($report.adapters)) {
         if ([string]::IsNullOrWhiteSpace([string]$adapter.name) -or [string]::IsNullOrWhiteSpace([string]$adapter.backend) -or
             $adapter.backend -ne 'Dx12' -or -not [bool]$adapter.correctness_readback_passed -or
-            [int]$adapter.composition_submissions -ne 2) {
+            -not [bool]$adapter.timestamp_query_supported -or [int]$adapter.warmup_submissions -ne [int]$workload.warmup_submissions -or
+            [int]$adapter.measured_submissions -ne [int]$workload.measured_submissions -or $null -eq $adapter.cpu_encode_timing -or
+            $null -eq $adapter.gpu_pass_timing -or $null -eq $adapter.correctness_actual_rgba -or
+            $null -eq $adapter.correctness_expected_rgba -or [int]$adapter.correctness_tolerance -ne 4) {
             throw "Cross-adapter report has incomplete compositor evidence for adapter '$($adapter.name)': $resolvedReportPath"
         }
-        if ([bool]$adapter.timestamp_query_supported) {
-            if ($null -eq $adapter.timing -or [int]$adapter.timing.samples -ne 2 -or
-                [double]$adapter.timing.p95_ms -le 0 -or [double]$adapter.timing.max_ms -le 0) {
-                throw "Cross-adapter report has invalid timestamp timing for adapter '$($adapter.name)': $resolvedReportPath"
+        $expectedLayerCount = if ($adapter.device_type -eq 'IntegratedGpu') { 2 } elseif ($adapter.device_type -eq 'DiscreteGpu') { 4 } else { 0 }
+        if ([int]$adapter.layer_count -ne $expectedLayerCount) {
+            throw "Cross-adapter report has the wrong layer count for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        foreach ($timingName in @('cpu_encode_timing', 'gpu_pass_timing')) {
+            $timing = $adapter.$timingName
+            if ([int]$timing.samples -ne [int]$workload.measured_submissions -or
+                -not [double]::IsFinite([double]$timing.p95_ms) -or -not [double]::IsFinite([double]$timing.max_ms) -or
+                [double]$timing.p95_ms -lt 0 -or [double]$timing.max_ms -lt [double]$timing.p95_ms) {
+                throw "Cross-adapter report has invalid $timingName timing for adapter '$($adapter.name)': $resolvedReportPath"
             }
-        } elseif ($null -ne $adapter.timing) {
-            throw "Cross-adapter report must serialize timing as null when TIMESTAMP_QUERY is unavailable: $($adapter.name)"
+        }
+        if ([double]$adapter.cpu_encode_timing.p95_ms -gt 8.0 -or
+            [double]$adapter.gpu_pass_timing.p95_ms -gt [double]$workload.frame_budget_ms) {
+            throw "Cross-adapter report exceeded the 30fps qualification budget for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        $actual = @($adapter.correctness_actual_rgba)
+        $expected = @($adapter.correctness_expected_rgba)
+        if ($actual.Count -ne 4 -or $expected.Count -ne 4) {
+            throw "Cross-adapter report has invalid correctness RGBA for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        for ($index = 0; $index -lt 4; $index++) {
+            if ([math]::Abs([int]$actual[$index] - [int]$expected[$index]) -gt [int]$adapter.correctness_tolerance) {
+                throw "Cross-adapter report correctness verification exceeded tolerance for adapter '$($adapter.name)': $resolvedReportPath"
+            }
         }
     }
     Write-Host "Phase 0 cross-adapter compositor qualification: PASS ($resolvedReportPath)"

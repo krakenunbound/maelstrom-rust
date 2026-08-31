@@ -2183,6 +2183,12 @@ mod tests {
     };
 
     const CROSS_ADAPTER_REPORT_ENV: &str = "MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT";
+    const QUALIFICATION_SOURCE_SIZE: PixelSize = PixelSize::new(1_920, 1_080);
+    const QUALIFICATION_OUTPUT_SIZE: PixelSize = PixelSize::new(1_920, 1_080);
+    const QUALIFICATION_WARMUP_SUBMISSIONS: u32 = 5;
+    const QUALIFICATION_MEASURED_SUBMISSIONS: u32 = 30;
+    const QUALIFICATION_FRAME_BUDGET_MS: f32 = 1_000.0 / 30.0;
+    const QUALIFICATION_READBACK_TOLERANCE: u8 = 4;
 
     #[derive(Debug, Serialize)]
     struct CrossAdapterReport {
@@ -2190,7 +2196,9 @@ mod tests {
         status: &'static str,
         scope: &'static str,
         physical_scanout_observed: bool,
+        app_auto_preview_observed: bool,
         machine: CrossAdapterMachine,
+        workload: CrossAdapterWorkload,
         adapters: Vec<CrossAdapterEvidence>,
     }
 
@@ -2212,16 +2220,37 @@ mod tests {
         driver: String,
         driver_info: String,
         timestamp_query_supported: bool,
+        layer_count: u32,
         correctness_readback_passed: bool,
-        composition_submissions: u32,
-        timing: Option<CrossAdapterTiming>,
+        correctness_actual_rgba: [u8; 4],
+        correctness_expected_rgba: [u8; 4],
+        correctness_tolerance: u8,
+        warmup_submissions: u32,
+        measured_submissions: u32,
+        cpu_encode_timing: CrossAdapterTiming,
+        gpu_pass_timing: CrossAdapterTiming,
     }
 
-    #[derive(Debug, Serialize)]
+    #[derive(Debug, PartialEq, Serialize)]
     struct CrossAdapterTiming {
         samples: usize,
         p95_ms: f32,
         max_ms: f32,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterWorkload {
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+        sampling: &'static str,
+        warmup_submissions: u32,
+        measured_submissions: u32,
+        target_fps: u32,
+        frame_budget_ms: f32,
+        uploads_excluded_from_timing: bool,
+        warmup_excluded_from_timing: bool,
     }
 
     fn cross_adapter_machine() -> CrossAdapterMachine {
@@ -2274,7 +2303,67 @@ mod tests {
         )
     }
 
-    fn qualification_frame() -> ViewerFrame {
+    fn qualification_frame(layer_count: usize) -> ViewerFrame {
+        let transformed_quad = |id| CompositeQuad {
+            clip_id: ClipId(id),
+            positions: [
+                Point { x: -96.0, y: -54.0 },
+                Point {
+                    x: 2_016.0,
+                    y: -81.0,
+                },
+                Point {
+                    x: 2_054.0,
+                    y: 1_134.0,
+                },
+                Point {
+                    x: -58.0,
+                    y: 1_161.0,
+                },
+            ],
+            uvs: [
+                Uv { u: 0.0, v: 0.0 },
+                Uv { u: 1.0, v: 0.0 },
+                Uv { u: 1.0, v: 1.0 },
+                Uv { u: 0.0, v: 1.0 },
+            ],
+            opacity: 1.0,
+        };
+        let primitive = |id, opacity| ViewerLayerPrimitive {
+            quad: CompositeQuad {
+                opacity,
+                ..transformed_quad(id)
+            },
+            content_uv: [
+                Uv { u: 0.0, v: 0.0 },
+                Uv { u: 1.0, v: 0.0 },
+                Uv { u: 1.0, v: 1.0 },
+                Uv { u: 0.0, v: 1.0 },
+            ],
+            color_corrections: [ViewerColorCorrection::default(); MAX_COLOR_CORRECTIONS_PER_LAYER],
+            color_correction_count: 0,
+        };
+        let mut layers = [None; MAX_COMPOSITE_LAYERS];
+        for (index, opacity) in [0.55, 0.50, 0.30, 0.20]
+            .into_iter()
+            .enumerate()
+            .take(layer_count)
+        {
+            layers[index] = Some(primitive(index as u32 + 1, opacity));
+        }
+        ViewerFrame {
+            project_size: QUALIFICATION_OUTPUT_SIZE,
+            logical_canvas_rect: egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_920.0, 1_080.0),
+            ),
+            black_mattes_before: [0.0; MAX_COMPOSITE_LAYERS + 1],
+            white_mattes_before: [0.0; MAX_COMPOSITE_LAYERS + 1],
+            layers,
+        }
+    }
+
+    fn black_matte_qualification_frame() -> ViewerFrame {
         let full_quad = |id| CompositeQuad {
             clip_id: ClipId(id),
             positions: [
@@ -2358,7 +2447,15 @@ mod tests {
         Ok(pixel)
     }
 
-    fn readback_output(
+    fn readback_center_pixel(
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        submission: wgpu::SubmissionIndex,
+    ) -> Result<[u8; 4], String> {
+        readback_first_pixel(device, buffer, submission)
+    }
+
+    fn verify_black_matte_readback(
         device: &wgpu::Device,
         buffer: &wgpu::Buffer,
         submission: wgpu::SubmissionIndex,
@@ -2377,19 +2474,70 @@ mod tests {
         }
     }
 
+    fn qualification_expected_rgba(layer_count: usize) -> [u8; 4] {
+        let colors: [[f32; 3]; 4] = [
+            [255.0, 0.0, 0.0],
+            [0.0, 255.0, 0.0],
+            [0.0, 0.0, 255.0],
+            [255.0; 3],
+        ];
+        let opacities = [0.55, 0.50, 0.30, 0.20];
+        let mut result = [0.0_f32; 3];
+        for (color, opacity) in colors.into_iter().zip(opacities).take(layer_count) {
+            for channel in 0..3 {
+                result[channel] = color[channel] * opacity + result[channel] * (1.0 - opacity);
+            }
+        }
+        [
+            result[0].round() as u8,
+            result[1].round() as u8,
+            result[2].round() as u8,
+            255,
+        ]
+    }
+
+    fn rgba_within_tolerance(actual: [u8; 4], expected: [u8; 4], tolerance: u8) -> bool {
+        actual
+            .into_iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
+    }
+
+    fn timing_from_samples(samples: &mut [f32]) -> Result<CrossAdapterTiming, String> {
+        if samples.is_empty()
+            || samples
+                .iter()
+                .any(|sample| !sample.is_finite() || *sample < 0.0)
+        {
+            return Err("qualification timing samples must be finite and non-negative".to_owned());
+        }
+        samples.sort_unstable_by(f32::total_cmp);
+        let p95_index = samples
+            .len()
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        Ok(CrossAdapterTiming {
+            samples: samples.len(),
+            p95_ms: samples[p95_index],
+            max_ms: samples[samples.len() - 1],
+        })
+    }
+
     fn qualify_viewer_compositor_adapter(
         adapter: wgpu::Adapter,
+        layer_count: usize,
     ) -> Result<CrossAdapterEvidence, String> {
         let info = adapter.get_info();
-        let timestamp_query_supported =
-            adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        if !adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return Err(format!(
+                "{} does not support required TIMESTAMP_QUERY",
+                adapter_label(&info)
+            ));
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("phase0 cross-adapter viewer compositor device"),
-            required_features: if timestamp_query_supported {
-                wgpu::Features::TIMESTAMP_QUERY
-            } else {
-                wgpu::Features::empty()
-            },
+            required_features: wgpu::Features::TIMESTAMP_QUERY,
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -2397,21 +2545,31 @@ mod tests {
         }))
         .map_err(|error| format!("request device for {}: {error}", adapter_label(&info)))?;
         let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        renderer.set_gpu_timing_enabled(timestamp_query_supported);
-        renderer
-            .upload_layer_rgba(&device, &queue, 0, 4, 4, &[255, 0, 0, 255].repeat(16))
-            .map_err(|error| format!("upload red input: {error}"))?;
-        renderer
-            .upload_layer_rgba(&device, &queue, 1, 4, 4, &[255, 255, 255, 255].repeat(16))
-            .map_err(|error| format!("upload white input: {error}"))?;
-        let frame = qualification_frame();
-        for generation in 1..=2 {
-            let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("phase0 cross-adapter viewer readback"),
-                size: 256 * 4,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
+        let source_pixels =
+            (QUALIFICATION_SOURCE_SIZE.width * QUALIFICATION_SOURCE_SIZE.height) as usize;
+        for (layer, color) in [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 255, 255],
+        ]
+        .into_iter()
+        .enumerate()
+        .take(layer_count)
+        {
+            renderer
+                .upload_layer_rgba(
+                    &device,
+                    &queue,
+                    layer,
+                    QUALIFICATION_SOURCE_SIZE.width,
+                    QUALIFICATION_SOURCE_SIZE.height,
+                    &color.repeat(source_pixels),
+                )
+                .map_err(|error| format!("upload qualification layer {layer}: {error}"))?;
+        }
+        let frame = qualification_frame(layer_count);
+        for generation in 1..=QUALIFICATION_WARMUP_SUBMISSIONS {
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             if !renderer.prepare(
@@ -2419,25 +2577,49 @@ mod tests {
                 &queue,
                 &mut encoder,
                 Some(frame),
-                generation,
-                PixelSize::new(4, 4),
+                generation as u64,
+                QUALIFICATION_OUTPUT_SIZE,
             ) {
                 return Err(format!(
-                    "composition cycle {generation} was unexpectedly skipped"
+                    "warmup composition {generation} was unexpectedly skipped"
                 ));
             }
-            if renderer.prepare(
+            let submission = queue.submit([encoder.finish()]);
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(Duration::from_secs(5)),
+                })
+                .map_err(|error| format!("warmup GPU completion: {error}"))?;
+        }
+        renderer.set_gpu_timing_enabled(true);
+        let mut cpu_encode_samples =
+            Vec::with_capacity(QUALIFICATION_MEASURED_SUBMISSIONS as usize);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("phase0 cross-adapter viewer center readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut final_submission = None;
+        for measured in 0..QUALIFICATION_MEASURED_SUBMISSIONS {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let generation = (QUALIFICATION_WARMUP_SUBMISSIONS + measured + 1) as u64;
+            let started_at = Instant::now();
+            if !renderer.prepare(
                 &device,
                 &queue,
                 &mut encoder,
                 Some(frame),
                 generation,
-                PixelSize::new(4, 4),
+                QUALIFICATION_OUTPUT_SIZE,
             ) {
                 return Err(format!(
-                    "unchanged composition cycle {generation} was unexpectedly encoded twice"
+                    "measured composition {generation} was unexpectedly skipped"
                 ));
             }
+            cpu_encode_samples.push(started_at.elapsed().as_secs_f32() * 1_000.0);
             let output = &renderer.outputs.as_ref().expect("output after prepare")
                 [renderer.front_output]
                 ._texture;
@@ -2445,7 +2627,11 @@ mod tests {
                 wgpu::TexelCopyTextureInfo {
                     texture: output,
                     mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
+                    origin: wgpu::Origin3d {
+                        x: QUALIFICATION_OUTPUT_SIZE.width / 2,
+                        y: QUALIFICATION_OUTPUT_SIZE.height / 2,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyBufferInfo {
@@ -2453,27 +2639,57 @@ mod tests {
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(256),
-                        rows_per_image: Some(4),
+                        rows_per_image: Some(1),
                     },
                 },
                 wgpu::Extent3d {
-                    width: 4,
-                    height: 4,
+                    width: 1,
+                    height: 1,
                     depth_or_array_layers: 1,
                 },
             );
             let submission = queue.submit([encoder.finish()]);
-            readback_output(&device, &readback, submission)?;
+            if measured + 1 == QUALIFICATION_MEASURED_SUBMISSIONS {
+                final_submission = Some(submission);
+            } else {
+                device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission),
+                        timeout: Some(Duration::from_secs(5)),
+                    })
+                    .map_err(|error| format!("measured GPU completion: {error}"))?;
+            }
             renderer.drain_gpu_timing(&queue);
         }
-        let timing = renderer.gpu_timing();
-        if timestamp_query_supported && timing.samples != 2 {
+        let actual = readback_center_pixel(
+            &device,
+            &readback,
+            final_submission.expect("final measured submission"),
+        )?;
+        renderer.drain_gpu_timing(&queue);
+        let gpu_timing = renderer.gpu_timing();
+        if gpu_timing.samples != QUALIFICATION_MEASURED_SUBMISSIONS as usize {
             return Err(format!(
-                "{} enabled TIMESTAMP_QUERY but produced {} of 2 timing samples",
+                "{} produced {} of {} required timestamp samples",
                 adapter_label(&info),
-                timing.samples
+                gpu_timing.samples,
+                QUALIFICATION_MEASURED_SUBMISSIONS,
             ));
         }
+        let expected = qualification_expected_rgba(layer_count);
+        if !rgba_within_tolerance(actual, expected, QUALIFICATION_READBACK_TOLERANCE) {
+            return Err(format!(
+                "{} center readback {actual:?} did not match {expected:?} within {}",
+                adapter_label(&info),
+                QUALIFICATION_READBACK_TOLERANCE
+            ));
+        }
+        let cpu_encode_timing = timing_from_samples(&mut cpu_encode_samples)?;
+        let gpu_pass_timing = CrossAdapterTiming {
+            samples: gpu_timing.samples,
+            p95_ms: gpu_timing.p95_ms,
+            max_ms: gpu_timing.max_ms,
+        };
         Ok(CrossAdapterEvidence {
             name: info.name,
             vendor: info.vendor,
@@ -2482,14 +2698,16 @@ mod tests {
             backend: format!("{:?}", info.backend),
             driver: info.driver,
             driver_info: info.driver_info,
-            timestamp_query_supported,
+            timestamp_query_supported: true,
+            layer_count: layer_count as u32,
             correctness_readback_passed: true,
-            composition_submissions: 2,
-            timing: timestamp_query_supported.then_some(CrossAdapterTiming {
-                samples: timing.samples,
-                p95_ms: timing.p95_ms,
-                max_ms: timing.max_ms,
-            }),
+            correctness_actual_rgba: actual,
+            correctness_expected_rgba: expected,
+            correctness_tolerance: QUALIFICATION_READBACK_TOLERANCE,
+            warmup_submissions: QUALIFICATION_WARMUP_SUBMISSIONS,
+            measured_submissions: QUALIFICATION_MEASURED_SUBMISSIONS,
+            cpu_encode_timing,
+            gpu_pass_timing,
         })
     }
 
@@ -2513,6 +2731,32 @@ mod tests {
                 samples: COMPOSITOR_TIMING_SAMPLE_COUNT,
                 p95_ms: 119.0,
                 max_ms: 125.0,
+            }
+        );
+    }
+
+    #[test]
+    fn qualification_helpers_compute_expected_color_tolerance_and_p95() {
+        assert_eq!(qualification_expected_rgba(2), [70, 128, 0, 255]);
+        assert_eq!(qualification_expected_rgba(4), [90, 122, 112, 255]);
+        assert!(rgba_within_tolerance(
+            [91, 120, 116, 255],
+            [90, 122, 112, 255],
+            4
+        ));
+        assert!(!rgba_within_tolerance(
+            [95, 123, 113, 255],
+            [90, 122, 112, 255],
+            4
+        ));
+
+        let mut samples = [5.0, 1.0, 3.0, 2.0, 4.0, 7.0, 6.0, 9.0, 8.0, 10.0];
+        assert_eq!(
+            timing_from_samples(&mut samples).expect("finite timing samples"),
+            CrossAdapterTiming {
+                samples: 10,
+                p95_ms: 10.0,
+                max_ms: 10.0,
             }
         );
     }
@@ -3493,16 +3737,83 @@ mod tests {
                 "selected adapter must support TIMESTAMP_QUERY for the explicit timing gate"
             );
         }
-        let evidence = qualify_viewer_compositor_adapter(adapter)
-            .expect("viewer compositor two-cycle qualification");
-        assert!(evidence.correctness_readback_passed);
-        assert_eq!(evidence.composition_submissions, 2);
-        assert_eq!(
-            evidence.timestamp_query_supported,
-            timestamp_query_supported
-        );
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("viewer compositor black-matte test device"),
+            required_features: if timestamp_query_supported {
+                wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("viewer compositor black-matte device");
+        let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        renderer.set_gpu_timing_enabled(timestamp_query_supported);
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 4, 4, &[255, 0, 0, 255].repeat(16))
+            .expect("upload red input");
+        renderer
+            .upload_layer_rgba(&device, &queue, 1, 4, 4, &[255, 255, 255, 255].repeat(16))
+            .expect("upload white input");
+        let frame = black_matte_qualification_frame();
+        for generation in 1..=2 {
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("viewer compositor black-matte readback"),
+                size: 256 * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            assert!(renderer.prepare(
+                &device,
+                &queue,
+                &mut encoder,
+                Some(frame),
+                generation,
+                PixelSize::new(4, 4),
+            ));
+            assert!(!renderer.prepare(
+                &device,
+                &queue,
+                &mut encoder,
+                Some(frame),
+                generation,
+                PixelSize::new(4, 4),
+            ));
+            let output = &renderer.outputs.as_ref().expect("output after prepare")
+                [renderer.front_output]
+                ._texture;
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+            );
+            verify_black_matte_readback(&device, &readback, queue.submit([encoder.finish()]))
+                .expect("black-matte compositor readback");
+            renderer.drain_gpu_timing(&queue);
+        }
         if timestamp_query_supported {
-            assert_eq!(evidence.timing.expect("timestamp timing").samples, 2);
+            assert_eq!(renderer.gpu_timing().samples, 2);
         }
     }
 
@@ -3526,7 +3837,7 @@ mod tests {
         }))
         .expect("viewer GPU device");
         let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        let mut frame = qualification_frame();
+        let mut frame = qualification_frame(2);
         frame.black_mattes_before = [0.0; MAX_COMPOSITE_LAYERS + 1];
         frame.layers[1] = None;
         frame.layers[0]
@@ -3677,17 +3988,39 @@ mod tests {
                     )
                 });
             evidence.push(
-                qualify_viewer_compositor_adapter(adapter).unwrap_or_else(|error| {
+                qualify_viewer_compositor_adapter(
+                    adapter,
+                    if required_type == wgpu::DeviceType::IntegratedGpu {
+                        2
+                    } else {
+                        4
+                    },
+                )
+                .unwrap_or_else(|error| {
                     panic!("DX12 {required_type:?} viewer compositor qualification failed: {error}")
                 }),
             );
         }
         let report = CrossAdapterReport {
-            schema_version: 1,
+            schema_version: 2,
             status: "passed",
-            scope: "headless_viewer_compositor",
+            scope: "headless_transformed_multilayer_viewer_compositor",
             physical_scanout_observed: false,
+            app_auto_preview_observed: false,
             machine: cross_adapter_machine(),
+            workload: CrossAdapterWorkload {
+                source_width: QUALIFICATION_SOURCE_SIZE.width,
+                source_height: QUALIFICATION_SOURCE_SIZE.height,
+                output_width: QUALIFICATION_OUTPUT_SIZE.width,
+                output_height: QUALIFICATION_OUTPUT_SIZE.height,
+                sampling: "Bicubic",
+                warmup_submissions: QUALIFICATION_WARMUP_SUBMISSIONS,
+                measured_submissions: QUALIFICATION_MEASURED_SUBMISSIONS,
+                target_fps: 30,
+                frame_budget_ms: QUALIFICATION_FRAME_BUDGET_MS,
+                uploads_excluded_from_timing: true,
+                warmup_excluded_from_timing: true,
+            },
             adapters: evidence,
         };
         write_cross_adapter_report(report_path, &report)

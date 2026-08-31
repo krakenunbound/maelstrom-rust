@@ -151,7 +151,8 @@ Finish holes. Do not replace working crates.
 - Relink / consolidate / persistent hub collections
 - Keyboard remapping
 - Linux package script (same crates, LGPL `.so`)
-- Sampling-quality choices (nearest / bilinear / bicubic)
+- Additional sampling/performance qualification beyond the implemented nearest / bilinear /
+  bicubic choices
 - More transitions (wipe, push, dip to white)
 
 ### Do not redo
@@ -205,7 +206,10 @@ Gate: four 1080p sources requested at once; timeline latency unchanged; slow sou
 
 ### Then — Phase 2 holes
 
-Open: integrated-GPU two-layer Auto proof plus broader compositor memory/performance qualification.
+Open: integrated-GPU two-layer app Auto/presentation proof plus broader compositor
+memory/performance qualification. The schema-2 headless gate now closes the discrete four-layer
+1080p compositor proof and passes the integrated two-layer compositor prerequisite, without
+claiming app Auto, DWM, or physical scanout.
 Premultiplied alpha, independent preview sampling, and the composite-time HUD are implemented; see
 `docs/premultiplied-alpha.md`, `docs/preview-sampling.md`, and the authoritative roadmap evidence.
 

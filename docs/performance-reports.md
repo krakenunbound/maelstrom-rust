@@ -122,26 +122,45 @@ The retained local schema-1 run on clean commit
 media path. Its SHA-256 is
 `9D69B9EA33F0E621E47AE31C04B32BC3345343CDBA3E1C491F6143B7340205E2`.
 
+The gate was renewed on 2026-08-31 at clean commit
+`4f4fd5e6eeb7cee6b09644cb9376954bf2e47dfd`. Ten independent 50,000-clip history trials passed
+with 0.2565/1.2552 ms press/edit-release p95; wide/detail/playhead CPU p95 was
+0.4885/0.3386/0.4274 ms; the private real 1920x1088 H.264 plus 20,002-bar case was 0.5108 ms p95.
+The media path is omitted. The renewed report SHA-256 is
+`36675C22C160CD4A0B90EBAB89DA33F859B50046B0CFCF204BF7FD161DE49399`.
+
 ## Phase 0 cross-adapter compositor qualification
 
 The headless DX12 qualification exercises the production `ViewerCompositorRenderer` offscreen,
 not the editor, window surface, DWM, or a display. It explicitly enumerates one
-`IntegratedGpu` and one `DiscreteGpu` adapter, executes the same deterministic two-layer compose
-and readback proof twice on each, and records two isolated compositor timestamp cycles when the
-adapter supports `TIMESTAMP_QUERY`. Run it only through Cargo via the repository runner:
+`IntegratedGpu` and one `DiscreteGpu` adapter. Schema 2 uses pre-uploaded 1920x1080 sources and a
+1920x1080 output with Bicubic sampling: two transformed layers on the integrated adapter and four
+on the discrete adapter. Five warmups are excluded, followed by 30 changed generations with CPU
+encode and required `TIMESTAMP_QUERY` GPU-pass timing. A deterministic center-pixel readback must
+match the expected RGBA within four channel values. Run it only through Cargo via the repository
+runner:
 
 ```powershell
 & 'H:\Maelstrom Rust\scripts\Run-Phase0CrossAdapterGpu.ps1'
 ```
 
-The atomically written ignored local evidence is schema-version 1 JSON at
+The atomically written ignored local evidence is schema-version 2 JSON at
 `artifacts/phase0-cross-adapter/phase0-cross-adapter-gpu.json`. It records machine identity and
-adapter name/vendor/device/type/backend/driver information, readback correctness, composition
-submission count, optional timestamp timing, and `physical_scanout_observed: false`.
-It is deliberately limited to `scope: "headless_viewer_compositor"`: it does not replace the
-schema-7 surface report, establish presentation, DWM composition, physical scanout, or end-to-end
-display latency.
-The schema-1 file is retained success evidence only; adapter discovery, device creation, or GPU
+adapter name/vendor/device/type/backend/driver information, workload dimensions, sampling mode,
+layer count, warmup/measurement counts, actual and expected RGBA, and CPU/GPU p95 and maximum.
+The runner enforces CPU p95 at or below 8 ms and GPU-pass p95 at or below the 33.333 ms 30 fps
+budget. It deliberately records `physical_scanout_observed: false` and
+`app_auto_preview_observed: false`, and is limited to
+`scope: "headless_transformed_multilayer_viewer_compositor"`: it does not replace the schema-7
+surface report or establish app Auto resolution, presentation, DWM composition, physical scanout,
+or end-to-end display latency.
+
+The final 2026-08-31 qualification run passed on Intel UHD 770 with two layers at 0.2347 ms CPU /
+6.9969 ms GPU p95 and on RTX 3090 with four layers at 0.2001 ms CPU / 0.2775 ms GPU p95. Both
+adapters matched the expected readback across all channels. This file is regenerated on every run,
+so its timing-dependent SHA-256 is intentionally not a stable documentation identifier.
+
+The schema-2 file is retained success evidence only; adapter discovery, device creation, or GPU
 execution failures can terminate before publication and remain visible in the Cargo diagnostic
 output. Machine-readable failed-run evidence is still an open qualification-harness improvement.
 
