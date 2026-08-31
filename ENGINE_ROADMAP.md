@@ -349,6 +349,13 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       remain strict. Conversion CPU cost is measured separately; this is local
       default-adapter evidence, not full playback, cross-GPU, HDR, or export parity.
       See `docs/hardware-decode-parity.md`.
+- [x] Retain bounded lifetime evidence of successful decode backends independently of latest-wins
+      frame events. Cached frames still carry no producer provenance; observations do not relabel
+      active-preview or per-media diagnostics. The missed-event regression fails before and passes
+      after the app fix. Three paused/prewarmed Full-1080p 40-trial gates pass: four-source scheduler
+      p95 189-270 us and coarse matching-frame p95 69-70 ms. These are local Software headless
+      measurements, not sustained/windowed or cross-hardware completion. 747 release tests,
+      strict Clippy, and independent review pass. See `docs/phase1-latency-comparison.md`.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for

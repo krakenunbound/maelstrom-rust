@@ -105,14 +105,16 @@ The independent four-source Full-1080p app gate passes with 161 microseconds
 submission, 62 ms until all frames, five peak sessions under eight, and zero
 sessions after teardown. These are headless worker measurements, not scanout.
 
-The older isolated latency-comparison test currently fails because no decoder
+At this hardware-parity checkpoint, the older isolated latency-comparison test failed because no decoder
 backend was observed despite retained frames being present. Paused prewarm
 workers can populate the shared cache before the foreground reply; cached frames
 intentionally omit backend provenance. The probe only waits for retained frames,
 not a provenance-bearing decode. Its failure is preserved in
 `hardware-parity-latency.log`; no passing latency report or windowed qualification
 is claimed from that run. Fixing the measurement without inventing cache
-provenance remains a separate open task.
+provenance was left as a separate task. The subsequent bounded successful-work observation
+repair and three passing 40-trial runs are documented in `docs/phase1-latency-comparison.md`;
+they do not retroactively qualify this checkpoint's failed run or prove windowed playback.
 
 The accurate scaler has a measurable CPU cost. The diagnostic measures only the
 existing scaler timing span, excluding hardware transfer, demux/decode, RGBA

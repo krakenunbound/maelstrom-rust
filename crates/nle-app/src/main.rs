@@ -7078,6 +7078,19 @@ impl App {
                 let _ =
                     self.apply_monitor_decode_event(layer, event, &mut adaptive_quality_changed);
             }
+            // Latest-wins events can replace a producer reply with a shared-cache reply.
+            // Collect bounded lifetime evidence of successful work independently; never use
+            // it to assign a backend to a cached/presented frame or an individual media item.
+            for backend in self.monitor_decoders[layer].observed_frame_backends() {
+                let name = backend.display_name();
+                if !self
+                    .observed_decoder_backends
+                    .iter()
+                    .any(|seen| seen == name)
+                {
+                    self.observed_decoder_backends.push(name.to_owned());
+                }
+            }
         }
     }
 
@@ -11403,6 +11416,112 @@ mod tests {
     }
 
     #[test]
+    fn decoder_observation_survives_consumed_events_and_cached_reply() {
+        let catalog = test_catalog_path("decoder-observation");
+        let directory = catalog.parent().expect("catalog directory");
+        fs::create_dir_all(directory).expect("create decoder fixture directory");
+        let path = directory.join("source.mp4");
+        let ffmpeg = std::env::var_os("FFMPEG_DIR")
+            .map(PathBuf::from)
+            .map(|root| {
+                root.join("bin").join(if cfg!(windows) {
+                    "ffmpeg.exe"
+                } else {
+                    "ffmpeg"
+                })
+            })
+            .unwrap_or_else(|| PathBuf::from("ffmpeg"));
+        let generated = std::process::Command::new(ffmpeg)
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x48:rate=24:duration=1",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "5",
+            ])
+            .arg(&path)
+            .output()
+            .expect("run fixture generator using the configured FFmpeg runtime");
+        assert!(
+            generated.status.success(),
+            "fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let mut app = App::new_with_catalog(false, None);
+        app.poll_monitor_decoder();
+        assert!(app.observed_decoder_backends.is_empty());
+        let mut request = nle_decode::DecodeRequest {
+            project_epoch: 1,
+            cache_epoch: 1,
+            request_id: 11,
+            media_id: 1,
+            path,
+            source_tick: 0,
+            width: 64,
+            height: 48,
+            is_scrubbing: false,
+            prewarm_scrub_workers: false,
+            high_quality_scaling: true,
+            progressive_scrub_frames: false,
+            source_frame_duration_tick: None,
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let receive = |decoder: &nle_decode::MonitorDecoder| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match decoder.try_recv().expect("decoder remains open") {
+                    Some(nle_decode::DecodeEvent::Frame(frame)) => break frame,
+                    Some(nle_decode::DecodeEvent::Error(error)) => {
+                        panic!("fixture decode failed: {}", error.message)
+                    }
+                    None => {
+                        assert!(Instant::now() < deadline, "fixture decode timed out");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+        };
+
+        // Deliberately consume the actual event without presenting it, like a latest-wins
+        // slot whose producer event is replaced before the app sees it.
+        app.monitor_decoders[0].request(request.clone()).unwrap();
+        let actual = receive(&app.monitor_decoders[0]);
+        assert_eq!(actual.backend, Some(nle_decode::DecodeBackend::Software));
+        request.request_id += 1;
+        app.monitor_decoders[0].request(request.clone()).unwrap();
+        let cached = receive(&app.monitor_decoders[0]);
+        assert_eq!(cached.request_id, request.request_id);
+        assert_eq!(cached.backend, None);
+        assert_eq!(cached.fallback_reason, None);
+        assert_eq!(cached.rgba, actual.rgba);
+        assert!(app.observed_decoder_backends.is_empty());
+
+        // No event remains to supply provenance. Lifetime successful-work evidence must
+        // still be available, without claiming that a frame was presented or decoded anew.
+        app.poll_monitor_decoder();
+        assert_eq!(app.observed_decoder_backends, ["Software"]);
+        app.poll_monitor_decoder();
+        assert_eq!(app.observed_decoder_backends, ["Software"]);
+        assert!(app.editor.monitor_frame_for_layer(0).is_none());
+        let pool = app.monitor_session_pool.clone();
+        drop(app);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pool.diagnostics().active_sticky_sessions != 0 {
+            assert!(Instant::now() < deadline, "decoder fixture session leaked");
+            thread::sleep(Duration::from_millis(1));
+        }
+        fs::remove_dir_all(directory).expect("remove decoder fixture directory");
+    }
+
+    #[test]
     fn still_image_analysis_builds_one_bounded_alpha_thumbnail() {
         let catalog = test_catalog_path("still-image-analysis");
         let directory = catalog.parent().expect("catalog directory");
@@ -15265,7 +15384,10 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline
-            && (0..source_count).any(|layer| app.editor.monitor_frame_for_layer(layer).is_none())
+            && (0..source_count).any(|layer| {
+                app.editor.monitor_frame_for_layer(layer).is_none()
+                    || app.monitor_requests_in_flight[layer]
+            })
         {
             app.poll_monitor_decoder();
             thread::sleep(Duration::from_millis(5));

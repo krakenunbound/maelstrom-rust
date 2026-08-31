@@ -504,9 +504,19 @@ struct DecoderStageTimingAccumulators {
     scaler: AtomicStageTiming,
     rgba_copy_letterbox: AtomicStageTiming,
     worker_request: AtomicStageTiming,
+    observed_frame_backends: AtomicU64,
 }
 
 impl DecoderStageTimingAccumulators {
+    fn record_successful_frame_backend(&self, backend: DecodeBackend) {
+        self.observed_frame_backends
+            .fetch_or(backend.observation_mask(), Ordering::Release);
+    }
+
+    fn observed_frame_backend_mask(&self) -> u64 {
+        self.observed_frame_backends.load(Ordering::Acquire)
+    }
+
     fn snapshot(&self) -> MonitorDecoderStageTimings {
         MonitorDecoderStageTimings {
             cache_lookup: self.cache_lookup.snapshot(),
@@ -649,6 +659,26 @@ pub enum DecodeFallbackReason {
 }
 
 impl DecodeBackend {
+    const ALL: [Self; 6] = [
+        Self::Software,
+        Self::IntelQuickSync,
+        Self::Nvidia,
+        Self::VideoToolbox,
+        Self::D3D11VA,
+        Self::DXVA2,
+    ];
+
+    const fn observation_mask(self) -> u64 {
+        1 << match self {
+            Self::Software => 0,
+            Self::IntelQuickSync => 1,
+            Self::Nvidia => 2,
+            Self::VideoToolbox => 3,
+            Self::D3D11VA => 4,
+            Self::DXVA2 => 5,
+        }
+    }
+
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Software => "Software",
@@ -1509,6 +1539,19 @@ impl MonitorDecoder {
             aggregate.merge(lane.snapshot());
         }
         aggregate
+    }
+
+    /// Returns the decoder backends that have successfully produced frames during this decoder's
+    /// lifetime, including traversal and other unpresented work. This is not the displayed frame
+    /// backend or active codec, and it is not reset by cancellation or source generation changes.
+    pub fn observed_frame_backends(&self) -> impl Iterator<Item = DecodeBackend> + '_ {
+        let observed = self
+            .stage_timings
+            .iter()
+            .fold(0, |mask, lane| mask | lane.observed_frame_backend_mask());
+        DecodeBackend::ALL
+            .into_iter()
+            .filter(move |backend| observed & backend.observation_mask() != 0)
     }
 
     /// Returns a copyable snapshot of bounded cache and sticky-session resource use.
@@ -3205,6 +3248,7 @@ impl StickyMonitor {
                             source_tick,
                             stage_timings,
                         )?;
+                        stage_timings.record_successful_frame_backend(self.backend);
                         on_traversal(&frame);
                         if publish_progress {
                             last_tick = Some(source_tick);
@@ -3229,6 +3273,7 @@ impl StickyMonitor {
                     source_tick,
                     stage_timings,
                 )?;
+                stage_timings.record_successful_frame_backend(self.backend);
                 last_tick = Some(source_tick);
                 self.last_visible_tick = last_tick;
                 self.last_source_tick = last_tick;
@@ -3299,6 +3344,7 @@ impl StickyMonitor {
                         source_tick,
                         stage_timings,
                     )?;
+                    stage_timings.record_successful_frame_backend(self.backend);
                     on_traversal(&frame);
                     if publish_progress {
                         last_tick = Some(source_tick);
@@ -3323,6 +3369,7 @@ impl StickyMonitor {
                 source_tick,
                 stage_timings,
             )?;
+            stage_timings.record_successful_frame_backend(self.backend);
             last_tick = Some(source_tick);
             self.last_visible_tick = last_tick;
             self.last_source_tick = last_tick;
@@ -4150,6 +4197,47 @@ mod tests {
             seek_stream_timestamp(1_000_000, -1_000_000, time_base),
             -450_000
         );
+    }
+
+    #[test]
+    fn observed_frame_backends_start_empty_and_union_concurrent_lane_updates() {
+        let decoder = MonitorDecoder::new();
+        assert!(decoder.observed_frame_backends().next().is_none());
+
+        thread::scope(|scope| {
+            for (index, backend) in DecodeBackend::ALL.into_iter().enumerate() {
+                let lane = Arc::clone(&decoder.stage_timings[index % MONITOR_WORKER_COUNT]);
+                scope.spawn(move || {
+                    for _ in 0..1_000 {
+                        lane.record_successful_frame_backend(backend);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            decoder.observed_frame_backends().collect::<Vec<_>>(),
+            DecodeBackend::ALL
+        );
+    }
+
+    #[test]
+    fn failed_open_does_not_observe_a_frame_backend() {
+        let decoder = MonitorDecoder::new();
+        let sequence = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "maelstrom-observed-backend-missing-{nanos}-{sequence}.mp4",
+        ));
+        let desired = request(path, 7_401);
+        decoder.request(desired.clone()).unwrap();
+        let DecodeEvent::Error(_) = receive_for(&decoder, &desired) else {
+            panic!("missing media unexpectedly decoded");
+        };
+        assert!(decoder.observed_frame_backends().next().is_none());
     }
 
     fn receive_for(decoder: &MonitorDecoder, request: &DecodeRequest) -> DecodeEvent {
@@ -5256,6 +5344,10 @@ mod tests {
             assert!(stage.total_nanos >= stage.max_nanos);
         }
         assert_eq!(timings.hardware_transfer.samples, 0);
+        assert_eq!(
+            decoder.observed_frame_backends().collect::<Vec<_>>(),
+            vec![DecodeBackend::Software]
+        );
     }
 
     #[test]
@@ -5579,44 +5671,53 @@ mod tests {
     }
 
     #[test]
-    fn exact_cached_target_returns_without_opening_media() {
+    fn exact_cached_target_returns_without_opening_media_or_observing_a_backend() {
         let desired = request(PathBuf::from("this-file-must-not-be-opened.mp4"), 91);
-        let cache = Arc::new(Mutex::new(MonitorFrameCache::new(8 * 1024)));
-        cache.lock().unwrap().prepare_request(&desired);
-        let rgba: Arc<[u8]> = vec![17; 40 * 30 * 4].into();
-        assert!(cache.lock().unwrap().insert(
-            frame_cache_key(&desired, desired.source_tick),
-            FrameValue::new(desired.source_tick, 40, 30, Arc::clone(&rgba)),
-        ));
-        let mut sessions = HashMap::new();
-        let commands = Arc::new(Mutex::new(None));
-        let stage_timings = DecoderStageTimingAccumulators::default();
-        let mut session_states = Vec::new();
-        let session_pool = MonitorSessionPool::new(1, 0);
+        for existing_backend in [None, Some(DecodeBackend::Software)] {
+            let cache = Arc::new(Mutex::new(MonitorFrameCache::new(8 * 1024)));
+            cache.lock().unwrap().prepare_request(&desired);
+            let rgba: Arc<[u8]> = vec![17; 40 * 30 * 4].into();
+            assert!(cache.lock().unwrap().insert(
+                frame_cache_key(&desired, desired.source_tick),
+                FrameValue::new(desired.source_tick, 40, 30, Arc::clone(&rgba)),
+            ));
+            let mut sessions = HashMap::new();
+            let commands = Arc::new(Mutex::new(None));
+            let stage_timings = DecoderStageTimingAccumulators::default();
+            if let Some(backend) = existing_backend {
+                stage_timings.record_successful_frame_backend(backend);
+            }
+            let mut session_states = Vec::new();
+            let session_pool = MonitorSessionPool::new(1, 0);
 
-        let event = decode_monitor_request(
-            &mut sessions,
-            &cache,
-            &desired,
-            &commands,
-            &mut |_, _, _| {},
-            &mut |active| session_states.push(active),
-            &mut || {},
-            &stage_timings,
-            &session_pool,
-            0,
-            false,
-        )
-        .expect("cache hit returns a frame");
-        let DecodeEvent::Frame(frame) = event else {
-            panic!("cache hit returned an error")
-        };
-        assert_eq!(frame.request_id, 91);
-        assert_eq!(frame.rgba, rgba);
-        assert_eq!(frame.backend, None);
-        assert_eq!(frame.fallback_reason, None);
-        assert!(sessions.is_empty());
-        assert_eq!(session_states, vec![false]);
+            let event = decode_monitor_request(
+                &mut sessions,
+                &cache,
+                &desired,
+                &commands,
+                &mut |_, _, _| {},
+                &mut |active| session_states.push(active),
+                &mut || {},
+                &stage_timings,
+                &session_pool,
+                0,
+                false,
+            )
+            .expect("cache hit returns a frame");
+            let DecodeEvent::Frame(frame) = event else {
+                panic!("cache hit returned an error")
+            };
+            assert_eq!(frame.request_id, 91);
+            assert_eq!(frame.rgba, rgba);
+            assert_eq!(frame.backend, None);
+            assert_eq!(frame.fallback_reason, None);
+            assert_eq!(
+                stage_timings.observed_frame_backend_mask(),
+                existing_backend.map_or(0, DecodeBackend::observation_mask)
+            );
+            assert!(sessions.is_empty());
+            assert_eq!(session_states, vec![false]);
+        }
     }
 
     #[test]
@@ -5663,6 +5764,8 @@ mod tests {
         assert_eq!(first_frame.fallback_reason, None);
         assert_eq!(second_frame.backend, None);
         assert_eq!(second_frame.fallback_reason, None);
+        assert!(first.observed_frame_backends().next().is_none());
+        assert!(second.observed_frame_backends().next().is_none());
         assert!(Arc::ptr_eq(&first_frame.rgba, &second_frame.rgba));
         let cache = pool.diagnostics();
         assert_eq!(cache.capacity_bytes, 8 * 1024);
