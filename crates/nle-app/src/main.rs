@@ -8204,6 +8204,41 @@ mod tests {
         assert_eq!(editor.snapshot().media[0].path, original);
     }
 
+    #[test]
+    fn proxy_start_failure_arrives_asynchronously_without_changing_original_media() {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        let original = test_catalog_path("missing-proxy-source").with_extension("mp4");
+        app.editor.add_media_paths([original.clone()]);
+        let snapshot = serde_json::to_string(&app.editor.snapshot()).unwrap();
+        let generation = app.editor.durable_generation();
+        app.request_proxy_media(1, original.clone());
+        assert_eq!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Generating { progress: 0.0 }
+        );
+        assert!(app.proxy_job.is_some());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.proxy_job.is_some() {
+            app.poll_proxy_job();
+            assert!(Instant::now() < deadline, "proxy validation did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            matches!(app.editor.proxy_media_status(1), ProxyMediaStatus::Failed { message } if message.contains("source is missing"))
+        );
+        assert_eq!(app.proxy_job_media_id, None);
+        assert!(app.proxy_records.is_empty());
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        assert_eq!(app.editor.durable_generation(), generation);
+        assert_eq!(
+            serde_json::to_string(&app.editor.snapshot()).unwrap(),
+            snapshot
+        );
+    }
+
     fn cached_proxy_fixture(original: &Path) -> nle_proxy::ProxyArtifact {
         nle_proxy::ProxyArtifact {
             path: PathBuf::from("C:/cache/not-opened-during-restore.mp4"),

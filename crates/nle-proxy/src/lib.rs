@@ -115,12 +115,12 @@ pub struct ProxyJob {
 }
 
 impl ProxyJob {
+    /// Starts ownership of a background job without inspecting source/tool files on the caller.
+    /// Only worker-spawn failures are returned here; validation failures arrive as `Failed` events.
     pub fn start(
         request: ProxyRequest,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
-        validate_request(&request)?;
-        let source = SourceFingerprint::capture(&request.input)?;
         let cancel = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
         let (tx, events) = mpsc::channel();
@@ -129,7 +129,7 @@ impl ProxyJob {
         let notify = Arc::new(notify);
         let join = thread::Builder::new()
             .name("maelstrom-proxy".into())
-            .spawn(move || run_job(request, source, worker_cancel, worker_child, tx, notify))
+            .spawn(move || run_job(request, worker_cancel, worker_child, tx, notify))
             .map_err(|error| format!("could not start proxy worker: {error}"))?;
         Ok(Self {
             cancel,
@@ -246,13 +246,24 @@ fn validate_request(request: &ProxyRequest) -> Result<(), String> {
 
 fn run_job(
     request: ProxyRequest,
-    source: SourceFingerprint,
     cancel: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
     events: mpsc::Sender<ProxyEvent>,
     notify: Arc<dyn Fn() + Send + Sync>,
 ) {
-    let result = generate_proxy(&request, &source, &cancel, &child, &events, &notify);
+    let result = (|| {
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        // Metadata queries and canonicalization can stall on offline/network storage. Keep the
+        // complete validation/fingerprint phase on the owned worker, before any cache mutation.
+        validate_request(&request)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let source = SourceFingerprint::capture(&request.input)?;
+        generate_proxy(&request, &source, &cancel, &child, &events, &notify)
+    })();
     let event = match result {
         Ok(artifact) if cancel.load(Ordering::Acquire) => ProxyEvent::Cancelled,
         Ok(artifact) => ProxyEvent::Completed(artifact),
@@ -835,6 +846,83 @@ mod tests {
     }
 
     #[test]
+    fn proxy_start_reports_invalid_paths_as_worker_failures() {
+        let root = fixture("async-validation");
+        let source = write_source(&root);
+        let tool = fake_ffmpeg(&root, "exit /b 7");
+        let caller = thread::current().id();
+        for (input, ffmpeg, expected) in [
+            (root.join("missing.mov"), tool.clone(), "source is missing"),
+            (root.clone(), tool.clone(), "source is not a file"),
+            (
+                source.clone(),
+                root.join("missing-tool.exe"),
+                "ffmpeg is missing",
+            ),
+            (source.clone(), root.clone(), "ffmpeg is not a file"),
+        ] {
+            let (tx, notifications) = mpsc::channel();
+            let started = ProxyJob::start(
+                ProxyRequest {
+                    input,
+                    cache_root: root.join("cache"),
+                    ffmpeg,
+                    replace_existing: false,
+                },
+                move || {
+                    let _ = tx.send(thread::current().id());
+                },
+            );
+            let job = match started {
+                Ok(job) => job,
+                Err(error) => {
+                    fs::remove_dir_all(&root).unwrap();
+                    panic!("filesystem validation ran synchronously: {error}");
+                }
+            };
+            assert!(
+                matches!(wait_event(&job), ProxyEvent::Failed(error) if error.contains(expected))
+            );
+            assert_ne!(
+                notifications.recv_timeout(Duration::from_secs(1)).unwrap(),
+                caller
+            );
+            drop(job);
+            assert!(
+                !root.join("cache").exists(),
+                "failed validation must not mutate cache"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_proxy_request_emits_only_cancelled() {
+        let root = fixture("pre-cancelled-validation");
+        let child = Arc::new(Mutex::new(None));
+        let (tx, events) = mpsc::channel();
+        run_job(
+            ProxyRequest {
+                input: root.join("missing.mov"),
+                cache_root: root.join("cache"),
+                ffmpeg: root.join("missing-tool.exe"),
+                replace_existing: false,
+            },
+            Arc::new(AtomicBool::new(true)),
+            Arc::clone(&child),
+            tx,
+            Arc::new(|| {}),
+        );
+        assert_eq!(
+            events.try_iter().collect::<Vec<_>>(),
+            vec![ProxyEvent::Cancelled]
+        );
+        assert!(child.lock().unwrap().is_none());
+        assert!(!root.join("cache").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replace_existing_controls_cached_artifact_reuse() {
         let root = fixture("replace");
         let source = write_source(&root);
@@ -902,7 +990,14 @@ mod tests {
             || {},
         )
         .unwrap();
-        thread::sleep(Duration::from_millis(100));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while job.child.lock().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "encoding did not start"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
         fs::write(&source, b"source media changed while encoding").unwrap();
         assert!(matches!(
             wait_event(&job),
@@ -979,15 +1074,27 @@ mod tests {
             },
         )
         .unwrap();
-        thread::sleep(Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match job.try_recv() {
+                Ok(ProxyEvent::Progress(_)) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+                other => panic!("encoding did not reach progress: {other:?}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "encoding progress timed out"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
         job.cancel();
         assert!(matches!(wait_event(&job), ProxyEvent::Cancelled));
+        drop(job); // The terminal event may be received just before its notifier finishes.
         assert!(
             wakes.load(Ordering::Relaxed) >= 2,
             "progress and terminal event must wake UI"
         );
         assert!(fs::read_dir(&cache).unwrap().next().is_none());
-        drop(job);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -74,6 +74,32 @@ passing evidence. No production dependency, schema, codec profile, resolution de
 changed. Cache lookup checks identity/metadata, not full-file decode validity; the established
 enable/decode fallback remains necessary for files externally corrupted after generation.
 
+## Proxy startup validation checkpoint — 2026-08-31
+
+`ProxyJob::start` previously read source/tool metadata and canonicalized the source on its caller,
+which is the UI thread for the Generate Proxy action. These operations now run on the existing
+owned proxy worker before any cache mutation. The caller receives a job immediately after worker
+creation; missing/non-file inputs or tools arrive as `ProxyEvent::Failed` through the existing
+notified channel. Worker-spawn failures still return synchronously. The fingerprint is captured
+on the worker before encoding, and source changes during encoding still prevent publication.
+
+Two new before/after regressions reject the previous synchronous validation: one covers four
+invalid source/tool cases plus worker-thread notification; the other checks the app's generating
+to failed transition without changing original-media routing or durable state. A third regression
+preserves pre-cancelled request semantics. The existing source-change and cancellation tests now
+wait for an actual child/progress event instead of assuming a fixed startup delay. Cancellation
+notification assertions run after joining the completed worker to avoid a receive/notify race.
+
+Verification: 786 release tests pass (24 ignored), plus both explicitly enabled real-media proxy
+tests (format/origin and irregular PTS). Strict all-target release Clippy, formatting, seven fixture
+contracts and seven Phase 0 scenarios pass. Logs/hash evidence use `proxy-worker-validation-` under
+`artifacts/phase1-multisource/`. Parent-reviewed; independent agent unavailable (agent limit).
+
+This establishes the proxy job's asynchronous validation contract, not a measured UI-latency
+bound or whole-workflow nonblocking guarantee. The app's tool-path resolver, completion/enable/
+reconciliation filesystem checks, and synchronous cancellation/reset teardown are separate
+remaining lifecycle work. No image-quality, codec, frame-rate, cache-cap or dependency change.
+
 ## Portable package checkpoint
 
 Built from clean commit `fb5c94d589edeed5aeaa99845c535b5531776a2d` without opening the editor.

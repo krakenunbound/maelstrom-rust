@@ -9,6 +9,14 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Move `ProxyJob::start` source/tool validation and fingerprinting to its existing
+  worker. Two before-failing regressions now pass; pre-cancelled state and source-change/
+  cancellation contracts remain intact. 786 release tests, both real-media proxy tests,
+  strict Clippy, formatting, fixture contracts and Phase 0 scenarios pass.
+  Parent-reviewed; independent agent unavailable. See `docs/proxy-media.md`.
+- [ ] Finish proxy lifecycle nonblocking work: tool-path resolution, completion/enable/
+  reconciliation filesystem checks and cancellation/reset teardown still need worker-owned
+  handling with source-identity, stale-result and clean-shutdown proof.
 - [x] Rediscover matching local proxies after timeline placement/project reopen on the
   existing analysis worker; show ready but retain original-quality playback until explicit
   opt-in. Protect against stale projects, relinks and late replies after user actions.

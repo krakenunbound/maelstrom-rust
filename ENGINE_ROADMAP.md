@@ -305,6 +305,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       proxy save/reopen/explicit-opt-in; 783 release tests, strict Clippy, fixture contracts and
       updated Phase 0 scenarios pass. The rebuilt package contains this behavior (SHA-256 starts
       `CDFC00DB47444A5B`); static/runtime checks pass, but GUI qualification remains pending.
+      Proxy job startup now validates source/tool files and captures the source fingerprint on its
+      worker, returning filesystem failures asynchronously. Two regressions fail before/pass after;
+      786 release tests and both real-media proxy tests pass. This is not a whole-lifecycle
+      nonblocking claim: app-side filesystem checks and synchronous teardown remain open.
       Unused Media Pool items retain deferred analysis. This still
       supports one generation job and one 720p profile; portable/external attachment, persistent
       enable choices, generation queues and multiple profiles remain later product work.
