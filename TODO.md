@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Requalify the corrected four-source live-audio continuity gate for the maximum
+  30-second duration at tracked-clean commit `f78c816`. The local Software-backend run
+  sustained four Full-1080p sources through a real default output device, including a
+  750 ms blocked topmost source. Input submission p95 was 46 us, clock drift was 7,138 us,
+  and audio/monitor fault counters remained zero. This is not GUI, packaged-playback or
+  cross-hardware evidence. See `docs/phase1-live-audio.md`.
 - [x] Requalify the full 600-second Phase 0 seven-scenario soak at clean commit `773dd92`.
   The authoritative schema-2 wrapper passed 76 complete matrices (532 scenario executions,
   2,812 declared work iterations) over 607.115 measured seconds. All child report hashes are

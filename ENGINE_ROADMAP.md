@@ -586,6 +586,14 @@ Exit gate:
       four-video load after that boundary. The test now extends video coverage and
       asserts all four sources per submission. Corrected four-CPU qualification
       exposes submission and audio failures; see `docs/restricted-live-audio-submission.md`.
+      The maximum-duration corrected gate was requalified on 2026-08-31 at tracked-clean
+      commit `f78c816`: 30.007 seconds with all four Full-1080p sources, a real default
+      audio device, 46 us input-submission p95, 7,138 us device-clock drift, 45 ready-source
+      presentations and 750,000 us of audio-clock advance during the deliberate 750 ms hold,
+      572 delayed-source presentations after release, and zero monitor errors, audio
+      underruns, callback lock failures, late audio discards, or post-drop sessions. The
+      ignored schema-2 report SHA-256 is
+      `AA378E44407BEA9C39989B8024561492880D8DB30C9A11EC42DE637EBCD52F07`.
       The exit remains open for realtime UI-present and cross-hardware proof; see
       `docs/phase1-sustained-soak.md` and `docs/phase1-live-audio.md`.
 - [x] A deliberately slow source cannot delay a ready source or the playback clock. The bounded

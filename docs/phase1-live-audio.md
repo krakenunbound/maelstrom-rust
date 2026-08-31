@@ -64,6 +64,18 @@ underruns, callback lock failures, or late discards; clock drift was 1,688 µs,
 the maximum clock-progress interval was 22 ms, and no decoder session survived
 teardown.
 
+The corrected maximum-duration gate was requalified on 2026-08-31 against
+tracked-clean commit `f78c8167717ff34d2447385b8f89b65c5cfa6570`. It ran for
+30.007 seconds with all four Full-1080p sources and a real default output device.
+Input submission p95 was 46 us against the 1,000 us limit; device-clock drift was
+7,138 us against the 250,000 us limit, with a 23 ms maximum clock-progress interval.
+During the deliberate 750 ms topmost-source hold, ready sources presented 45 times
+and the audio clock advanced 750,000 us. The delayed source presented 572 times after
+release. Monitor errors, audio underruns, callback lock failures, late audio discards,
+transport loss, and post-drop sessions were all zero. The local ignored schema-2
+report SHA-256 is
+`AA378E44407BEA9C39989B8024561492880D8DB30C9A11EC42DE637EBCD52F07`.
+
 This is a bounded local default-device proof. It closes the local real-media
 slow-source/playback-clock isolation gate, but it is not a GUI or cross-hardware
 claim. The broader four-source UI-present/cross-hardware exit gate, VFR
