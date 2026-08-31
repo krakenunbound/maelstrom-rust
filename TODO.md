@@ -9,6 +9,14 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Rediscover matching local proxies after timeline placement/project reopen on the
+  existing analysis worker; show ready but retain original-quality playback until explicit
+  opt-in. Protect against stale projects, relinks and late replies after user actions.
+  Six new regressions include real proxy generation/save/reopen. 783 release tests,
+  strict Clippy, formatting, seven fixture contracts and updated Phase 0 scenarios pass.
+  Parent-reviewed; independent review unavailable. See `docs/proxy-media.md`.
+- [ ] Update the portable package with cached-proxy rediscovery; preserve its previous
+  contents and keep GUI qualification separate from build/runtime checks.
 - [x] Preserve exact rational export clocks for video, stills, titles, background
   and transition mattes. Both new regressions fail on rounded decimal clocks and
   pass on original fractions; seven live clock cases, 777 release tests, strict

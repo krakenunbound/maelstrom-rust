@@ -71,6 +71,34 @@ pub struct ProxyArtifact {
     pub profile_version: u32,
 }
 
+/// Rediscovers a completed current-profile cache entry without generating, deleting, or pruning.
+/// Performs filesystem I/O: call only on a worker, never on the UI or monitor-submit thread.
+/// A miss (including cancellation, source changes or invalid files) leaves originals authoritative.
+pub fn find_cached_proxy(
+    input: &Path,
+    cache_root: &Path,
+    cancel: &AtomicBool,
+) -> Option<ProxyArtifact> {
+    if cancel.load(Ordering::Acquire) {
+        return None;
+    }
+    let source = SourceFingerprint::capture(input).ok()?;
+    let path = artifact_path(cache_root, &source);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CACHE_BYTES {
+        return None;
+    }
+    if cancel.load(Ordering::Acquire) || !source.matches(input) {
+        return None;
+    }
+    Some(ProxyArtifact {
+        path,
+        source,
+        output_bytes: metadata.len(),
+        profile_version: PROXY_PROFILE_VERSION,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProxyEvent {
     Progress(f32),
@@ -682,6 +710,54 @@ mod tests {
             artifact_path(&root, &fingerprint)
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cached_proxy_discovery_is_read_only_and_rejects_stale_or_cancelled_sources() {
+        let root = fixture("rediscover");
+        let source = write_source(&root);
+        let cache = root.join("cache");
+        let cancel = AtomicBool::new(false);
+        assert!(find_cached_proxy(&source, &cache, &cancel).is_none());
+        assert!(!cache.exists(), "discovery must not create a cache");
+        fs::create_dir(&cache).unwrap();
+        let fingerprint = SourceFingerprint::capture(&source).unwrap();
+        let path = artifact_path(&cache, &fingerprint);
+        fs::write(&path, b"completed-cache-entry").unwrap();
+        let found = find_cached_proxy(&source, &cache, &cancel).unwrap();
+        assert_eq!(found, artifact_for(path.clone(), fingerprint).unwrap());
+        cancel.store(true, Ordering::Release);
+        assert!(find_cached_proxy(&source, &cache, &cancel).is_none());
+        cancel.store(false, Ordering::Release);
+        fs::write(&source, b"replacement source with different size").unwrap();
+        assert!(find_cached_proxy(&source, &cache, &cancel).is_none());
+        assert_eq!(fs::read(&path).unwrap(), b"completed-cache-entry");
+        fs::remove_file(&source).unwrap();
+        assert!(find_cached_proxy(&source, &cache, &cancel).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cached_proxy_discovery_ignores_partial_empty_directory_and_old_profile_entries() {
+        let root = fixture("rediscover-incomplete");
+        let source = write_source(&root);
+        let cancel = AtomicBool::new(false);
+        let fingerprint = SourceFingerprint::capture(&source).unwrap();
+        let path = artifact_path(&root, &fingerprint);
+        let partial = temporary_path(&path);
+        fs::write(&partial, b"not yet published").unwrap();
+        fs::write(root.join("maelstrom-proxy-v0-0000000000000000.mp4"), b"old").unwrap();
+        assert!(find_cached_proxy(&source, &root, &cancel).is_none());
+        fs::write(&path, b"").unwrap();
+        assert!(find_cached_proxy(&source, &root, &cancel).is_none());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(find_cached_proxy(&source, &root, &cancel).is_none());
+        assert!(
+            partial.exists(),
+            "discovery must not clean up another worker's output"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -112,6 +112,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Generated 10-bit codec decode regressions failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_10bit_vfr_fixtures_route_preview_to_local_boundaries -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted 10-bit VFR app regression failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-app --release tests::supplied_video_reopens_with_cached_proxy_available_but_disabled -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Cached proxy project-reopen regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-export --release vfr_export_tests -- --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted 10-bit VFR export source-identity regressions failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-export --release tests::real_ffmpeg_export_cadence_retains_exact_rational_time_base -- --exact --test-threads=1

@@ -13,6 +13,16 @@ All entries and status badges are available in English and Japanese.
   original source path.
 - Proxy files and enable state are not serialized into `.nleproj`; reopening a project never
   depends on a derived file.
+- When timeline video is analyzed after placement or project reopen, the existing analysis worker
+  rediscovers a matching completed proxy in the local cache. It appears as **Proxy ready**, with
+  original media still selected. Use the existing Proxy Media menu to explicitly enable it.
+- Discovery adds no new worker or FFmpeg invocation. It uses the existing two-analysis-worker bound,
+  never inspects files on the UI/monitor-submit thread, and does not create, prune or regenerate cache
+  entries. Unused Media Pool items keep the existing deferred-analysis behavior until placement.
+- Stale project replies, changed requested paths, and late replies after explicit generate/switch/
+  delete actions cannot overwrite current proxy state. Missing, empty, partial, directory/symlink,
+  old-profile, or oversized entries remain unavailable. Explicit enable still rechecks source
+  fingerprint/file existence; decode failure still falls back to the original.
 - Completion rechecks the original path, size, and modification time. A missing, stale, failed,
   incomplete, or cancelled proxy automatically leaves preview on the original.
 - Original/proxy switches advance the monitor cache namespace so frames from the two files cannot
@@ -37,4 +47,29 @@ normalization.
 Derived files live under `%LOCALAPPDATA%\Maelstrom\Proxy Media` (or the platform temporary folder
 when local app data is unavailable). The cache is explicitly limited to 64 proxy files and 8 GiB;
 oldest files are removed first. The first slice intentionally allows one generation at a time and
-one fixed profile. Queuing, persistent proxy attachment, and more profiles are later work.
+one fixed profile. Local cache discovery survives reopening without storing a dependency in the
+project; enabled state deliberately does not persist. Portable/external proxy attachments,
+generation queues, and more profiles remain later work.
+
+## Cache discovery verification — 2026-08-31
+
+Six new regressions cover read-only discovery, source changes/cancellation, incomplete entries,
+original routing and durable snapshot preservation, explicit-action/relink protection, stale
+project epochs, and a real generated-proxy save/reopen path. The real-media case runs the existing
+project writer/reader and media-analysis worker, checks the same artifact is rediscovered without
+regeneration (including unchanged modification time), keeps original routing by default, and then
+checks explicit proxy opt-in. Saved media and audio still refer to the source. This is headless
+application-state/routing evidence, not a rendered-GUI or pixel/performance qualification.
+
+The real case requires `MAELSTROM_PHASE0_MEDIA` and the pinned `FFMPEG_DIR`; the Phase 0 runner
+invokes it explicitly. Full release verification passes 783 tests (24 opt-in tests ignored), strict
+all-target release Clippy, formatting, seven fixture contracts, and the updated seven-scenario
+runner. The parent reviewed worker ownership, source/path checks and late-result suppression;
+independent review was unavailable because the agent limit was reached.
+
+Local logs use the `cached-proxy-` prefix in ignored `artifacts/phase1-multisource/`; the scenario
+report is `artifacts/phase0-scenarios/cached-proxy-scenarios.json`. Initial test-authoring failures
+(a Rust borrow and test FFmpeg-path selection) were corrected and are retained separately from
+passing evidence. No production dependency, schema, codec profile, resolution default, or model
+changed. Cache lookup checks identity/metadata, not full-file decode validity; the established
+enable/decode fallback remains necessary for files externally corrupted after generation.

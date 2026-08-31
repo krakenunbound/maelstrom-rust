@@ -298,9 +298,15 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       Regeneration force-replaces the deterministic artifact on its worker; deletion is also an
       owned background job, and a locked-file failure retains the disabled cleanup handle for retry.
       Post-generation reconciliation also retires any older record evicted by the cache cap. The
-      default remains original media. This first slice intentionally supports one background job
-      and one fixed 720p profile; persistent attachment, job queues, and multiple profiles remain
-      later product work. See `docs/proxy-media.md`.
+      default remains original media. Matching local proxies are now rediscovered by the existing
+      bounded media-analysis workers after timeline placement/project reopen and offered as ready,
+      never automatically enabled. Epoch/path/user-action guards reject stale discoveries; saved
+      projects and audio/export keep original paths. Six new regressions include real generated
+      proxy save/reopen/explicit-opt-in; 783 release tests, strict Clippy, fixture contracts and
+      updated Phase 0 scenarios pass. Unused Media Pool items retain deferred analysis. This still
+      supports one generation job and one 720p profile; portable/external attachment, persistent
+      enable choices, generation queues and multiple profiles remain later product work.
+      See `docs/proxy-media.md`.
 - [ ] Preserve exact source-time mapping for VFR, rational project rates, trims, slips, and reverse
       seeks. Exact reduced FFprobe `avg_frame_rate` ratios now flow through media analysis, playback
       targets, immutable preview requests, request keys, and decoder cache tolerance without

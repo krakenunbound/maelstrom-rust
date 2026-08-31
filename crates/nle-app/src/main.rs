@@ -1047,6 +1047,8 @@ struct MediaAnalysisResult {
     project_epoch: u64,
     media_id: u32,
     is_still: bool,
+    /// Worker-only cache discovery; includes the requested path to reject relinked sources.
+    cached_proxy: Option<(PathBuf, nle_proxy::ProxyArtifact)>,
     metadata: Result<nle_waveform::MediaMetadata, String>,
     frame_timing: Result<nle_waveform::FrameTiming, String>,
     waveform: Result<nle_waveform::Waveform, String>,
@@ -3401,6 +3403,8 @@ struct App {
     proxy_delete_job: Option<nle_proxy::ProxyDeleteJob>,
     proxy_delete_media_id: Option<u32>,
     proxy_records: HashMap<u32, ProxyRecord>,
+    /// Any explicit proxy action wins over a late cache-discovery reply in this project session.
+    proxy_discovery_suppressed: HashSet<u32>,
     proxy_cache_root: PathBuf,
     editor: EditorState,
     project_dialog_tx: mpsc::Sender<ProjectDialogResult>,
@@ -3770,6 +3774,7 @@ impl App {
             proxy_delete_job: None,
             proxy_delete_media_id: None,
             proxy_records: HashMap::new(),
+            proxy_discovery_suppressed: HashSet::new(),
             proxy_cache_root: proxy_cache_root(),
             editor,
             project_dialog_tx,
@@ -5148,6 +5153,7 @@ impl App {
             );
             return;
         }
+        self.proxy_discovery_suppressed.insert(media_id);
         if let Some(active_media_id) = self.proxy_job_media_id {
             if active_media_id != media_id {
                 self.editor.set_proxy_media_status(
@@ -5307,6 +5313,7 @@ impl App {
     }
 
     fn set_proxy_media_enabled(&mut self, media_id: u32, enabled: bool) {
+        self.proxy_discovery_suppressed.insert(media_id);
         let Some(record) = self.proxy_records.get_mut(&media_id) else {
             self.editor.set_proxy_media_status(
                 media_id,
@@ -5353,6 +5360,7 @@ impl App {
     }
 
     fn delete_proxy_media(&mut self, media_id: u32) {
+        self.proxy_discovery_suppressed.insert(media_id);
         if self.proxy_job_media_id == Some(media_id)
             && let Some(job) = &self.proxy_job
         {
@@ -5454,6 +5462,37 @@ impl App {
         self.proxy_delete_job.take();
         self.proxy_delete_media_id = None;
         self.proxy_records.clear();
+        self.proxy_discovery_suppressed.clear();
+    }
+
+    /// Installs availability only. All file inspection happened on the analysis worker;
+    /// enabling still uses the existing fingerprint check and cache-namespace transition.
+    fn restore_cached_proxy(
+        &mut self,
+        media_id: u32,
+        requested_path: PathBuf,
+        artifact: nle_proxy::ProxyArtifact,
+    ) {
+        if self.proxy_discovery_suppressed.contains(&media_id)
+            || self.proxy_records.contains_key(&media_id)
+            || self.editor.proxy_media_status(media_id) != ProxyMediaStatus::None
+            || !self.editor.media.iter().any(|media| {
+                media.id == media_id
+                    && media.kind == MediaKind::Video
+                    && media.path == requested_path
+            })
+        {
+            return;
+        }
+        self.proxy_records.insert(
+            media_id,
+            ProxyRecord {
+                artifact,
+                enabled: false,
+            },
+        );
+        self.editor
+            .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: false });
     }
 
     /// Runs only after background cache mutation, never in monitor submission. If pruning or an
@@ -7102,6 +7141,7 @@ impl App {
                 break;
             };
             let tx = self.media_analysis_tx.clone();
+            let proxy_cache_root = self.proxy_cache_root.clone();
             let cancellation = Arc::new(AtomicBool::new(false));
             let worker_cancellation = Arc::clone(&cancellation);
             let started = thread::Builder::new()
@@ -7188,10 +7228,19 @@ impl App {
                                 });
                         (metadata, frame_timing, waveform, video_strip)
                     };
+                    let cached_proxy = if metadata.is_ok()
+                        && classify_path(&path) == MediaKind::Video
+                    {
+                        nle_proxy::find_cached_proxy(&path, &proxy_cache_root, &worker_cancellation)
+                            .map(|artifact| (path, artifact))
+                    } else {
+                        None
+                    };
                     let _ = tx.send(MediaAnalysisResult {
                         project_epoch,
                         media_id,
                         is_still,
+                        cached_proxy,
                         metadata,
                         frame_timing,
                         waveform,
@@ -7228,6 +7277,9 @@ impl App {
                 .remove(&(project_epoch, media_id));
             if project_epoch != self.media_analysis_epoch {
                 continue;
+            }
+            if let Some((requested_path, artifact)) = result.cached_proxy {
+                self.restore_cached_proxy(media_id, requested_path, artifact);
             }
             let durable_generation_before = self.editor.durable_generation();
             if let Some(probe) = &mut self.media_acceptance_probe
@@ -8150,6 +8202,225 @@ mod tests {
         assert!(!audio_targets.is_empty());
         assert!(audio_targets.iter().all(|target| target.path == original));
         assert_eq!(editor.snapshot().media[0].path, original);
+    }
+
+    fn cached_proxy_fixture(original: &Path) -> nle_proxy::ProxyArtifact {
+        nle_proxy::ProxyArtifact {
+            path: PathBuf::from("C:/cache/not-opened-during-restore.mp4"),
+            source: nle_proxy::SourceFingerprint {
+                canonical_path: original.to_path_buf(),
+                bytes: 1,
+                modified_unix_nanos: 1,
+            },
+            output_bytes: 1,
+            profile_version: nle_proxy::PROXY_PROFILE_VERSION,
+        }
+    }
+
+    #[test]
+    fn cached_proxy_restore_preserves_original_routing_and_durable_state() {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        let original = PathBuf::from("C:/media/discovered.mp4");
+        app.editor.add_media_paths([original.clone()]);
+        assert!(app.editor.add_selected_to_timeline());
+        let generation = app.editor.durable_generation();
+        let epoch = app.monitor_cache_epoch;
+        let snapshot = serde_json::to_string(&app.editor.snapshot()).unwrap();
+        app.restore_cached_proxy(1, original.clone(), cached_proxy_fixture(&original));
+        assert_eq!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Ready { enabled: false }
+        );
+        assert!(!app.proxy_records[&1].enabled);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        assert!(
+            app.editor
+                .audio_playback_targets()
+                .iter()
+                .all(|target| target.path == original)
+        );
+        assert_eq!(app.editor.durable_generation(), generation);
+        assert_eq!(app.monitor_cache_epoch, epoch);
+        assert_eq!(
+            serde_json::to_string(&app.editor.snapshot()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn cached_proxy_restore_never_overrides_explicit_actions_or_relinked_media() {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        let original = PathBuf::from("C:/media/discovered.mp4");
+        app.editor.add_media_paths([original.clone()]);
+        let artifact = cached_proxy_fixture(&original);
+        app.restore_cached_proxy(1, PathBuf::from("C:/media/old.mp4"), artifact.clone());
+        assert!(app.proxy_records.is_empty());
+        for status in [
+            ProxyMediaStatus::Generating { progress: 0.5 },
+            ProxyMediaStatus::Deleting,
+            ProxyMediaStatus::Ready { enabled: true },
+            ProxyMediaStatus::Failed {
+                message: "preserve".into(),
+            },
+        ] {
+            app.editor.set_proxy_media_status(1, status.clone());
+            app.restore_cached_proxy(1, original.clone(), artifact.clone());
+            assert_eq!(app.editor.proxy_media_status(1), status);
+            assert!(app.proxy_records.is_empty());
+        }
+        app.editor.set_proxy_media_status(1, ProxyMediaStatus::None);
+        app.delete_proxy_media(1);
+        app.restore_cached_proxy(1, original.clone(), artifact.clone());
+        assert!(
+            app.proxy_records.is_empty(),
+            "late discovery must not undo completed deletion"
+        );
+        app.reset_proxy_session();
+        app.restore_cached_proxy(1, original.clone(), artifact.clone());
+        assert!(app.proxy_records.contains_key(&1));
+        app.proxy_records.get_mut(&1).unwrap().enabled = true;
+        app.restore_cached_proxy(1, original, artifact);
+        assert!(app.proxy_records[&1].enabled);
+    }
+
+    #[test]
+    fn cached_proxy_analysis_from_previous_project_is_discarded() {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        let original = PathBuf::from("C:/media/discovered.mp4");
+        app.editor.add_media_paths([original.clone()]);
+        app.media_analysis_tx
+            .send(MediaAnalysisResult {
+                project_epoch: app.media_analysis_epoch.wrapping_sub(1),
+                media_id: 1,
+                is_still: false,
+                cached_proxy: Some((original.clone(), cached_proxy_fixture(&original))),
+                metadata: Err("stale".into()),
+                frame_timing: Err("stale".into()),
+                waveform: Err("stale".into()),
+                video_strip: Err("stale".into()),
+            })
+            .unwrap();
+        app.poll_media_analysis();
+        assert!(app.proxy_records.is_empty());
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::None);
+    }
+
+    #[test]
+    fn supplied_video_reopens_with_cached_proxy_available_but_disabled() {
+        let Some(source) = std::env::var_os("MAELSTROM_PHASE0_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        assert!(source.is_absolute() && source.is_file());
+        let ffmpeg_root =
+            PathBuf::from(std::env::var_os("FFMPEG_DIR").expect("fixture test needs FFMPEG_DIR"));
+        let catalog = test_catalog_path("reopen-cached-proxy");
+        let root = catalog.parent().unwrap();
+        fs::create_dir_all(root).unwrap();
+        let cache = root.join("proxy-cache");
+        let job = nle_proxy::ProxyJob::start(
+            nle_proxy::ProxyRequest {
+                input: source.clone(),
+                cache_root: cache.clone(),
+                ffmpeg: ffmpeg_root.join("bin").join(if cfg!(windows) {
+                    "ffmpeg.exe"
+                } else {
+                    "ffmpeg"
+                }),
+                replace_existing: false,
+            },
+            || {},
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let artifact = loop {
+            match job.try_recv() {
+                Ok(nle_proxy::ProxyEvent::Completed(artifact)) => break artifact,
+                Ok(nle_proxy::ProxyEvent::Progress(_)) | Err(mpsc::TryRecvError::Empty) => {}
+                other => panic!("proxy generation failed: {other:?}"),
+            }
+            assert!(Instant::now() < deadline, "proxy generation timed out");
+            thread::sleep(Duration::from_millis(2));
+        };
+        drop(job);
+        let proxy_modified = fs::metadata(&artifact.path).unwrap().modified().unwrap();
+        let project_path;
+        {
+            let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+            app.catalog_path = Some(catalog.clone());
+            app.proxy_cache_root = cache.clone();
+            app.handle_hub_action(HubAction::NewProject {
+                name: "Reopen proxy".into(),
+                template: nle_ui_core::TemplateId::FullHd1080p,
+                language: Language::English,
+            });
+            app.editor.add_media_paths([source.clone()]);
+            assert!(app.editor.add_selected_to_timeline());
+            app.flush_project_autosave();
+            project_path = app
+                .project_path_for_id(app.current_project_id.unwrap())
+                .unwrap();
+            let document = load_project_document(&project_path).unwrap().unwrap();
+            assert_eq!(document.snapshot.media[0].path, source);
+            assert!(
+                !fs::read_to_string(&project_path)
+                    .unwrap()
+                    .contains("proxy-cache")
+            );
+        }
+        let mut reopened = App::new_without_startup_or_audio_for_monitor_contract();
+        reopened.catalog_path = Some(catalog.clone());
+        reopened.proxy_cache_root = cache;
+        reopened.request_project_load(None, project_path, None, Language::English);
+        wait_for_project_open(&mut reopened);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !reopened.media_analysis_in_flight.is_empty()
+            || !reopened.media_analysis_pending.is_empty()
+        {
+            reopened.poll_media_analysis();
+            assert!(
+                Instant::now() < deadline,
+                "reopened media analysis timed out"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            reopened.editor.proxy_media_status(1),
+            ProxyMediaStatus::Ready { enabled: false }
+        );
+        assert_eq!(reopened.proxy_records[&1].artifact, artifact);
+        assert!(
+            reopened.proxy_job.is_none(),
+            "reopen must not regenerate the proxy"
+        );
+        assert_eq!(
+            fs::metadata(&artifact.path).unwrap().modified().unwrap(),
+            proxy_modified
+        );
+        assert_eq!(
+            resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
+            source
+        );
+        assert!(
+            reopened
+                .editor
+                .audio_playback_targets()
+                .iter()
+                .all(|target| target.path == source)
+        );
+        reopened.set_proxy_media_enabled(1, true);
+        assert_eq!(
+            resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
+            artifact.path
+        );
+        assert_eq!(reopened.editor.snapshot().media[0].path, source);
+        println!(
+            "cached proxy reopen: worker discovery, original default, explicit opt-in, durable source unchanged"
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -10377,6 +10648,7 @@ mod tests {
                 project_epoch: old_epoch,
                 media_id: 1,
                 is_still: false,
+                cached_proxy: None,
                 metadata: Err("finished old metadata".to_owned()),
                 frame_timing: Err("finished old timing".to_owned()),
                 waveform: Err("finished old waveform".to_owned()),
@@ -12595,6 +12867,7 @@ mod tests {
                 project_epoch: app.media_analysis_epoch,
                 media_id: 1,
                 is_still: false,
+                cached_proxy: None,
                 metadata: Ok(metadata),
                 frame_timing: Ok(frame_timing),
                 waveform: Err("fixture intentionally has no audio".to_owned()),
@@ -12646,6 +12919,7 @@ mod tests {
                 project_epoch: app.media_analysis_epoch,
                 media_id: 1,
                 is_still: false,
+                cached_proxy: None,
                 metadata: Ok(metadata),
                 frame_timing: Ok(frame_timing),
                 waveform: Err("fixture intentionally has no audio".to_owned()),
@@ -12718,6 +12992,7 @@ mod tests {
                     project_epoch: app.media_analysis_epoch,
                     media_id: 1,
                     is_still: false,
+                    cached_proxy: None,
                     metadata: Ok(metadata),
                     frame_timing: Ok(timing),
                     waveform: Err("fixture intentionally has no audio".into()),
@@ -14721,6 +14996,7 @@ mod tests {
                     project_epoch: app.media_analysis_epoch,
                     media_id: 1,
                     is_still: false,
+                    cached_proxy: None,
                     metadata: Ok(nle_waveform::MediaMetadata {
                         duration_seconds: Some(60.0),
                         ..Default::default()
