@@ -18,6 +18,11 @@ const COMPOSITOR_TIMING_SAMPLE_COUNT: usize = 120;
 const TIMESTAMP_QUERY_COUNT: u32 = 2;
 const TIMESTAMP_RESULT_BYTES: u64 = 16;
 const TIMESTAMP_RESOLVE_BYTES: u64 = 256;
+/// Free GPU resources retained across source/canvas dimension changes. This is deliberately
+/// below one typical 4K layer pair, so resize churn cannot pin a large amount of VRAM.
+const RESOURCE_POOL_BYTE_CAP: u64 = 32 * 1024 * 1024;
+const MAX_POOLED_LAYER_BUNDLES: usize = MAX_COMPOSITE_LAYERS;
+const MAX_POOLED_OUTPUT_PAIRS: usize = 1;
 
 /// Isolated GPU execution time for the viewer compositor compose pass.
 ///
@@ -611,6 +616,30 @@ struct OutputTarget {
     _curve_buffer: wgpu::Buffer,
 }
 
+struct PooledLayerTexture {
+    size: PixelSize,
+    bytes: u64,
+    order: u64,
+    texture: LayerTexture,
+}
+
+struct PooledOutputTargets {
+    size: PixelSize,
+    bytes: u64,
+    order: u64,
+    outputs: [OutputTarget; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ViewerCompositorPoolCounters {
+    layer_reuses: u64,
+    output_reuses: u64,
+    layer_allocations: u64,
+    output_allocations: u64,
+    rejected_oversize: u64,
+    evictions: u64,
+}
+
 /// GPU resources for a fixed four-layer project-monitor composition.
 pub struct ViewerCompositorRenderer {
     premultiply_pipeline: wgpu::RenderPipeline,
@@ -624,9 +653,19 @@ pub struct ViewerCompositorRenderer {
     matte_vertex_buffer: wgpu::Buffer,
     layers: [Option<LayerTexture>; MAX_COMPOSITE_LAYERS],
     layer_sizes: [Option<PixelSize>; MAX_COMPOSITE_LAYERS],
+    layer_pool: [Option<PooledLayerTexture>; MAX_POOLED_LAYER_BUNDLES],
+    output_pool: Option<PooledOutputTargets>,
+    pooled_bytes: u64,
+    next_pool_order: u64,
+    pool_counters: ViewerCompositorPoolCounters,
     outputs: Option<[OutputTarget; 2]>,
     output_size: Option<PixelSize>,
     front_output: usize,
+    // Fixed scratch avoids per-frame heap allocations. The compositor encodes into the
+    // callback-provided encoder, so it owns no command buffers to pool.
+    scratch_vertices: [ViewerVertex; MAX_COMPOSITE_LAYERS * VERTICES_PER_LAYER],
+    scratch_mattes: [MatteVertex; MAX_COMPOSITE_LAYERS + 1],
+    scratch_layer_counts: [u32; MAX_COMPOSITE_LAYERS],
     input_generation: u64,
     applied_input_generation: u64,
     applied_frame_generation: u64,
@@ -698,9 +737,17 @@ impl ViewerCompositorRenderer {
             }),
             layers: std::array::from_fn(|_| None),
             layer_sizes: [None; MAX_COMPOSITE_LAYERS],
+            layer_pool: std::array::from_fn(|_| None),
+            output_pool: None,
+            pooled_bytes: 0,
+            next_pool_order: 0,
+            pool_counters: ViewerCompositorPoolCounters::default(),
             outputs: None,
             output_size: None,
             front_output: 0,
+            scratch_vertices: [ViewerVertex::zeroed(); MAX_COMPOSITE_LAYERS * VERTICES_PER_LAYER],
+            scratch_mattes: [MatteVertex::zeroed(); MAX_COMPOSITE_LAYERS + 1],
+            scratch_layer_counts: [0; MAX_COMPOSITE_LAYERS],
             input_generation: 0,
             applied_input_generation: u64::MAX,
             applied_frame_generation: u64::MAX,
@@ -785,16 +832,25 @@ impl ViewerCompositorRenderer {
         rgba: &[u8],
     ) -> Result<(), ViewerUploadError> {
         validate_upload(layer, width, height, rgba.len())?;
-        if self.layer_sizes[layer] != Some(PixelSize::new(width, height)) {
-            self.layers[layer] = Some(create_layer_texture(
-                device,
-                &self.texture_layout,
-                &self.premultiply_layout,
-                &self.sampler,
-                width,
-                height,
-            ));
-            self.layer_sizes[layer] = Some(PixelSize::new(width, height));
+        let size = PixelSize::new(width, height);
+        if self.layer_sizes[layer] != Some(size) {
+            if let (Some(texture), Some(previous_size)) =
+                (self.layers[layer].take(), self.layer_sizes[layer])
+            {
+                self.pool_layer(previous_size, texture);
+            }
+            self.layers[layer] = Some(self.take_layer(size).unwrap_or_else(|| {
+                self.pool_counters.layer_allocations += 1;
+                create_layer_texture(
+                    device,
+                    &self.texture_layout,
+                    &self.premultiply_layout,
+                    &self.sampler,
+                    width,
+                    height,
+                )
+            }));
+            self.layer_sizes[layer] = Some(size);
         }
         let texture = self.layers[layer].as_ref().expect("viewer layer allocated");
         // The retained texture is intentionally the only upload target for this slot.
@@ -828,7 +884,10 @@ impl ViewerCompositorRenderer {
 
     pub fn clear_layer(&mut self, layer: usize) -> Result<(), ViewerUploadError> {
         validate_layer(layer)?;
-        if self.layers[layer].take().is_some() {
+        if let Some(texture) = self.layers[layer].take() {
+            if let Some(size) = self.layer_sizes[layer] {
+                self.pool_layer(size, texture);
+            }
             self.input_generation = self.input_generation.wrapping_add(1);
         }
         self.layer_sizes[layer] = None;
@@ -839,6 +898,9 @@ impl ViewerCompositorRenderer {
     pub fn clear(&mut self) {
         self.layers = std::array::from_fn(|_| None);
         self.outputs = None;
+        self.layer_pool = std::array::from_fn(|_| None);
+        self.output_pool = None;
+        self.pooled_bytes = 0;
         self.output_size = None;
         self.layer_sizes = [None; MAX_COMPOSITE_LAYERS];
         self.input_generation = self.input_generation.wrapping_add(1);
@@ -856,7 +918,9 @@ impl ViewerCompositorRenderer {
         canvas_size: PixelSize,
     ) -> bool {
         let Some(frame) = frame.filter(|frame| frame.project_size.is_nonzero()) else {
-            self.outputs = None;
+            if let (Some(outputs), Some(size)) = (self.outputs.take(), self.output_size) {
+                self.pool_outputs(size, outputs);
+            }
             self.output_size = None;
             self.presentation.composed_upload_serials = [None; MAX_COMPOSITE_LAYERS];
             return false;
@@ -897,14 +961,15 @@ impl ViewerCompositorRenderer {
             texture.premultiply_needed = false;
         }
         let back = 1 - self.front_output;
-        let mut vertices = [ViewerVertex::zeroed(); MAX_COMPOSITE_LAYERS * VERTICES_PER_LAYER];
-        let mattes = matte_vertices(frame.black_mattes_before, frame.white_mattes_before);
-        let mut layer_count = [0_u32; MAX_COMPOSITE_LAYERS];
+        self.scratch_vertices = [ViewerVertex::zeroed(); MAX_COMPOSITE_LAYERS * VERTICES_PER_LAYER];
+        self.scratch_mattes = matte_vertices(frame.black_mattes_before, frame.white_mattes_before);
+        self.scratch_layer_counts = [0; MAX_COMPOSITE_LAYERS];
         for (layer, primitive) in frame.layers.iter().enumerate() {
             if primitive.is_some() && self.layers[layer].is_some() {
                 let source = primitive.expect("checked");
                 write_vertices(
-                    &mut vertices[layer * VERTICES_PER_LAYER..(layer + 1) * VERTICES_PER_LAYER],
+                    &mut self.scratch_vertices
+                        [layer * VERTICES_PER_LAYER..(layer + 1) * VERTICES_PER_LAYER],
                     source,
                     frame.project_size,
                 );
@@ -917,13 +982,23 @@ impl ViewerCompositorRenderer {
                 );
                 let curve_stack = gpu_curve_lut_stack(source);
                 queue.write_buffer(&texture.curve_buffer, 0, bytemuck::bytes_of(&curve_stack));
-                layer_count[layer] = VERTICES_PER_LAYER as u32;
+                self.scratch_layer_counts[layer] = VERTICES_PER_LAYER as u32;
             }
         }
         self.presentation
-            .capture_composition(std::array::from_fn(|layer| layer_count[layer] != 0));
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-        queue.write_buffer(&self.matte_vertex_buffer, 0, bytemuck::cast_slice(&mattes));
+            .capture_composition(std::array::from_fn(|layer| {
+                self.scratch_layer_counts[layer] != 0
+            }));
+        queue.write_buffer(
+            &self.vertex_buffer,
+            0,
+            bytemuck::cast_slice(&self.scratch_vertices),
+        );
+        queue.write_buffer(
+            &self.matte_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&self.scratch_mattes),
+        );
         let outputs = self.outputs.as_ref().expect("output targets allocated");
         let record_gpu_timing = self.gpu_timing_enabled
             && self
@@ -961,7 +1036,7 @@ impl ViewerCompositorRenderer {
         pass.draw(0..VERTICES_PER_LAYER as u32, 0..1);
         pass.set_pipeline(&self.compose_pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        for (layer, &count) in layer_count.iter().enumerate() {
+        for (layer, &count) in self.scratch_layer_counts.iter().enumerate() {
             if count == 0 {
                 pass.set_pipeline(&self.matte_pipeline);
                 pass.set_vertex_buffer(0, self.matte_vertex_buffer.slice(..));
@@ -1056,12 +1131,151 @@ impl ViewerCompositorRenderer {
         if self.output_size == Some(size) && self.outputs.is_some() {
             return false;
         }
-        self.outputs = Some(std::array::from_fn(|_| {
-            create_output(device, &self.texture_layout, &self.sampler, size)
+        if let (Some(outputs), Some(previous_size)) = (self.outputs.take(), self.output_size) {
+            self.pool_outputs(previous_size, outputs);
+        }
+        self.outputs = Some(self.take_outputs(size).unwrap_or_else(|| {
+            self.pool_counters.output_allocations += 1;
+            std::array::from_fn(|_| {
+                create_output(device, &self.texture_layout, &self.sampler, size)
+            })
         }));
         self.output_size = Some(size);
         true
     }
+
+    fn take_layer(&mut self, size: PixelSize) -> Option<LayerTexture> {
+        let index = self
+            .layer_pool
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.size == size))?;
+        let entry = self.layer_pool[index].take().expect("pooled layer present");
+        self.pooled_bytes = self.pooled_bytes.saturating_sub(entry.bytes);
+        self.pool_counters.layer_reuses += 1;
+        Some(entry.texture)
+    }
+
+    fn take_outputs(&mut self, size: PixelSize) -> Option<[OutputTarget; 2]> {
+        if self.output_pool.as_ref()?.size != size {
+            return None;
+        }
+        let entry = self.output_pool.take().expect("pooled outputs present");
+        self.pooled_bytes = self.pooled_bytes.saturating_sub(entry.bytes);
+        self.pool_counters.output_reuses += 1;
+        Some(entry.outputs)
+    }
+
+    fn pool_layer(&mut self, size: PixelSize, texture: LayerTexture) {
+        let Some(bytes) = layer_resource_bytes(size) else {
+            self.pool_counters.rejected_oversize += 1;
+            return;
+        };
+        if bytes > RESOURCE_POOL_BYTE_CAP {
+            self.pool_counters.rejected_oversize += 1;
+            return;
+        }
+        while self.layer_pool.iter().flatten().count() >= MAX_POOLED_LAYER_BUNDLES
+            || self.pooled_bytes.saturating_add(bytes) > RESOURCE_POOL_BYTE_CAP
+        {
+            if !self.evict_oldest_pooled_resource() {
+                self.pool_counters.rejected_oversize += 1;
+                return;
+            }
+        }
+        let slot = self
+            .layer_pool
+            .iter()
+            .position(Option::is_none)
+            .expect("pool capacity checked");
+        self.layer_pool[slot] = Some(PooledLayerTexture {
+            size,
+            bytes,
+            order: self.next_pool_order(),
+            texture,
+        });
+        self.pooled_bytes += bytes;
+    }
+
+    fn pool_outputs(&mut self, size: PixelSize, outputs: [OutputTarget; 2]) {
+        let Some(bytes) = output_pair_resource_bytes(size) else {
+            self.pool_counters.rejected_oversize += 1;
+            return;
+        };
+        if bytes > RESOURCE_POOL_BYTE_CAP {
+            self.pool_counters.rejected_oversize += 1;
+            return;
+        }
+        while usize::from(self.output_pool.is_some()) >= MAX_POOLED_OUTPUT_PAIRS
+            || self.pooled_bytes.saturating_add(bytes) > RESOURCE_POOL_BYTE_CAP
+        {
+            if !self.evict_oldest_pooled_resource() {
+                self.pool_counters.rejected_oversize += 1;
+                return;
+            }
+        }
+        self.output_pool = Some(PooledOutputTargets {
+            size,
+            bytes,
+            order: self.next_pool_order(),
+            outputs,
+        });
+        self.pooled_bytes += bytes;
+    }
+
+    fn evict_oldest_pooled_resource(&mut self) -> bool {
+        let oldest_layer = self
+            .layer_pool
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.as_ref().map(|entry| (index, entry.order)))
+            .min_by_key(|(_, order)| *order);
+        let output_order = self.output_pool.as_ref().map(|entry| entry.order);
+        if let Some((index, layer_order)) = oldest_layer
+            && output_order.is_none_or(|order| layer_order <= order)
+        {
+            let entry = self.layer_pool[index].take().expect("pooled layer present");
+            self.pooled_bytes = self.pooled_bytes.saturating_sub(entry.bytes);
+            self.pool_counters.evictions += 1;
+            return true;
+        }
+        if let Some(entry) = self.output_pool.take() {
+            self.pooled_bytes = self.pooled_bytes.saturating_sub(entry.bytes);
+            self.pool_counters.evictions += 1;
+            return true;
+        }
+        false
+    }
+
+    fn next_pool_order(&mut self) -> u64 {
+        let order = self.next_pool_order;
+        self.next_pool_order = self.next_pool_order.wrapping_add(1);
+        order
+    }
+
+    #[cfg(test)]
+    fn pool_counters(&self) -> ViewerCompositorPoolCounters {
+        self.pool_counters
+    }
+}
+
+fn texture_resource_bytes(size: PixelSize, bytes_per_pixel: u64) -> Option<u64> {
+    u64::from(size.width)
+        .checked_mul(u64::from(size.height))
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+}
+
+fn layer_resource_bytes(size: PixelSize) -> Option<u64> {
+    texture_resource_bytes(size, 8)?.checked_add(
+        (std::mem::size_of::<GpuColorCorrectionStack>() + std::mem::size_of::<GpuCurveLutStack>())
+            as u64,
+    )
+}
+
+fn output_pair_resource_bytes(size: PixelSize) -> Option<u64> {
+    texture_resource_bytes(size, 8)?.checked_add(
+        (2 * (std::mem::size_of::<GpuColorCorrectionStack>()
+            + std::mem::size_of::<GpuCurveLutStack>())) as u64,
+    )
 }
 
 fn validate_layer(layer: usize) -> Result<(), ViewerUploadError> {
@@ -2287,6 +2501,38 @@ mod tests {
     }
 
     #[test]
+    fn compositor_pool_byte_estimates_include_all_retained_payloads() {
+        let one_pixel = PixelSize::new(1, 1);
+        let layer_payload = (std::mem::size_of::<GpuColorCorrectionStack>()
+            + std::mem::size_of::<GpuCurveLutStack>()) as u64;
+        assert_eq!(layer_resource_bytes(one_pixel), Some(8 + layer_payload));
+        assert_eq!(
+            output_pair_resource_bytes(one_pixel),
+            Some(8 + 2 * layer_payload)
+        );
+        assert!(
+            layer_resource_bytes(PixelSize::new(2_048, 2_048)).expect("4K-square layer accounting")
+                > RESOURCE_POOL_BYTE_CAP
+        );
+        assert!(
+            output_pair_resource_bytes(PixelSize::new(2_048, 2_048))
+                .expect("4K-square output accounting")
+                > RESOURCE_POOL_BYTE_CAP
+        );
+    }
+
+    #[test]
+    fn compositor_pool_cap_is_stricter_than_entry_caps() {
+        let layer = layer_resource_bytes(PixelSize::new(1_920, 1_080)).expect("1080p layer");
+        let output =
+            output_pair_resource_bytes(PixelSize::new(1_920, 1_080)).expect("1080p outputs");
+        assert!(layer * 2 <= RESOURCE_POOL_BYTE_CAP);
+        assert!(layer * 2 + output > RESOURCE_POOL_BYTE_CAP);
+        assert_eq!(MAX_POOLED_LAYER_BUNDLES, MAX_COMPOSITE_LAYERS);
+        assert_eq!(MAX_POOLED_OUTPUT_PAIRS, 1);
+    }
+
+    #[test]
     fn blit_transfer_matches_the_presentation_format() {
         assert_eq!(
             blit_fragment_entry_point(wgpu::TextureFormat::Rgba8UnormSrgb),
@@ -3112,6 +3358,144 @@ mod tests {
         if timestamp_query_supported {
             assert_eq!(evidence.timing.expect("timestamp timing").samples, 2);
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU adapter; run with --ignored --nocapture"]
+    fn gpu_compositor_reuses_exact_size_resources_and_rejects_oversize_pool_entries() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("viewer GPU adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("viewer compositor pool test device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("viewer GPU device");
+        let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut frame = qualification_frame();
+        frame.black_mattes_before = [0.0; MAX_COMPOSITE_LAYERS + 1];
+        frame.layers[1] = None;
+        frame.layers[0]
+            .as_mut()
+            .expect("pool test layer")
+            .color_correction_count = 0;
+        let encode = |renderer: &mut ViewerCompositorRenderer, generation, canvas_size| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewer compositor pool test encoder"),
+            });
+            assert!(renderer.prepare(
+                &device,
+                &queue,
+                &mut encoder,
+                Some(frame),
+                generation,
+                canvas_size,
+            ));
+            queue.submit([encoder.finish()])
+        };
+
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 8, 8, &[255, 0, 0, 255].repeat(64))
+            .expect("initial layer upload");
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 16, 16, &[255, 0, 0, 255].repeat(256))
+            .expect("resized layer upload");
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 8, 8, &[255, 0, 0, 255].repeat(64))
+            .expect("exact-size layer reuse upload");
+        let _ = encode(&mut renderer, 1, PixelSize::new(8, 8));
+        let _ = encode(&mut renderer, 2, PixelSize::new(16, 16));
+        let _ = encode(&mut renderer, 3, PixelSize::new(8, 8));
+        renderer.clear_layer(0).expect("pool cleared layer");
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 8, 8, &[255, 0, 0, 255].repeat(64))
+            .expect("reuse layer after clear");
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer compositor invalid-frame pool encoder"),
+        });
+        assert!(!renderer.prepare(&device, &queue, &mut encoder, None, 4, PixelSize::new(8, 8),));
+        queue.submit([encoder.finish()]);
+        let _ = encode(&mut renderer, 5, PixelSize::new(8, 8));
+
+        let oversized = vec![0_u8; 2_048 * 2_048 * 4];
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 2_048, 2_048, &oversized)
+            .expect("oversize layer upload");
+        renderer
+            .upload_layer_rgba(&device, &queue, 0, 8, 8, &[255, 0, 0, 255].repeat(64))
+            .expect("release oversize layer upload");
+        let _ = encode(&mut renderer, 6, PixelSize::new(2_048, 2_048));
+        let _ = encode(&mut renderer, 7, PixelSize::new(8, 8));
+
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewer compositor pooled output readback"),
+            size: 256 * 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer compositor pooled output readback encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &renderer.outputs.as_ref().expect("pooled outputs allocated")
+                    [renderer.front_output]
+                    ._texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(8),
+                },
+            },
+            wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+        );
+        let pixel = readback_first_pixel(&device, &readback, queue.submit([encoder.finish()]))
+            .expect("pooled output readback after queued submissions");
+        assert!(
+            pixel[0] >= 200 && pixel[1] <= 2 && pixel[2] <= 2 && pixel[3] == 255,
+            "pooled queued submissions changed the final red frame: {pixel:?}"
+        );
+
+        let counters = renderer.pool_counters();
+        assert!(
+            counters.layer_reuses >= 2,
+            "exact-size layer reuse was not observed: {counters:?}"
+        );
+        assert!(
+            counters.output_reuses >= 1,
+            "exact-size output-pair reuse was not observed: {counters:?}"
+        );
+        assert!(
+            counters.rejected_oversize >= 2,
+            "oversize layer/output resources entered the pool: {counters:?}"
+        );
+        assert!(
+            counters.evictions >= 1,
+            "single output-pair pool did not deterministically evict: {counters:?}"
+        );
+        assert!(renderer.pooled_bytes <= RESOURCE_POOL_BYTE_CAP);
+        renderer.clear();
+        assert_eq!(renderer.pooled_bytes, 0);
+        assert!(renderer.layer_pool.iter().all(Option::is_none));
+        assert!(renderer.output_pool.is_none());
     }
 
     #[test]

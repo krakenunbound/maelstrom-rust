@@ -9,6 +9,13 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Bound project-monitor resource churn with exact-size layer/output reuse. The free pool shares
+  a 32 MiB logical-payload cap, four-layer and one-output-pair entry limits, oldest eviction,
+  oversize rejection, and a full-clear purge. Fixed CPU command scratch is retained; the compositor
+  creates no command buffers because the render callback supplies its encoder. A real GPU gate
+  queues resize, visibility-clear and temporary-no-frame reuse without per-submit waits, then
+  verifies the final output by readback. Physical VRAM, memory pressure, practical 4K pooling and
+  cross-adapter performance remain open. See `docs/compositor-resource-pool.md`.
 - [x] Correct transparent-edge handling across the retained viewer compositor and generated export
   graphs. Straight RGBA remains the asset/FFmpeg-overlay contract; changed viewer uploads receive a
   retained encoded-sRGB premultiply pass, media/mattes use premultiplied source-over, and sRGB plus
@@ -330,8 +337,9 @@ Last updated: 2026-08-31
 
 ## Phase 2 implementation queue
 
-- [ ] Add compositor-owned render-target, texture, and command-scratch pools.
-- [ ] Implement correct premultiplied-alpha image/video semantics.
+- [x] Add bounded compositor-owned render-target/texture reuse and retained CPU command scratch;
+  `egui_wgpu` owns the callback encoder, so the compositor allocates no command buffers to pool.
+- [x] Implement correct premultiplied-alpha image/video semantics.
 - [ ] Add nearest, bilinear, and bicubic preview sampling where supported.
 - [ ] Prove four transformed 1080p layers on the discrete reference profile.
 - [ ] Prove at least two layers with Auto quality on the integrated reference profile.

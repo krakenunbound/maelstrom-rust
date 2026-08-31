@@ -640,7 +640,16 @@ Exit gate:
 
 Replace “topmost clip wins” with a generation-aware retained compositor.
 
-- [ ] Add a compositor-owned render target pool, texture pool, and command buffer scratch storage.
+- [x] Add bounded compositor-owned render-target/texture reuse and retained scratch storage. Exact
+      source/canvas sizes reuse complete layer bundles and double-buffered output pairs across
+      resize, source visibility, and temporary no-frame churn. The free pool is capped at four
+      layers, one output pair, and 32 MiB of logical payload with oldest eviction; oversize/4K
+      bundles are released, and full clear purges the pool. Fixed CPU vertex/matte/count scratch and
+      existing GPU buffers are retained. The compositor creates no command buffers because
+      `egui_wgpu` owns the callback encoder, so no competing command-buffer pool is introduced.
+      Queued real-GPU reuse/readback and accounting regressions pass. This is not physical-VRAM,
+      memory-pressure, practical-4K, or cross-adapter evidence. See
+      `docs/compositor-resource-pool.md`.
 - [x] Upload or import one latest-ready texture per contributing source without per-clip texture
       creation.
 - [x] Composite ordered video layers with transparent empty regions over project background black.
