@@ -9,6 +9,17 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Pack full-resolution monitor RGBA directly into its final shared allocation, preserving
+  exact pixels/alpha/letterboxing and cache ownership. Native 1080p packing p50 falls locally
+  from 2.658 to 1.363 ms; native 4K from 11.659 to 5.820 ms. 1,296 small-layout comparisons,
+  full-resolution/lifetime/bounds tests, 152 hardware pixel/timing cases, 764 release tests,
+  strict Clippy, and independent review pass. Packing timing now includes final allocation.
+  Three four-source Full-1080p latency runs pass at 63-67 ms frame-ready p95; this does not
+  demonstrate end-to-end scrub improvement. Rebuilt package hash starts `4715E17526744CC8`;
+  runtime/hash checks pass, GUI smoke remains `not_run`, no editor launch.
+  Evidence: `docs/monitor-rgba-packing.md`.
+- [ ] Requalify ten-minute cache/session resources after single-allocation RGBA packing.
+  Prior sustained results below belong to earlier source and do not qualify this checkpoint.
 - [x] Requalify local ten-minute cache/session resources after accurate threaded conversion
   at source commit `b3e9228939f4b3edf2c2d98a74cf1be0d5338ba5`. 600.047 seconds,
   20,184 four-source Full-1080p cycles, 80,736 requests, 77 us scheduler p95,
@@ -44,10 +55,11 @@ Last updated: 2026-08-31
   `8F0965B4489D34A11`; smoke remains `not_run`; runtime/hash/cleanup checks pass.
   Evidence and performance tradeoff: `docs/hardware-decode-parity.md`.
   Commit: `fb5335df898f69993f3ff5545260f0e47f157b1d`.
-- [ ] Requalify windowed playback after accurate threaded conversion. Local ten-minute
-  resource qualification passes, but does not establish real-time display. Four fresh
+- [ ] Requalify windowed playback after accurate threaded conversion and direct RGBA packing.
+  Prior local ten-minute resource qualification does not establish real-time display. Four
   Intel/NVIDIA one/four-source cases are prepared without launch; explicit permission to run
-  the editor through the exact launcher is pending. Qualify lower-core CPU contention before
+  the editor through the exact launcher is pending. Regenerate prepared package identities for
+  the new executable before running. Qualify lower-core CPU contention before
   broad performance claims. The goal remains active; no automatic editor launch is authorized.
 - [ ] Continue profiling RGBA packing, upload, and presentation if full-quality latency remains
   above the required gate. Never hide cost by lowering resolution or changing the selected filter.

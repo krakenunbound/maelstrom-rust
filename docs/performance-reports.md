@@ -19,6 +19,9 @@ The report records:
   demux packet retrieval, decoder send/receive/flush calls, hardware-to-CPU transfer, scaler
   work, RGBA copy plus letterbox, and whole worker request. Each stage has sample count, total,
   mean, and maximum milliseconds. Software decode legitimately reports zero transfer samples.
+  Since the single-allocation packing checkpoint, RGBA packing includes the final shared-buffer
+  allocation. Earlier reports excluded the last Vec-to-Arc allocation/copy; do not compare those
+  historical stage spans directly. See `monitor-rgba-packing.md` for the paired measurement.
 - viewer-stage CPU/API submission timing: `viewer_stage_timings.upload_cpu` times only successful
   `HubRenderer::upload_viewer_layer_rgba` calls (including a resize allocation when needed), and
   `viewer_stage_timings.compositor_encode_cpu` times only callbacks that actually encode changed

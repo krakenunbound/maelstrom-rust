@@ -366,6 +366,16 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       record four-source frame-ready p95 63 ms and scheduler p95 153-274 us. This is not a
       global CPU reservation or sustained/windowed/cross-machine qualification.
       See `docs/threaded-monitor-conversion.md`.
+- [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
+      transparent-black padding, source identity, and immutable shared-cache ownership. Checked
+      single-allocation packing cuts local native-1080p packing p50 from 2.658 to 1.363 ms and
+      native-4K from 11.659 to 5.820 ms. 1,296 small-layout legacy comparisons, full-resolution
+      and malformed-buffer tests, 152 Windows hardware pixel/timing cases, 764 release tests,
+      strict Clippy, and independent review pass. The stage counter now includes final shared
+      allocation; historical counters omitted that cost. Three four-source Full-1080p latency
+      runs pass at 63-67 ms frame-ready p95, without demonstrated end-to-end scrub improvement.
+      Sustained/windowed/lower-core qualification of this changed source remains pending.
+      See `docs/monitor-rgba-packing.md`.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for

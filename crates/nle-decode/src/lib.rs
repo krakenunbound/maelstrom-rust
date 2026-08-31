@@ -1,6 +1,9 @@
 //! Latest-wins in-process FFmpeg monitor decoding.
 
 mod monitor_scaler;
+mod rgba_packing;
+#[cfg(test)]
+mod rgba_packing_tests;
 #[cfg(test)]
 mod scaler_layout_tests;
 #[cfg(test)]
@@ -421,6 +424,7 @@ pub struct MonitorDecoderStageTimings {
     pub decoder_calls: MonitorStageTiming,
     pub hardware_transfer: MonitorStageTiming,
     pub scaler: MonitorStageTiming,
+    /// Includes final shared-buffer allocation, row copies, and letterbox initialization.
     pub rgba_copy_letterbox: MonitorStageTiming,
     pub worker_request: MonitorStageTiming,
 }
@@ -3414,8 +3418,7 @@ fn pack_decoded_monitor_frame(
     )?;
     let rgba = {
         let _timer = StageTimer::new(&stage_timings.rgba_copy_letterbox);
-        let scaled = copy_rgba_frame(&rgba_frame, scaled_size.0, scaled_size.1)?;
-        letterbox_rgba(scaled, *scaled_size, output_size)
+        pack_monitor_rgba(&rgba_frame, *scaled_size, output_size)?
     };
     Ok(DecodedRgba {
         request_id,
@@ -3423,7 +3426,7 @@ fn pack_decoded_monitor_frame(
         source_tick,
         width: output_size.0,
         height: output_size.1,
-        rgba: Arc::from(rgba),
+        rgba,
     })
 }
 
@@ -3915,6 +3918,57 @@ fn fitted_size(source_width: u32, source_height: u32, width: u32, height: u32) -
     )
 }
 
+// Only scaler-owned, positive-stride RGBA frames enter this adapter. The row packer
+// owns validation of slice bounds and destination layout before allocating output.
+fn pack_monitor_rgba(
+    frame: &Video,
+    scaled_size: (u32, u32),
+    output_size: (u32, u32),
+) -> Result<Arc<[u8]>, String> {
+    if frame.format() != Pixel::RGBA
+        || (frame.width(), frame.height()) != scaled_size
+        || !(1..=MAX_DIMENSION).contains(&scaled_size.0)
+        || !(1..=MAX_DIMENSION).contains(&scaled_size.1)
+        || frame.planes() != 1
+        // SAFETY: Video owns a live AVFrame; is_empty only inspects its data pointer.
+        || unsafe { frame.is_empty() }
+    {
+        return Err("monitor scaler returned an invalid RGBA frame".to_owned());
+    }
+    let stride = frame.stride(0);
+    // ffmpeg-next casts signed linesize to usize, then constructs the data slice
+    // from stride * height. Reject negative/overflowing lengths before that API.
+    let Some(source_bytes) = stride
+        .checked_mul(scaled_size.1 as usize)
+        .filter(|len| *len <= isize::MAX as usize)
+    else {
+        return Err("monitor scaler returned an invalid RGBA stride".to_owned());
+    };
+    // SAFETY: Video owns the AVFrame and its reference-counted buffers. Scaler
+    // output is allocated with av_frame_get_buffer, so RGBA plane 0 is backed by
+    // buf[0]. Validate metadata against that allocation BEFORE data() fabricates
+    // a slice from linesize * height. No buffer pointer escapes this borrow.
+    let rows_are_backed = unsafe {
+        let raw = &*frame.as_ptr();
+        raw.buf[0].as_ref().is_some_and(|buffer| {
+            let allocation_start = buffer.data as usize;
+            let plane_start = raw.data[0] as usize;
+            !buffer.data.is_null()
+                && plane_start >= allocation_start
+                && plane_start
+                    .checked_add(source_bytes)
+                    .zip(allocation_start.checked_add(buffer.size))
+                    .is_some_and(|(plane_end, allocation_end)| plane_end <= allocation_end)
+        })
+    };
+    if !rows_are_backed {
+        return Err("monitor scaler returned RGBA rows outside their buffer".to_owned());
+    }
+    rgba_packing::pack_rgba_rows(frame.data(0), stride, scaled_size, output_size)
+}
+
+// Retain the previous implementation unchanged as an independent test oracle.
+#[cfg(test)]
 fn copy_rgba_frame(frame: &Video, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let row_bytes = width as usize * 4;
     let stride = frame.stride(0);
@@ -3930,6 +3984,7 @@ fn copy_rgba_frame(frame: &Video, width: u32, height: u32) -> Result<Vec<u8>, St
     Ok(rgba)
 }
 
+#[cfg(test)]
 fn letterbox_rgba(scaled: Vec<u8>, scaled_size: (u32, u32), output_size: (u32, u32)) -> Vec<u8> {
     if scaled_size == output_size {
         return scaled;
