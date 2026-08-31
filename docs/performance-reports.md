@@ -93,6 +93,28 @@ its qualification role.
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
 `"Unknown"` are not used as hidden unavailable-value sentinels.
 
+## Phase 0 timeline foundation qualification
+
+`scripts/Run-TimelineFoundation.ps1` turns the existing release performance tests into one
+repeatable, versioned gate. It runs ten independent 50,000-clip history invocations by default,
+the wide/detail/playhead CPU test, and the combined real H.264 decode plus 20,002-bar interaction
+test. The input must be an absolute positive-duration H.264 file; its path is never serialized.
+The report retains only its SHA-256, size, codec, dimensions, rate, and duration.
+
+Run from a clean tracked workspace with the pinned runtime:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Run-TimelineFoundation.ps1' `
+  -MediaPath 'C:\absolute\path\to\qualification-h264.mp4' `
+  -FfmpegRoot 'H:\Maelstrom Rust\.deps\ffmpeg-project-8.1'
+```
+
+The runner resolves Cargo and Git to absolute executable paths, routes every Rust test through the
+repository Cargo runner, requires an unchanged clean tracked commit, and atomically writes schema 1
+evidence to `artifacts/phase0-foundation/timeline-foundation.json`. A passing report is headless
+release CPU/decode evidence only. It does not establish GUI-present input latency, GPU completion,
+physical input latency, DWM/scanout, packaged smoke, or cross-hardware performance.
+
 ## Phase 0 cross-adapter compositor qualification
 
 The headless DX12 qualification exercises the production `ViewerCompositorRenderer` offscreen,
