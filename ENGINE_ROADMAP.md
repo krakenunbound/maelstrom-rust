@@ -356,6 +356,16 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       p95 189-270 us and coarse matching-frame p95 69-70 ms. These are local Software headless
       measurements, not sustained/windowed or cross-hardware completion. 747 release tests,
       strict Clippy, and independent review pass. See `docs/phase1-latency-comparison.md`.
+- [x] Reduce accurate full-resolution conversion cost with bounded slice threading. Large input
+      and output frames use two threads on hosts with at least eight available logical CPUs;
+      smaller/low-core cases and setup failures retain the existing serial conversion path.
+      Filters, accurate rounding, dimensions, and per-frame color metadata remain unchanged.
+      400 exact legacy-converter comparisons, 152 Windows hardware timing/pixel comparisons,
+      753 release tests, strict Clippy, and independent review pass. Local bicubic full-HD
+      scaler p50 falls from 5.13-5.24 ms to 2.75-2.80 ms; three paused Full-1080p latency runs
+      record four-source frame-ready p95 63 ms and scheduler p95 153-274 us. This is not a
+      global CPU reservation or sustained/windowed/cross-machine qualification.
+      See `docs/threaded-monitor-conversion.md`.
 - [x] Add decode-session eviction that respects the global byte/session cap. The app-wide monitor
       policy reclaims speculative-prewarm actors first and then selects the lowest-priority, oldest
       eligible visual source group, yielding its logical leases sequentially without waiting for

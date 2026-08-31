@@ -1,5 +1,6 @@
 //! Latest-wins in-process FFmpeg monitor decoding.
 
+mod monitor_scaler;
 #[cfg(test)]
 mod scaler_layout_tests;
 #[cfg(test)]
@@ -25,10 +26,11 @@ use ffmpeg::{
     codec::Id,
     format::Pixel,
     media::Type,
-    software::scaling::{context::Context as ScalingContext, flag::Flags as ScalingFlags},
+    software::scaling::flag::Flags as ScalingFlags,
     util::{frame::video::Video, mathematics::Rescale},
 };
 use ffmpeg_next as ffmpeg;
+use monitor_scaler::ScalingContext;
 use nle_cache::{FrameCache, FrameKey, FrameValue};
 
 const MAX_DIMENSION: u32 = 4_096;

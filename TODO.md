@@ -9,6 +9,15 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Reduce accurate full-resolution conversion overhead without changing pixels, filters,
+  or resolution. Bounded two-thread conversion cuts local bicubic scaler p50 from
+  5.13-5.24 ms to 2.75-2.80 ms. 400 exact legacy comparisons, 152 Windows hardware
+  pixel/timing cases, 753 release tests, strict Clippy, and independent review pass.
+  Three paused Full-1080p latency runs: four-source frame-ready p95 63 ms;
+  scheduler p95 153-274 us. Not a sustained/windowed or cross-machine claim.
+  Portable package rebuilt, runtime/hash checks pass; SHA-256 starts `3A4D88D867281034`.
+  GUI smoke remains `not_run`; no editor launch. Prior executable archived locally.
+  Evidence: `docs/threaded-monitor-conversion.md`.
 - [x] Repair missing-backend evidence in the paused/full-resolution latency gate without
   disabling prewarming or attributing cache hits to a decoder. Successful-work history is now
   bounded and independent of latest-wins frame events. Deterministic before/after regression,
@@ -27,11 +36,12 @@ Last updated: 2026-08-31
   `8F0965B4489D34A11`; smoke remains `not_run`; runtime/hash/cleanup checks pass.
   Evidence and performance tradeoff: `docs/hardware-decode-parity.md`.
   Commit: `fb5335df898f69993f3ff5545260f0e47f157b1d`.
-- [ ] Requalify sustained/windowed playback after accurate conversion. The independent
-  four-source worker gate passes, but it does not establish real-time display.
-- [ ] Optimize accurate native-size conversion while preserving exact layout parity;
-  bicubic full-HD scaler p50 is about 4.8 ms, with measured NV12 p95 outliers above
-  11 ms. Do not hide the cost by lowering resolution or changing the selected filter.
+- [ ] Requalify sustained/windowed playback after accurate threaded conversion. The independent
+  four-source worker gate passes, but it does not establish real-time display. Repeat the
+  ten-minute resource soak, then perform authorized windowed qualification through the exact
+  launcher. Qualify lower-core CPU contention before broad performance claims.
+- [ ] Continue profiling RGBA packing, upload, and presentation if full-quality latency remains
+  above the required gate. Never hide cost by lowering resolution or changing the selected filter.
 
 - [x] Qualify reordered VFR MPEG-TS playback and source-time normalization.
   Commit: `21768e45740b58837c0f491ba6e0b5d4b8cdead2`.
