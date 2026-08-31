@@ -73,10 +73,10 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedReportPath), $art
     throw "ReportPath must be a JSON file directly inside $artifactRoot"
 }
 
-$cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction Stop
+$cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $script:cargo = [IO.Path]::GetFullPath($cargoCommand.Source)
 if (-not (Test-AbsolutePath $script:cargo)) { throw 'Cargo did not resolve to an absolute executable path.' }
-$gitCommand = Get-Command git.exe -CommandType Application -ErrorAction Stop
+$gitCommand = Get-Command git.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $git = [IO.Path]::GetFullPath($gitCommand.Source)
 if (-not (Test-AbsolutePath $git)) { throw 'Git did not resolve to an absolute executable path.' }
 
