@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Make proxy generation/deletion cancel and reset nonblocking for interface actions.
+  Child supervision, bounded pipe/event queues and kill/wait ownership stay on workers;
+  reset retains bounded cleanup slots and rejects overlapping cache mutation until finished.
+  One before-failing regression now passes; 804 release tests, both real-media proxy tests,
+  strict Clippy, formatting, fixtures and Phase 0 scenarios pass. Parent-reviewed.
+- [ ] Refresh the portable package from the lifecycle checkpoint with a verified backup.
 - [x] Move proxy completion, enable and cache reconciliation file checks to one owned,
   bounded worker. Checking keeps original media active; late replies cannot undo newer
   choices, relinks, deletion or reset. Full-cache checks drain in batches instead of being
@@ -26,10 +32,9 @@ Last updated: 2026-08-31
 - [x] Rebuild the portable package from `ac52c2b` with worker-side proxy startup
   validation. Executable SHA-256 starts `D3FA11E3C8894DDA`; previous package backed
   up, runtime/static-import checks pass. No editor launch; GUI smoke remains `not_run`.
-- [ ] Finish proxy lifecycle nonblocking work: tool-path resolution and generation/deletion
-  cancellation/reset teardown still need worker-owned handling with source-identity,
-  stale-result and clean-shutdown proof. Validation-worker final shutdown can still wait
-  for an OS filesystem call already in progress; do not claim bounded I/O cancellation.
+- [ ] Finish shared runtime-tool path resolution without interface-thread filesystem checks.
+  Validation and generation/deletion workers now own proxy lifecycle teardown. Final shutdown
+  can still wait for an OS filesystem call already in progress; do not claim bounded I/O cancellation.
 - [x] Rediscover matching local proxies after timeline placement/project reopen on the
   existing analysis worker; show ready but retain original-quality playback until explicit
   opt-in. Protect against stale projects, relinks and late replies after user actions.

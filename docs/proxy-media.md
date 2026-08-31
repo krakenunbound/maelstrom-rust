@@ -158,3 +158,36 @@ The previous complete package is recoverable from
 The adjacent `verification.json` records file/import hashes and the check scope. No binaries or
 private models were pushed. `smoke_status` stays `not_run`: local static checks do not establish
 GUI behavior, dynamic GPU-library loading, clean-host compatibility, or windowed performance.
+
+
+## Nonblocking cancellation and teardown checkpoint — 2026-08-31
+
+Generation cancellation is now an atomic signal only: interface actions never take a child-process
+lock, kill a process, or join an in-flight proxy worker. The proxy worker exclusively owns FFprobe/
+FFmpeg and polls cancellation every 10 ms while either subprocess is running. One scoped reader
+drains each output pipe. Progress holds at most eight 1 KiB lines; diagnostics retain only their
+latest 64 KiB. The app-facing event queue holds 64 entries, discards redundant progress when full,
+and preserves terminal completion/cancellation. Final job Drop releases the receiver before joining
+so a terminal publisher cannot deadlock behind a full progress queue.
+
+Cancel/reset clears project and media identities immediately but retains exactly one generation and
+one deletion owner until each reports finished. No obsolete event can update the new project. New
+proxy cache mutations are refused with an EN/JA retry message while either relevant cleanup slot is
+still occupied. Idle windows poll those slots at a bounded 20 ms cadence, closing the race between a
+terminal notification and thread exit; a finished handle is the only handle joined by UI polling.
+Application shutdown signals both jobs before other flushes, then normal field ownership joins them.
+
+One before-failing regression exercises generation/deletion polling and reset with a worker held
+after terminal publication. It proves all four actions return before releasing that worker, retained
+slots reject overlapping work, late state stays unchanged, and both slots are eventually released.
+Process tests cover silent and diagnostic-flood children, bounded pipe data, bounded terminal events,
+and receiver-first Drop. Existing cancellation/source-change cases and both real FFmpeg proxy gates
+continue to pass.
+
+Verification: 804 release workspace tests pass (24 opt-in tests ignored), plus both explicitly
+enabled real-media proxy tests. Strict all-target release Clippy and formatting, seven fixture
+contracts, and seven Phase 0 scenarios pass. Evidence uses the `proxy-lifecycle-` prefix under ignored
+artifacts. Parent-reviewed; independent agent unavailable (agent thread limit). No editor was
+launched. This establishes nonblocking UI cancellation/reset ownership, not bounded OS filesystem
+I/O: metadata, cache enumeration/removal, and final application shutdown can still wait on the OS.
+Shared runtime-tool path resolution also remains a separate app-wide follow-up.

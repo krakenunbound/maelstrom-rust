@@ -5172,21 +5172,21 @@ impl App {
             return;
         }
         self.proxy_discovery_suppressed.insert(media_id);
-        if self.proxy_delete_media_id == Some(media_id) {
+        if self.proxy_delete_job.is_some() {
+            self.hub.status = Some(proxy_text(
+                self.editor.language,
+                "Proxy removal is finishing; try again shortly",
+                "プロキシの削除処理中です。しばらくしてから再試行してください",
+            ));
             return;
         }
-        if let Some(active_media_id) = self.proxy_job_media_id {
-            if active_media_id != media_id {
-                self.editor.set_proxy_media_status(
-                    media_id,
-                    ProxyMediaStatus::Failed {
-                        message: proxy_text(
-                            self.editor.language,
-                            "Another proxy is already generating",
-                            "別のプロキシを生成中です",
-                        ),
-                    },
-                );
+        if self.proxy_job.is_some() {
+            if self.proxy_job_media_id != Some(media_id) {
+                self.hub.status = Some(proxy_text(
+                    self.editor.language,
+                    "A proxy job is generating or finishing cleanup; try again shortly",
+                    "プロキシの生成または終了処理中です。しばらくしてから再試行してください",
+                ));
             }
             return;
         }
@@ -5236,23 +5236,35 @@ impl App {
 
     fn poll_proxy_job(&mut self) {
         let previous_epoch = self.monitor_cache_epoch;
+        // Snapshot completion before draining: if true, no later terminal event can be missed.
+        let finished = self
+            .proxy_job
+            .as_ref()
+            .is_some_and(nle_proxy::ProxyJob::is_finished);
         let events = self
             .proxy_job
             .as_ref()
             .map(|job| std::iter::from_fn(|| job.try_recv().ok()).collect::<Vec<_>>())
             .unwrap_or_default();
-        let Some(media_id) = self.proxy_job_media_id else {
-            return;
-        };
         let mut terminal = false;
-        for event in events {
-            terminal |= self.apply_proxy_event(media_id, event);
+        if let Some(media_id) = self.proxy_job_media_id {
+            for event in events {
+                terminal |= self.apply_proxy_event(media_id, event);
+            }
+            if finished && !terminal {
+                terminal = self.apply_proxy_event(
+                    media_id,
+                    nle_proxy::ProxyEvent::Failed("Proxy worker stopped without completing".into()),
+                );
+            }
         }
         if terminal {
-            self.proxy_job.take();
             self.proxy_job_media_id = None;
             self.proxy_job_path = None;
             self.proxy_job_cancelled = false;
+        }
+        if finished {
+            self.proxy_job.take(); // Never joins an in-flight worker from event handling.
         }
         if self.monitor_cache_epoch != previous_epoch && self.screen == Screen::Editor {
             self.sync_monitor_decode();
@@ -5549,6 +5561,15 @@ impl App {
 
     fn delete_proxy_media(&mut self, media_id: u32) {
         self.proxy_discovery_suppressed.insert(media_id);
+        if self.proxy_job.is_some() {
+            self.cancel_proxy_generation(media_id);
+            self.hub.status = Some(proxy_text(
+                self.editor.language,
+                "Proxy generation is finishing; retry removal shortly",
+                "プロキシ生成の終了処理中です。しばらくしてから削除を再試行してください",
+            ));
+            return;
+        }
         if self.proxy_delete_job.is_some() {
             self.hub.status = Some(proxy_text(
                 self.editor.language,
@@ -5595,39 +5616,48 @@ impl App {
     }
 
     fn poll_proxy_delete(&mut self) {
-        let Some(event) = self
-            .proxy_delete_job
-            .as_ref()
-            .and_then(|job| job.try_recv().ok())
-        else {
+        let Some(job) = self.proxy_delete_job.as_ref() else {
             return;
         };
-        let Some(media_id) = self.proxy_delete_media_id else {
-            self.proxy_delete_job.take();
-            return;
-        };
-        match event {
-            nle_proxy::ProxyDeleteEvent::Completed => {
-                self.proxy_records.remove(&media_id);
-                self.editor
-                    .set_proxy_media_status(media_id, ProxyMediaStatus::None);
+        let finished = job.is_finished();
+        let event = job.try_recv().ok().or_else(|| {
+            finished.then(|| {
+                nle_proxy::ProxyDeleteEvent::Failed(
+                    "Proxy removal worker stopped without completing".into(),
+                )
+            })
+        });
+        if let (Some(media_id), Some(event)) = (self.proxy_delete_media_id, event) {
+            match event {
+                nle_proxy::ProxyDeleteEvent::Completed => {
+                    self.proxy_records.remove(&media_id);
+                    self.editor
+                        .set_proxy_media_status(media_id, ProxyMediaStatus::None);
+                }
+                nle_proxy::ProxyDeleteEvent::Failed(message) => {
+                    self.editor.set_proxy_media_status(
+                        media_id,
+                        ProxyMediaStatus::Failed {
+                            message: proxy_error_text(
+                                self.editor.language,
+                                "Proxy removal failed",
+                                "プロキシ削除に失敗しました",
+                                &message,
+                            ),
+                        },
+                    );
+                }
             }
-            nle_proxy::ProxyDeleteEvent::Failed(message) => {
-                self.editor.set_proxy_media_status(
-                    media_id,
-                    ProxyMediaStatus::Failed {
-                        message: proxy_error_text(
-                            self.editor.language,
-                            "Proxy removal failed",
-                            "プロキシ削除に失敗しました",
-                            &message,
-                        ),
-                    },
-                );
-            }
+            self.proxy_delete_media_id = None;
         }
-        self.proxy_delete_job.take();
-        self.proxy_delete_media_id = None;
+        if finished {
+            self.proxy_delete_job.take();
+        }
+    }
+
+    fn proxy_poll_deadline(&self, now: Instant) -> Option<Instant> {
+        (self.proxy_job.is_some() || self.proxy_delete_job.is_some())
+            .then_some(now + Duration::from_millis(20))
     }
 
     fn reset_proxy_session(&mut self) {
@@ -5639,14 +5669,12 @@ impl App {
         if let Some(job) = &self.proxy_job {
             job.cancel();
         }
-        self.proxy_job.take();
         self.proxy_job_media_id = None;
         self.proxy_job_path = None;
         self.proxy_job_cancelled = false;
         if let Some(job) = &self.proxy_delete_job {
             job.cancel();
         }
-        self.proxy_delete_job.take();
         self.proxy_delete_media_id = None;
         self.proxy_records.clear();
         self.proxy_discovery_suppressed.clear();
@@ -8121,7 +8149,10 @@ impl ApplicationHandler<AppEvent> for App {
             } else if !(self.screen == Screen::Editor && self.editor.playing)
                 && self.screen != Screen::Splash
             {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    self.proxy_poll_deadline(now)
+                        .map_or(deadline, |proxy| proxy.min(deadline)),
+                ));
                 return;
             }
         }
@@ -8139,13 +8170,22 @@ impl ApplicationHandler<AppEvent> for App {
                 window.request_redraw();
             }
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            event_loop.set_control_flow(
+                self.proxy_poll_deadline(now)
+                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            );
         }
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        if let Some(job) = &self.proxy_job {
+            job.cancel();
+        }
+        if let Some(job) = &self.proxy_delete_job {
+            job.cancel();
+        }
         for cancel in self.media_analysis_cancellations.values() {
             cancel.store(true, Ordering::Release);
         }
@@ -8498,6 +8538,91 @@ mod tests {
         app.editor.add_media_paths([original.clone()]);
         app.restore_cached_proxy(1, original.clone(), cached_proxy_fixture(&original));
         (app, original)
+    }
+
+    #[test]
+    fn proxy_poll_and_reset_do_not_join_a_worker_still_finishing() {
+        for (deleting, reset) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (mut app, original) = app_with_unchecked_proxy();
+            let (entered, signal) = mpsc::channel();
+            let (release, gate) = mpsc::channel();
+            let gate = std::sync::Mutex::new(gate);
+            let notify = move || {
+                entered.send(()).unwrap();
+                gate.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap();
+            };
+            if deleting {
+                app.proxy_delete_job = Some(
+                    nle_proxy::ProxyDeleteJob::start(
+                        test_catalog_path("delete-finish-gate"),
+                        notify,
+                    )
+                    .unwrap(),
+                );
+                app.proxy_delete_media_id = Some(1);
+            } else {
+                app.proxy_job = Some(
+                    nle_proxy::ProxyJob::start(
+                        nle_proxy::ProxyRequest {
+                            input: original.clone(),
+                            cache_root: app.proxy_cache_root.clone(),
+                            ffmpeg: PathBuf::from("not-opened.exe"),
+                            replace_existing: false,
+                        },
+                        notify,
+                    )
+                    .unwrap(),
+                );
+                app.proxy_job_media_id = Some(1);
+                app.proxy_job_path = Some(original.clone());
+            }
+            signal.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (returned, response) = mpsc::channel();
+            let release_thread = thread::spawn(move || {
+                let returned_without_join =
+                    response.recv_timeout(Duration::from_millis(500)).is_ok();
+                release.send(()).unwrap();
+                returned_without_join
+            });
+            if reset {
+                app.reset_proxy_session();
+            } else if deleting {
+                app.poll_proxy_delete();
+            } else {
+                app.poll_proxy_job();
+            }
+            assert_eq!(app.proxy_job.is_some(), !deleting);
+            assert_eq!(app.proxy_delete_job.is_some(), deleting);
+            let status_after_action = app.editor.proxy_media_status(1);
+            assert!(app.proxy_poll_deadline(Instant::now()).is_some());
+            if reset {
+                app.request_proxy_media(1, original);
+                app.delete_proxy_media(1);
+                assert_eq!(app.proxy_job.is_some(), !deleting);
+                assert_eq!(app.proxy_delete_job.is_some(), deleting);
+                assert!(app.proxy_records.is_empty());
+            }
+            let _ = returned.send(());
+            assert!(
+                release_thread.join().unwrap(),
+                "UI waited for finishing worker: delete={deleting} reset={reset}"
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while app.proxy_job.is_some() || app.proxy_delete_job.is_some() {
+                app.poll_proxy_job();
+                app.poll_proxy_delete();
+                assert!(
+                    Instant::now() < deadline,
+                    "finished proxy slot was not released"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(app.proxy_poll_deadline(Instant::now()).is_none());
+            assert_eq!(app.editor.proxy_media_status(1), status_after_action);
+        }
     }
 
     #[test]

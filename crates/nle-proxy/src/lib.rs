@@ -1,5 +1,6 @@
 //! Optional derived video proxies.  This crate never changes source media or exports.
 
+mod process;
 mod validation;
 pub use validation::{
     ProxyValidationRequest, ProxyValidationResult, ProxyValidationSubmitError,
@@ -8,11 +9,10 @@ pub use validation::{
 
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::Command,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -24,6 +24,7 @@ use std::{
 pub const PROXY_PROFILE_VERSION: u32 = 1;
 pub const MAX_CACHE_ITEMS: usize = 64;
 pub const MAX_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const EVENT_CAPACITY: usize = 64;
 const OUTPUT_PREFIX: &str = "maelstrom-proxy-v";
 
 #[derive(Clone, Debug)]
@@ -115,8 +116,7 @@ pub enum ProxyEvent {
 
 pub struct ProxyJob {
     cancel: Arc<AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
-    events: mpsc::Receiver<ProxyEvent>,
+    events: Option<mpsc::Receiver<ProxyEvent>>,
     join: Option<thread::JoinHandle<()>>,
 }
 
@@ -128,40 +128,43 @@ impl ProxyJob {
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let child = Arc::new(Mutex::new(None));
-        let (tx, events) = mpsc::channel();
+        let (tx, events) = mpsc::sync_channel(EVENT_CAPACITY);
         let worker_cancel = Arc::clone(&cancel);
-        let worker_child = Arc::clone(&child);
         let notify = Arc::new(notify);
         let join = thread::Builder::new()
             .name("maelstrom-proxy".into())
-            .spawn(move || run_job(request, worker_cancel, worker_child, tx, notify))
+            .spawn(move || run_job(request, worker_cancel, tx, notify))
             .map_err(|error| format!("could not start proxy worker: {error}"))?;
         Ok(Self {
             cancel,
-            child,
-            events,
+            events: Some(events),
             join: Some(join),
         })
     }
 
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
-        if let Ok(mut child) = self.child.lock()
-            && let Some(child) = child.as_mut()
-        {
-            let _ = child.kill();
-        }
     }
 
     pub fn try_recv(&self) -> Result<ProxyEvent, mpsc::TryRecvError> {
-        self.events.try_recv()
+        self.events
+            .as_ref()
+            .expect("live proxy receiver")
+            .try_recv()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
     }
 }
 
 impl Drop for ProxyJob {
     fn drop(&mut self) {
         self.cancel();
+        // Release a terminal publisher waiting behind a full progress queue.
+        self.events.take();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -185,7 +188,7 @@ impl ProxyDeleteJob {
     pub fn start(path: PathBuf, notify: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
-        let (tx, events) = mpsc::channel();
+        let (tx, events) = mpsc::sync_channel(EVENT_CAPACITY);
         let notify = Arc::new(notify);
         let join = thread::Builder::new()
             .name("maelstrom-proxy-delete".into())
@@ -222,6 +225,12 @@ impl ProxyDeleteJob {
     pub fn try_recv(&self) -> Result<ProxyDeleteEvent, mpsc::TryRecvError> {
         self.events.try_recv()
     }
+
+    pub fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
+    }
 }
 
 impl Drop for ProxyDeleteJob {
@@ -253,8 +262,7 @@ fn validate_request(request: &ProxyRequest) -> Result<(), String> {
 fn run_job(
     request: ProxyRequest,
     cancel: Arc<AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
-    events: mpsc::Sender<ProxyEvent>,
+    events: mpsc::SyncSender<ProxyEvent>,
     notify: Arc<dyn Fn() + Send + Sync>,
 ) {
     let result = (|| {
@@ -268,10 +276,10 @@ fn run_job(
             return Err("cancelled".into());
         }
         let source = SourceFingerprint::capture(&request.input)?;
-        generate_proxy(&request, &source, &cancel, &child, &events, &notify)
+        generate_proxy(&request, &source, &cancel, &events, &notify)
     })();
     let event = match result {
-        Ok(artifact) if cancel.load(Ordering::Acquire) => ProxyEvent::Cancelled,
+        Ok(_) if cancel.load(Ordering::Acquire) => ProxyEvent::Cancelled,
         Ok(artifact) => ProxyEvent::Completed(artifact),
         Err(error) if cancel.load(Ordering::Acquire) || error == "cancelled" => {
             ProxyEvent::Cancelled
@@ -285,8 +293,7 @@ fn generate_proxy(
     request: &ProxyRequest,
     source: &SourceFingerprint,
     cancel: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
-    events: &mpsc::Sender<ProxyEvent>,
+    events: &mpsc::SyncSender<ProxyEvent>,
     notify: &Arc<dyn Fn() + Send + Sync>,
 ) -> Result<ProxyArtifact, String> {
     if cancel.load(Ordering::Acquire) {
@@ -314,16 +321,8 @@ fn generate_proxy(
 
     let temp_path = temporary_path(&final_path);
     let _ = fs::remove_file(&temp_path);
-    let duration_us = probe_duration_us(&request.ffmpeg, &request.input);
-    let result = run_ffmpeg(
-        request,
-        &temp_path,
-        duration_us,
-        cancel,
-        child_slot,
-        events,
-        notify,
-    );
+    let duration_us = probe_duration_us(&request.ffmpeg, &request.input, cancel);
+    let result = run_ffmpeg(request, &temp_path, duration_us, cancel, events, notify);
     if result.is_err() || cancel.load(Ordering::Acquire) {
         let _ = fs::remove_file(&temp_path);
         return result.map(|_| unreachable!());
@@ -369,73 +368,36 @@ fn run_ffmpeg(
     output: &Path,
     duration_us: Option<u64>,
     cancel: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
-    events: &mpsc::Sender<ProxyEvent>,
+    events: &mpsc::SyncSender<ProxyEvent>,
     notify: &Arc<dyn Fn() + Send + Sync>,
 ) -> Result<(), String> {
     let mut command = hidden_command(&request.ffmpeg);
     command.args(ffmpeg_arguments(&request.input, output));
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut spawned = command
-        .spawn()
-        .map_err(|error| format!("could not start ffmpeg: {error}"))?;
-    let stdout = spawned
-        .stdout
-        .take()
-        .ok_or_else(|| "ffmpeg progress pipe was unavailable".to_owned())?;
-    {
-        let mut slot = child_slot
-            .lock()
-            .map_err(|_| "proxy child lock poisoned".to_owned())?;
-        *slot = Some(spawned);
-    }
-    send_event(events, ProxyEvent::Progress(0.0), notify);
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = match reader.read_line(&mut line) {
-            Ok(read) => read,
-            Err(error) => {
-                kill_and_wait_active_child(child_slot);
-                return Err(format!("could not read ffmpeg progress: {error}"));
+    let result = process::run(
+        command,
+        cancel,
+        |line| {
+            if let Some(value) = line.strip_prefix("out_time_us=")
+                && let (Ok(out_time), Some(duration)) = (value.parse::<u64>(), duration_us)
+            {
+                let progress = (out_time as f64 / duration.max(1) as f64) as f32;
+                send_event(
+                    events,
+                    ProxyEvent::Progress(progress.clamp(0.0, 0.99)),
+                    notify,
+                );
             }
-        };
-        if read == 0 {
-            break;
-        }
-        if let Some(value) = line.trim().strip_prefix("out_time_us=")
-            && let (Ok(out_time), Some(duration)) = (value.parse::<u64>(), duration_us)
-        {
-            let progress = (out_time as f64 / duration.max(1) as f64) as f32;
-            send_event(
-                events,
-                ProxyEvent::Progress(progress.clamp(0.0, 0.99)),
-                notify,
-            );
-        }
-        if cancel.load(Ordering::Acquire) {
-            kill_and_wait_active_child(child_slot);
-            return Err("cancelled".into());
-        }
-    }
-    let mut child = child_slot
-        .lock()
-        .map_err(|_| "proxy child lock poisoned".to_owned())?
-        .take()
-        .ok_or_else(|| "proxy child disappeared".to_owned())?;
-    let mut stderr = String::new();
-    if let Some(mut handle) = child.stderr.take() {
-        let _ = handle.read_to_string(&mut stderr);
-    }
-    let status = child
-        .wait()
-        .map_err(|error| format!("could not wait for ffmpeg: {error}"))?;
+        },
+        || send_event(events, ProxyEvent::Progress(0.0), notify),
+    )?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    if !status.success() {
-        return Err(format!("ffmpeg proxy generation failed: {}", stderr.trim()));
+    if !result.status.success() {
+        return Err(format!(
+            "ffmpeg proxy generation failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -477,20 +439,17 @@ fn ffmpeg_arguments(input: &Path, output: &Path) -> Vec<String> {
 }
 
 fn send_event(
-    events: &mpsc::Sender<ProxyEvent>,
+    events: &mpsc::SyncSender<ProxyEvent>,
     event: ProxyEvent,
     notify: &Arc<dyn Fn() + Send + Sync>,
 ) {
-    let _ = events.send(event);
-    notify();
-}
-
-fn kill_and_wait_active_child(child_slot: &Mutex<Option<Child>>) {
-    if let Ok(mut slot) = child_slot.lock()
-        && let Some(mut child) = slot.take()
-    {
-        let _ = child.kill();
-        let _ = child.wait();
+    let delivered = if matches!(event, ProxyEvent::Progress(_)) {
+        events.try_send(event).is_ok()
+    } else {
+        events.send(event).is_ok()
+    };
+    if delivered {
+        notify();
     }
 }
 
@@ -538,7 +497,7 @@ fn temporary_path(final_path: &Path) -> PathBuf {
     final_path.with_extension(format!("mp4.part-{}-{id}", std::process::id()))
 }
 
-fn probe_duration_us(ffmpeg: &Path, input: &Path) -> Option<u64> {
+fn probe_duration_us(ffmpeg: &Path, input: &Path, cancel: &AtomicBool) -> Option<u64> {
     let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
         "ffprobe.exe"
     } else {
@@ -547,27 +506,34 @@ fn probe_duration_us(ffmpeg: &Path, input: &Path) -> Option<u64> {
     if !ffprobe.is_file() {
         return None;
     }
-    let output = hidden_command(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            input.to_string_lossy().as_ref(),
-        ])
-        .output()
-        .ok()?;
+    let mut command = hidden_command(&ffprobe);
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        input.to_string_lossy().as_ref(),
+    ]);
+    let mut duration = None;
+    let output = process::run(
+        command,
+        cancel,
+        |line| {
+            duration = line
+                .parse::<f64>()
+                .ok()
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                .map(|seconds| (seconds * 1_000_000.0) as u64);
+        },
+        || {},
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|seconds| *seconds > 0.0)
-        .map(|seconds| (seconds * 1_000_000.0) as u64)
+    duration
 }
 
 fn prune_cache(cache_root: &Path, keep: Option<&Path>) -> Result<(), String> {
@@ -842,6 +808,8 @@ mod tests {
         assert!(matches!(wait_event(&job), ProxyEvent::Failed(_)));
         assert!(
             !job.events
+                .as_ref()
+                .unwrap()
                 .try_iter()
                 .any(|event| matches!(event, ProxyEvent::Completed(_)))
         );
@@ -905,8 +873,7 @@ mod tests {
     #[test]
     fn pre_cancelled_proxy_request_emits_only_cancelled() {
         let root = fixture("pre-cancelled-validation");
-        let child = Arc::new(Mutex::new(None));
-        let (tx, events) = mpsc::channel();
+        let (tx, events) = mpsc::sync_channel(EVENT_CAPACITY);
         run_job(
             ProxyRequest {
                 input: root.join("missing.mov"),
@@ -915,7 +882,6 @@ mod tests {
                 replace_existing: false,
             },
             Arc::new(AtomicBool::new(true)),
-            Arc::clone(&child),
             tx,
             Arc::new(|| {}),
         );
@@ -923,7 +889,6 @@ mod tests {
             events.try_iter().collect::<Vec<_>>(),
             vec![ProxyEvent::Cancelled]
         );
-        assert!(child.lock().unwrap().is_none());
         assert!(!root.join("cache").exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -997,7 +962,12 @@ mod tests {
         )
         .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while job.child.lock().unwrap().is_none() {
+        loop {
+            match job.try_recv() {
+                Ok(ProxyEvent::Progress(_)) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+                other => panic!("encoding did not start: {other:?}"),
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "encoding did not start"
@@ -1102,6 +1072,77 @@ mod tests {
         );
         assert!(fs::read_dir(&cache).unwrap().next().is_none());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn proxy_job_drop_unblocks_a_full_terminal_event_queue() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (events_tx, events) = mpsc::sync_channel(EVENT_CAPACITY);
+        for _ in 0..EVENT_CAPACITY {
+            events_tx.send(ProxyEvent::Progress(0.5)).unwrap();
+        }
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        let join = thread::spawn(move || {
+            let _ = events_tx.send(ProxyEvent::Cancelled);
+            worker_finished.store(true, Ordering::Release);
+        });
+        let job = ProxyJob {
+            cancel,
+            events: Some(events),
+            join: Some(join),
+        };
+        thread::sleep(Duration::from_millis(10));
+        assert!(
+            !finished.load(Ordering::Acquire),
+            "terminal event should be waiting for capacity"
+        );
+        drop(job);
+        assert!(
+            finished.load(Ordering::Acquire),
+            "Drop must release the blocked publisher before join"
+        );
+    }
+
+    #[test]
+    fn proxy_cancellation_stops_silent_and_diagnostic_flood_children() {
+        for (name, body) in [
+            ("cancel-silent", ":loop\r\ngoto loop"),
+            (
+                "cancel-errors",
+                ":loop\r\necho repeated diagnostic 1>&2\r\ngoto loop",
+            ),
+        ] {
+            let root = fixture(name);
+            let source = write_source(&root);
+            let cache = root.join("cache");
+            let job = ProxyJob::start(
+                ProxyRequest {
+                    input: source.clone(),
+                    cache_root: cache.clone(),
+                    ffmpeg: fake_ffmpeg(&root, body),
+                    replace_existing: false,
+                },
+                || {},
+            )
+            .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match job.try_recv() {
+                    Ok(ProxyEvent::Progress(_)) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    other => panic!("process failed to start: {other:?}"),
+                }
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            job.cancel();
+            assert_eq!(wait_event(&job), ProxyEvent::Cancelled);
+            drop(job);
+            assert_eq!(fs::read(&source).unwrap(), b"source-media");
+            assert!(fs::read_dir(&cache).unwrap().next().is_none());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

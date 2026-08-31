@@ -319,6 +319,13 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       audio/export path, project schema or dependency change. Parent-reviewed; independent agent
       unavailable. Final validation-worker shutdown may still wait on an in-flight OS file call;
       no GUI-latency or whole-lifecycle nonblocking guarantee is claimed.
+      Generation/deletion cancellation and project reset no longer take child locks, kill processes,
+      or join in-flight proxy workers on the interface. Worker-owned FFprobe/FFmpeg supervision has
+      bounded progress/error/event buffers; reset retains bounded cleanup slots, rejects overlapping
+      cache mutation, discards obsolete identity and polls idle cleanup at 20 ms. One before-failing
+      four-path regression and subprocess flood/silence/full-queue tests now pass. Final evidence is
+      804 release tests, both real-media proxy tests, strict Clippy, fixture contracts and Phase 0
+      scenarios. Shared tool-path resolution and OS-file-call shutdown bounds remain open.
       Unused Media Pool items retain deferred analysis. This still
       supports one generation job and one 720p profile; portable/external attachment, persistent
       enable choices, generation queues and multiple profiles remain later product work.
