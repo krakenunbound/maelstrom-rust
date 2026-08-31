@@ -19,10 +19,15 @@ Last updated: 2026-08-31
   audio runs: 30 seconds each, submit p95 55/51 us, zero audio/monitor faults.
   Four-CPU ten-minute resources pass: 56,464 matching frame requests/presentations,
   74 us submit p95, bounded cache/sessions, and zero post-drop sessions.
-- [ ] Finish eight-CPU sustained resources and a paired frame-readiness comparison
-  before package delivery. Four-CPU resource frame-ready p95 is 60 ms versus a
-  historical 50 ms; no end-to-end scrub speedup claimed. Independent review and
-  windowed/cross-hardware proof remain open. Package is still unchanged.
+- [x] Finish eight-CPU sustained resources: 72,596 matching frame requests/presentations,
+  66 us submit p95, zero drops/errors, bounded memory/sessions and clean teardown.
+  Eight same-binary opposite-order readiness diagnostics also complete. Fixed-policy
+  submission gains repeat; readiness differences reverse direction, so no consistent
+  penalty or end-to-end speedup is established. All temporary hooks removed; fresh
+  773 release tests, strict Clippy and formatting pass. See `docs/monitor-worker-scheduling.md`.
+- [ ] Complete independent review and package delivery; requalify windowed/cross-hardware
+  performance. Short paired results do not prove readiness non-inferiority or lag-free
+  playback. Package is still unchanged; do not launch the editor without permission.
 - [x] Make speculative monitor prewarming silent without removing decode/cache/session
   warming. Both standalone and coordinated workers retain visible foreground/reverse
   replies and errors. Five new regression tests, 770 release tests, strict Clippy,
@@ -54,9 +59,9 @@ Last updated: 2026-08-31
   is demonstrated. Package rebuilt, runtime/hash checks pass; executable hash starts
   `03E01F2EB32BFA3B`. GUI smoke remains `not_run`; previous executable/status archived.
   Evidence and limits: `docs/cpu-budget-conversion.md`.
-- [ ] Qualify restricted-CPU sustained/audio behavior after the CPU-count correction.
-  Both native-audio runs and four-CPU sustained resources now pass with the worker
-  policy; eight-CPU sustained resources and frame-readiness comparison remain open.
+- [x] Qualify local restricted-CPU resource/native-audio gates after the CPU-count correction.
+  Both native-audio runs and both four/eight-CPU ten-minute resource tests pass with
+  the worker policy. The paired readiness follow-up is complete but timing is mixed.
   Keep Full resolution and filters; logical-CPU affinity is not a substitute
   for actual lower-core hardware or windowed playback qualification.
 - [x] Pack full-resolution monitor RGBA directly into its final shared allocation, preserving
@@ -111,7 +116,7 @@ Last updated: 2026-08-31
   Evidence and performance tradeoff: `docs/hardware-decode-parity.md`.
   Commit: `fb5335df898f69993f3ff5545260f0e47f157b1d`.
 - [ ] Requalify windowed playback after accurate threaded conversion, direct RGBA packing,
-  and the Windows CPU-count correction.
+  the Windows CPU-count correction, silent prewarming and worker wake scheduling.
   Prior local ten-minute resource qualification does not establish real-time display. Four
   Intel/NVIDIA one/four-source cases are prepared without launch; explicit permission to run
   the editor through the exact launcher is pending. Regenerate prepared package identities for

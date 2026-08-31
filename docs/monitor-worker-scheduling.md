@@ -125,6 +125,70 @@ archived as `worker-policy-audio-test-binary.zip` in the multisource directory.
 The resource soak contains no native audio; audio evidence is from the separate
 30-second runs above. Neither test launches the GUI.
 
-Eight-CPU sustained resources, paired frame-readiness, independent review,
-windowed/cross-hardware behavior, and package delivery remain open. The package
-is unchanged and no editor was launched.
+The eight-CPU ten-minute resource gate now also passes on clean source
+`c12e0cac7a404aa9aa88a3ea8adfe0614da4ef48` (documentation-only changes since
+`2a7c72d`; the same uninstrumented executable hash above). Its 600.044041 seconds
+cover 18,149 cycles and 72,596 matching requested/completed/presented/uploaded
+frames. Submission p50/p95/max is 44/66/614 us; frame-ready p50/p95/max is
+34/46/83 ms. There are zero drops/errors, but 11,940 hold observations and 11,944
+late-frame observations. Cache peak is 215,654,400 bytes, five sessions/actors
+remain below eight, and zero sessions survive App drop. Working-set growth is
+29,794,304 bytes; all 522 live affinity samples have mask `FF`. Artifacts use
+`worker-policy-8-600s-1-*`, including the passing arithmetic/hash/cleanup audit.
+
+## Paired frame-readiness follow-up
+
+Eight serialized 30-second diagnostic runs compare automatic wake boosts
+(`legacy`) with the production disabled-boost policy (`base`). Each CPU budget
+uses order **legacy, base, base, legacy**, forming two opposite-order pairs. All
+use the same executable, original four Full-1080p sources, seek pattern, resource
+caps, scaler policy and 1,000 us submission limit. These short silent resource
+runs are not sustained qualification, native-audio tests, or windowed playback.
+
+Temporary `test-hooks` code changes only the startup boost setting and records
+actual thread ID, boost state, and base priority. Every run confirms five unique
+workers (four foreground plus one prewarm actor), the requested boost state,
+and unchanged normal base priority. No probe runs in the per-frame submission
+path. Source hashes, runtime/fixture hashes and actual `F`/`FF` affinity are
+checked. The original report schema, workload and assertions are unchanged;
+worker evidence is a separate sidecar.
+
+| CPUs | Order / setting | Cycles | Submit p95 | Frame-ready p50 / p95 | Submission gate |
+|---|---|---:|---:|---:|---|
+| 4 | 1 / legacy | 666 | 1,099 us | 48 / 63 ms | **Failed** |
+| 4 | 2 / base | 695 | 70 us | 46 / 61 ms | Passed |
+| 4 | 3 / base | 669 | 64 us | 47 / 63 ms | Passed |
+| 4 | 4 / legacy | 663 | 1,157 us | 48 / 62 ms | **Failed** |
+| 8 | 1 / legacy | 1,090 | 222 us | 28 / 43 ms | Passed |
+| 8 | 2 / base | 931 | 69 us | 34 / 45 ms | Passed |
+| 8 | 3 / base | 911 | 69 us | 34 / 45 ms | Passed |
+| 8 | 4 / legacy | 884 | 239 us | 35 / 47 ms | Passed |
+
+All eight reports pass their provenance/arithmetic/resource audits, have zero
+drops/errors, and retain the original gate status (including both four-CPU
+control failures). Fixed-policy submission gains repeat at both CPU budgets.
+Frame-ready p95 differences change direction: fixed minus legacy is -2/+1 ms
+at four CPUs and +2/-2 ms at eight. The first eight-CPU pair loses about 14.6%
+of cycles/second with the fixed policy; the reverse-order pair gains about
+3.1%. This is **not** evidence of a consistent readiness regression, but neither
+does it establish non-inferiority or faster end-to-end scrubbing. The sample
+is small, system load is not controlled, and per-cycle samples are not
+independent experiment repetitions. Do not pool them into a spurious confidence
+claim or use this comparison to declare the interactive latency requirement met.
+
+Local evidence is `artifacts/phase1-sustained/paired-worker-policy-*`, including
+the diagnostic source patch against `c12e0ca`, per-run reports/worker sidecars,
+affinity, logs, verification snapshots and the joined comparison JSON. Test
+executable SHA-256 is
+`09642B82E0D80CC14304FA74AF3B1E4C2EF834EA63F5E2022F09A890B991DCFB`;
+`paired-worker-policy-test-binary.zip` SHA-256 is
+`C5E31CE3D6FB475BECB040800DCBC7742A1C6F0166CD4BAD69F1F54CEFCBD1DE`.
+The archived executable and every per-run evidence hash were checked before
+removing instrumentation. These remain local unsigned evidence snapshots.
+
+All temporary source hooks and environment switches are removed; the three
+affected source files match the clean production commit. Fresh release workspace
+tests (773 passed, 24 ignored), strict all-target Clippy and formatting pass.
+No new production scheduling change is justified by these mixed readiness
+results. Independent review, windowed/cross-hardware behavior and package
+delivery remain open. The package is unchanged and no editor was launched.

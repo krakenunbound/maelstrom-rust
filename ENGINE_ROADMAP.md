@@ -404,9 +404,16 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       four/eight-CPU native-audio runs pass at 55/51 us submission p95 with zero audio
       faults. Four-CPU ten-minute resources pass: 56,464 matching requests/presentations,
       74 us submit p95, zero drops/errors, bounded cache/sessions and zero after drop.
-      Frame-ready p95 is 60 ms versus a historical 50 ms, not a paired comparison.
-      Eight-CPU sustained, paired frame-readiness, independent-review, package, and
-      windowed/cross-hardware proof remain open; no end-to-end scrub speedup claimed.
+      Eight-CPU ten-minute resources also pass on the same production executable:
+      72,596 matching requests/presentations, 66 us submit p95, 46 ms frame-ready p95,
+      zero drops/errors, bounded resources and clean teardown. Eight temporary
+      same-binary 30-second diagnostics (legacy/base/base/legacy at four and eight
+      CPUs) repeat submission gains; frame-ready p95 differences reverse direction.
+      A 14.6% cycle-rate loss in the first eight-CPU pair is not repeated in the
+      reverse-order pair (+3.1%). No consistent readiness penalty, non-inferiority,
+      or end-to-end scrub speedup is established. Hooks removed; fresh 773 release
+      tests, Clippy and formatting pass. Independent review, package delivery and
+      windowed/cross-hardware proof remain open.
       See `docs/monitor-worker-scheduling.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
