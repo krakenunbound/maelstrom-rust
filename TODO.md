@@ -14,6 +14,9 @@ Last updated: 2026-08-31
   cancellation contracts remain intact. 786 release tests, both real-media proxy tests,
   strict Clippy, formatting, fixture contracts and Phase 0 scenarios pass.
   Parent-reviewed; independent agent unavailable. See `docs/proxy-media.md`.
+- [x] Rebuild the portable package from `ac52c2b` with worker-side proxy startup
+  validation. Executable SHA-256 starts `D3FA11E3C8894DDA`; previous package backed
+  up, runtime/static-import checks pass. No editor launch; GUI smoke remains `not_run`.
 - [ ] Finish proxy lifecycle nonblocking work: tool-path resolution, completion/enable/
   reconciliation filesystem checks and cancellation/reset teardown still need worker-owned
   handling with source-identity, stale-result and clean-shutdown proof.

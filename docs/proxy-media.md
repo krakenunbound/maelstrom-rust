@@ -102,16 +102,17 @@ remaining lifecycle work. No image-quality, codec, frame-rate, cache-cap or depe
 
 ## Portable package checkpoint
 
-Built from clean commit `fb5c94d589edeed5aeaa99845c535b5531776a2d` without opening the editor.
-The executable SHA-256 is `CDFC00DB47444A5BF0F68D1F6A824D4B20F374EED747F5C034059AF0A53DDCCC`,
+Built from clean commit `ac52c2b061134a2b074bb90bbec3ff8a9aef4608` without opening the editor,
+including both cache rediscovery and asynchronous startup validation.
+The executable SHA-256 is `D3FA11E3C8894DDA1A6F477EE153A80149C6DC13D3B58745D36DEF5EB05F194B`,
 matching the release build and package-status record. All 23 files are inventoried; only the
 executable/status differ from the previous package. Thirteen pinned runtime hashes, the authorized
 VC runtime copy, fifteen AMD64/static-import inventories, FFmpeg/FFprobe version calls, and the
 exact launcher's `--verify-runtime` branch pass. Models, libraries and license notices are unchanged.
 
 The previous complete package is recoverable from
-`artifacts/phase1-multisource/package-cached-proxy-fb5c94d/previous-package.zip`
-(SHA-256 `FC49684B3474D7BB98E4CB27BB887BC3B142E9324D0013B566543887347D51DF`).
+`artifacts/phase1-multisource/package-proxy-worker-ac52c2b/previous-package.zip`
+(SHA-256 `18B3A5455EDCB5254B2D539E301C447356BE4EA4BAD01863AF983534E50E453E`).
 The adjacent `verification.json` records file/import hashes and the check scope. No binaries or
 private models were pushed. `smoke_status` stays `not_run`: local static checks do not establish
 GUI behavior, dynamic GPU-library loading, clean-host compatibility, or windowed performance.
