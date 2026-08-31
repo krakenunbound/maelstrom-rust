@@ -9,6 +9,15 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Make speculative monitor prewarming silent without removing decode/cache/session
+  warming. Both standalone and coordinated workers retain visible foreground/reverse
+  replies and errors. Five new regression tests, 770 release tests, strict Clippy,
+  ten repeated prewarm checks, and independent review pass.
+  Evidence: `docs/silent-monitor-prewarm.md`.
+- [ ] Rerun the restricted-CPU resource gate after the silent-prewarm fix. The preserved
+  four-CPU baseline failed: 289 stale/non-converging events exceeded its 69 allowance;
+  a separate short trace identified 17 late copies of already displayed top-layer frames.
+  Do not relabel the failed run as passing. Package remains the previous CPU-guard build.
 - [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
   initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,
   strict Clippy, 304 hardware pixel/timestamp cases, and independent review pass.

@@ -1589,7 +1589,15 @@ impl MonitorDecoder {
         request: DecodeRequest,
         speculative: bool,
     ) -> Result<(), DecoderClosed> {
-        self.send_to_with_role(index, MonitorCommand::Request(request), speculative)
+        debug_assert!(!speculative || (index > 0 && !request.is_scrubbing));
+        self.send_to_with_role(
+            index,
+            MonitorCommand::Request(MonitorRequest {
+                request,
+                emit_events: !speculative,
+            }),
+            speculative,
+        )
     }
 
     fn send_to(&self, index: usize, command: MonitorCommand) -> Result<(), DecoderClosed> {
@@ -1649,9 +1657,13 @@ impl MonitorDecoder {
                 }
                 return Ok(());
             }
-            let MonitorCommand::Request(request) = command else {
+            let MonitorCommand::Request(command) = command else {
                 return Ok(());
             };
+            let MonitorRequest {
+                request,
+                emit_events,
+            } = command;
             let lane = if index == 0 {
                 MonitorSessionLane::Foreground
             } else {
@@ -1704,13 +1716,15 @@ impl MonitorDecoder {
                         endpoint
                             .resource_diagnostics
                             .publish_worker_session(index, false);
-                        endpoint.events.publish(DecodeEvent::Error(DecodeError {
-                            project_epoch: request.project_epoch,
-                            request_id: request.request_id,
-                            media_id: request.media_id,
-                            source_tick: request.source_tick,
-                            message,
-                        }));
+                        if emit_events {
+                            endpoint.events.publish(DecodeEvent::Error(DecodeError {
+                                project_epoch: request.project_epoch,
+                                request_id: request.request_id,
+                                media_id: request.media_id,
+                                source_tick: request.source_tick,
+                                message,
+                            }));
+                        }
                         return Ok(());
                     }
                 },
@@ -1725,7 +1739,10 @@ impl MonitorDecoder {
             });
             let retained_request = request.clone();
             *client.commands.lock().expect("monitor command lock") =
-                Some(MonitorCommand::Request(request));
+                Some(MonitorCommand::Request(MonitorRequest {
+                    request,
+                    emit_events,
+                }));
             endpoint
                 .deferred_request
                 .lock()
@@ -1874,10 +1891,28 @@ impl EventSlot {
 }
 
 enum MonitorCommand {
-    Request(DecodeRequest),
+    Request(MonitorRequest),
     Cancel,
     Release,
     Shutdown,
+}
+
+/// Private command metadata controls presentation without changing the public decode request.
+/// Public routing assigns speculative delivery only to non-scrubbing background prewarm lanes;
+/// visible nonzero lanes are reverse scrubs, so a role change crosses a decode generation.
+struct MonitorRequest {
+    request: DecodeRequest,
+    emit_events: bool,
+}
+
+impl MonitorRequest {
+    #[cfg(test)]
+    fn visible(request: DecodeRequest) -> Self {
+        Self {
+            request,
+            emit_events: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2172,7 +2207,7 @@ fn monitor_scheduler_loop(
                 }
             }
             match commands.lock().expect("monitor command lock").take() {
-                Some(MonitorCommand::Request(request)) => pending = Some(request),
+                Some(MonitorCommand::Request(command)) => pending = Some(command),
                 Some(MonitorCommand::Cancel) | None => continue,
                 Some(MonitorCommand::Release) => {
                     sessions.clear();
@@ -2187,7 +2222,11 @@ fn monitor_scheduler_loop(
             }
         }
 
-        let request = pending.take().expect("pending monitor request");
+        let command = pending.take().expect("pending monitor request");
+        let MonitorRequest {
+            request,
+            emit_events,
+        } = command;
         #[cfg(any(test, feature = "test-hooks"))]
         block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&stage_timings.worker_request);
@@ -2196,17 +2235,19 @@ fn monitor_scheduler_loop(
             |frame: &DecodedRgba,
              backend: DecodeBackend,
              fallback_reason: Option<DecodeFallbackReason>| {
-                progress_events.publish(DecodeEvent::Frame(DecodedFrame {
-                    project_epoch: request.project_epoch,
-                    request_id: frame.request_id,
-                    media_id: request.media_id,
-                    source_tick: frame.source_tick,
-                    width: frame.width,
-                    height: frame.height,
-                    backend: Some(backend),
-                    fallback_reason,
-                    rgba: Arc::clone(&frame.rgba),
-                }));
+                if emit_events {
+                    progress_events.publish(DecodeEvent::Frame(DecodedFrame {
+                        project_epoch: request.project_epoch,
+                        request_id: frame.request_id,
+                        media_id: request.media_id,
+                        source_tick: frame.source_tick,
+                        width: frame.width,
+                        height: frame.height,
+                        backend: Some(backend),
+                        fallback_reason,
+                        rgba: Arc::clone(&frame.rgba),
+                    }));
+                }
             };
         let mut on_session_state = |active| {
             resource_diagnostics.publish_worker_session(worker_index, active);
@@ -2230,9 +2271,9 @@ fn monitor_scheduler_loop(
             Some(MonitorCommand::Request(newer)) => {
                 let completed_newest = event
                     .as_ref()
-                    .is_some_and(|event| event_request_id(event) == newer.request_id);
-                if same_decode_generation(&request, &newer) {
-                    if let Some(event) = event {
+                    .is_some_and(|event| event_request_id(event) == newer.request.request_id);
+                if same_decode_generation(&request, &newer.request) {
+                    if emit_events && let Some(event) = event {
                         events.publish(event);
                     }
                     if !completed_newest {
@@ -2257,8 +2298,11 @@ fn monitor_scheduler_loop(
                     // A saturated speculative lane must retry quietly. Waiting keeps this worker
                     // from spin-polling the permit pool while another lane remains active.
                     thread::sleep(POLL_INTERVAL);
-                    pending = Some(request);
-                } else if let Some(event) = event {
+                    pending = Some(MonitorRequest {
+                        request,
+                        emit_events,
+                    });
+                } else if emit_events && let Some(event) = event {
                     events.publish(event);
                 }
             }
@@ -2310,9 +2354,13 @@ fn source_lane_actor_loop(
             continue;
         }
         let command = client.commands.lock().expect("monitor command lock").take();
-        let Some(MonitorCommand::Request(request)) = command else {
+        let Some(MonitorCommand::Request(command)) = command else {
             continue;
         };
+        let MonitorRequest {
+            request,
+            emit_events,
+        } = command;
         #[cfg(any(test, feature = "test-hooks"))]
         block_test_decode_request(&request);
         let _request_timer = StageTimer::new(&endpoint.stage_timings.worker_request);
@@ -2321,17 +2369,19 @@ fn source_lane_actor_loop(
             |frame: &DecodedRgba,
              backend: DecodeBackend,
              fallback_reason: Option<DecodeFallbackReason>| {
-                progress_events.publish(DecodeEvent::Frame(DecodedFrame {
-                    project_epoch: request.project_epoch,
-                    request_id: frame.request_id,
-                    media_id: request.media_id,
-                    source_tick: frame.source_tick,
-                    width: frame.width,
-                    height: frame.height,
-                    backend: Some(backend),
-                    fallback_reason,
-                    rgba: Arc::clone(&frame.rgba),
-                }));
+                if emit_events {
+                    progress_events.publish(DecodeEvent::Frame(DecodedFrame {
+                        project_epoch: request.project_epoch,
+                        request_id: frame.request_id,
+                        media_id: request.media_id,
+                        source_tick: frame.source_tick,
+                        width: frame.width,
+                        height: frame.height,
+                        backend: Some(backend),
+                        fallback_reason,
+                        rgba: Arc::clone(&frame.rgba),
+                    }));
+                }
             };
         let diagnostics = Arc::clone(&endpoint.resource_diagnostics);
         let mut on_session_state =
@@ -2362,9 +2412,9 @@ fn source_lane_actor_loop(
             Some(MonitorCommand::Request(newer)) => {
                 let completed_newest = event
                     .as_ref()
-                    .is_some_and(|event| event_request_id(event) == newer.request_id);
-                if same_decode_generation(&request, &newer) {
-                    if let Some(event) = event {
+                    .is_some_and(|event| event_request_id(event) == newer.request.request_id);
+                if same_decode_generation(&request, &newer.request) {
+                    if emit_events && let Some(event) = event {
                         endpoint.events.publish(event);
                     }
                     if !completed_newest {
@@ -2382,12 +2432,15 @@ fn source_lane_actor_loop(
             Some(MonitorCommand::Shutdown) => {}
             None if deferred_for_capacity => {
                 *client.commands.lock().expect("monitor command lock") =
-                    Some(MonitorCommand::Request(request));
+                    Some(MonitorCommand::Request(MonitorRequest {
+                        request,
+                        emit_events,
+                    }));
                 thread::sleep(POLL_INTERVAL);
                 let _ = enqueue_client(&shared, &client);
             }
             None => {
-                if let Some(event) = event {
+                if emit_events && let Some(event) = event {
                     endpoint.events.publish(event);
                 }
             }
@@ -2694,7 +2747,8 @@ fn decode_with_session(
                 Some(MonitorCommand::Cancel | MonitorCommand::Release | MonitorCommand::Shutdown)
             ) || matches!(
                 commands.lock().expect("monitor command lock").as_ref(),
-                Some(MonitorCommand::Request(newer)) if !same_decode_generation(request, newer)
+                Some(MonitorCommand::Request(newer))
+                    if !same_decode_generation(request, &newer.request)
             )
         },
         || latest_same_generation(commands, request),
@@ -2840,8 +2894,8 @@ fn latest_same_generation(
     request: &DecodeRequest,
 ) -> Option<DecodeRequest> {
     match commands.lock().expect("monitor command lock").as_ref() {
-        Some(MonitorCommand::Request(newer)) if same_decode_generation(request, newer) => {
-            Some(newer.clone())
+        Some(MonitorCommand::Request(newer)) if same_decode_generation(request, &newer.request) => {
+            Some(newer.request.clone())
         }
         _ => None,
     }
@@ -4301,6 +4355,22 @@ mod tests {
         receive_matching(decoder, |frame| frame.source_tick >= request.source_tick)
     }
 
+    fn receive_for_request(decoder: &MonitorDecoder, request_id: u64) -> DecodeEvent {
+        for _ in 0..500 {
+            if let Some(event) = decoder.try_recv().unwrap() {
+                let event_request_id = match &event {
+                    DecodeEvent::Frame(frame) => frame.request_id,
+                    DecodeEvent::Error(error) => error.request_id,
+                };
+                if event_request_id == request_id {
+                    return event;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("decoder did not deliver request {request_id}")
+    }
+
     fn receive_matching(
         decoder: &MonitorDecoder,
         accept: impl Fn(&DecodedFrame) -> bool,
@@ -4316,6 +4386,30 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("decoder did not deliver an event")
+    }
+
+    fn wait_for_worker_completions(decoder: &MonitorDecoder, workers: &[usize]) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while workers.iter().any(|&index| {
+            decoder.stage_timings[index]
+                .snapshot()
+                .worker_request
+                .samples
+                == 0
+        }) && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        for &index in workers {
+            assert!(
+                decoder.stage_timings[index]
+                    .snapshot()
+                    .worker_request
+                    .samples
+                    > 0,
+                "worker {index} did not complete its request"
+            );
+        }
     }
 
     fn assert_frame_reaches_target(frame: &DecodedFrame, request: &DecodeRequest) {
@@ -4510,10 +4604,16 @@ mod tests {
         first.release_live_sessions().expect("first release");
         second.release_live_sessions().expect("second release");
         let deadline = Instant::now() + Duration::from_secs(2);
-        while pool.diagnostics().active_sticky_sessions != 0 && Instant::now() < deadline {
+        // Returning the session permit can precede closing its FFmpeg file handle. Wait for
+        // the source reaper to join the actor before deleting this Windows fixture.
+        while (pool.diagnostics().active_sticky_sessions != 0
+            || coordinator.diagnostics().retiring_lane_actors != 0)
+            && Instant::now() < deadline
+        {
             thread::yield_now();
         }
         assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
+        assert_eq!(coordinator.diagnostics().retiring_lane_actors, 0);
         drop(first);
         drop(second);
         fs::remove_file(path).unwrap();
@@ -4869,6 +4969,227 @@ mod tests {
     }
 
     #[test]
+    fn speculative_background_completion_after_foreground_drain_stays_silent() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let pool = MonitorSessionPool::new(1, 1);
+        let decoder = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(0),
+            MonitorSourceCoordinator::new(1, pool.clone()),
+        );
+        let request = request(path.clone(), 1167);
+        decoder.request(request.clone()).unwrap();
+        let DecodeEvent::Frame(frame) = receive_for(&decoder, &request) else {
+            panic!("foreground request did not decode")
+        };
+        assert_frame_reaches_target(&frame, &request);
+
+        let worker_samples = decoder.stage_timings[1].snapshot().worker_request.samples;
+        let barrier = install_test_decode_barrier(request.request_id, path.clone());
+        decoder.send_request_to(1, request.clone(), true).unwrap();
+        barrier.wait_until_blocked();
+        barrier.release();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while decoder.stage_timings[1].snapshot().worker_request.samples == worker_samples
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        assert!(
+            decoder.stage_timings[1].snapshot().worker_request.samples > worker_samples,
+            "speculative lane did not complete its decode work"
+        );
+        assert_eq!(pool.diagnostics().active_background_sessions, 1);
+        assert!(decoder.try_recv().unwrap().is_none());
+
+        decoder.release_live_sessions().unwrap();
+        drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn standalone_prewarm_keeps_background_work_silent_while_warming_resources() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let notifications = Arc::new(AtomicU64::new(0));
+        let notifier = Arc::clone(&notifications);
+        let pool = MonitorSessionPool::new(1, 3);
+        let cache = MonitorFrameCachePool::new(1024 * 1024);
+        let decoder = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_session_pool(
+            move || {
+                notifier.fetch_add(1, Ordering::Relaxed);
+            },
+            cache.clone(),
+            pool.clone(),
+        );
+        let mut prewarm = request(path.clone(), 1168);
+        prewarm.prewarm_scrub_workers = true;
+        decoder.request(prewarm.clone()).unwrap();
+        let DecodeEvent::Frame(frame) = receive_for(&decoder, &prewarm) else {
+            panic!("foreground prewarm request did not decode")
+        };
+        assert_frame_reaches_target(&frame, &prewarm);
+        wait_for_worker_completions(&decoder, &[0, 1, 2, 3]);
+        assert_eq!(pool.diagnostics().active_foreground_sessions, 1);
+        assert_eq!(pool.diagnostics().active_background_sessions, 3);
+        assert!(cache.diagnostics().current_bytes > 0);
+        assert!(decoder.observed_frame_backends().next().is_some());
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        assert!(decoder.try_recv().unwrap().is_none());
+
+        decoder.release_live_sessions().unwrap();
+        drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn coordinated_prewarm_keeps_background_work_silent_while_warming_resources() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let notifications = Arc::new(AtomicU64::new(0));
+        let notifier = Arc::clone(&notifications);
+        let pool = MonitorSessionPool::new(1, 3);
+        let cache = MonitorFrameCachePool::new(1024 * 1024);
+        let coordinator = MonitorSourceCoordinator::new(1, pool.clone());
+        let decoder = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            move || {
+                notifier.fetch_add(1, Ordering::Relaxed);
+            },
+            cache.clone(),
+            coordinator.clone(),
+        );
+        let mut prewarm = request(path.clone(), 1169);
+        prewarm.prewarm_scrub_workers = true;
+        decoder.request(prewarm.clone()).unwrap();
+        let DecodeEvent::Frame(frame) = receive_for(&decoder, &prewarm) else {
+            panic!("foreground prewarm request did not decode")
+        };
+        assert_frame_reaches_target(&frame, &prewarm);
+        wait_for_worker_completions(&decoder, &[0, 1, 2, 3]);
+        assert_eq!(pool.diagnostics().active_foreground_sessions, 1);
+        // The coordinator shares one background source actor, so its first background session
+        // warms the cache before the other speculative clients need separate sticky sessions.
+        assert_eq!(pool.diagnostics().active_background_sessions, 1);
+        assert_eq!(coordinator.diagnostics().live_lane_actors, 2);
+        assert!(cache.diagnostics().current_bytes > 0);
+        assert!(decoder.observed_frame_backends().next().is_some());
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        assert!(decoder.try_recv().unwrap().is_none());
+
+        decoder.release_live_sessions().unwrap();
+        drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn speculative_failed_open_is_silent_but_visible_failed_opens_publish_errors() {
+        let notifications = Arc::new(AtomicU64::new(0));
+        let notifier = Arc::clone(&notifications);
+        let decoder = MonitorDecoder::new_with_notifier(move || {
+            notifier.fetch_add(1, Ordering::Relaxed);
+        });
+        let missing = PathBuf::from("this-media-does-not-exist-prewarm.mp4");
+        let mut prewarm = request(missing.clone(), 1170);
+        prewarm.prewarm_scrub_workers = true;
+        decoder.request(prewarm.clone()).unwrap();
+        let DecodeEvent::Error(error) = receive_for(&decoder, &prewarm) else {
+            panic!("foreground failed-open did not publish an error")
+        };
+        assert_eq!(error.request_id, prewarm.request_id);
+        wait_for_worker_completions(&decoder, &[0, 1, 2, 3]);
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        assert!(decoder.try_recv().unwrap().is_none());
+
+        let mut forward = request(missing.clone(), 1172);
+        forward.is_scrubbing = true;
+        forward.source_tick = 200_000;
+        decoder.request(forward).unwrap();
+        let mut reverse = request(missing, 1173);
+        reverse.is_scrubbing = true;
+        reverse.source_tick = 100_000;
+        decoder.request(reverse.clone()).unwrap();
+        let DecodeEvent::Error(error) = receive_for_request(&decoder, reverse.request_id) else {
+            panic!("visible reverse failed-open did not publish an error")
+        };
+        assert_eq!(error.request_id, reverse.request_id);
+
+        let coordinated_notifications = Arc::new(AtomicU64::new(0));
+        let coordinated_notifier = Arc::clone(&coordinated_notifications);
+        let coordinated =
+            MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+                move || {
+                    coordinated_notifier.fetch_add(1, Ordering::Relaxed);
+                },
+                MonitorFrameCachePool::new(1024 * 1024),
+                MonitorSourceCoordinator::new(1, MonitorSessionPool::new(1, 3)),
+            );
+        let mut coordinated_prewarm = request(
+            PathBuf::from("this-media-does-not-exist-coordinated-prewarm.mp4"),
+            1182,
+        );
+        coordinated_prewarm.prewarm_scrub_workers = true;
+        coordinated.request(coordinated_prewarm.clone()).unwrap();
+        let DecodeEvent::Error(error) = receive_for(&coordinated, &coordinated_prewarm) else {
+            panic!("coordinated foreground failed-open did not publish an error")
+        };
+        assert_eq!(error.request_id, coordinated_prewarm.request_id);
+        wait_for_worker_completions(&coordinated, &[0, 1, 2, 3]);
+        assert_eq!(coordinated_notifications.load(Ordering::Relaxed), 1);
+        assert!(coordinated.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn paused_prewarm_replaced_by_public_visible_reverse_publishes_newest_target() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let path = tiny_media();
+        let decoder = MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+            || {},
+            MonitorFrameCachePool::new(1024 * 1024),
+            MonitorSourceCoordinator::new(1, MonitorSessionPool::new(1, 3)),
+        );
+        let mut prewarm = request(path.clone(), 1174);
+        prewarm.prewarm_scrub_workers = true;
+        let barrier = install_test_decode_barrier(prewarm.request_id, path.clone());
+        decoder.request(prewarm).unwrap();
+        barrier.wait_until_blocked();
+
+        let mut forward = request(path.clone(), 1176);
+        forward.is_scrubbing = true;
+        forward.source_tick = 200_000;
+        decoder.request(forward).unwrap();
+        let mut reverse = request(path.clone(), 1177);
+        reverse.is_scrubbing = true;
+        reverse.source_tick = 100_000;
+        decoder.request(reverse).unwrap();
+        let mut replacement = request(path.clone(), 1181);
+        replacement.is_scrubbing = true;
+        replacement.source_tick = 50_000;
+        decoder.request(replacement.clone()).unwrap();
+        barrier.release();
+
+        let DecodeEvent::Frame(frame) = receive_for_request(&decoder, replacement.request_id)
+        else {
+            panic!("newest visible reverse target did not decode")
+        };
+        assert_eq!(frame.request_id, replacement.request_id);
+        assert_eq!(frame.project_epoch, replacement.project_epoch);
+        assert_eq!(frame.media_id, replacement.media_id);
+        assert_frame_reaches_target(&frame, &replacement);
+        drop(decoder);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn speculative_release_preserves_visible_reverse_scrub_lane() {
         if !ffmpeg_available() {
             return;
@@ -5089,7 +5410,10 @@ mod tests {
         let blocked_request = request(path.clone(), 1503);
         let barrier = install_test_decode_barrier(blocked_request.request_id, path.clone());
         background
-            .send_to(3, MonitorCommand::Request(blocked_request))
+            .send_to(
+                3,
+                MonitorCommand::Request(MonitorRequest::visible(blocked_request)),
+            )
             .unwrap();
         barrier.wait_until_blocked();
         background.release_live_sessions().unwrap();
@@ -5105,7 +5429,10 @@ mod tests {
         let replacement = request(path.clone(), 1507);
         for _ in 0..32 {
             assert_eq!(
-                background.send_to(3, MonitorCommand::Request(replacement.clone())),
+                background.send_to(
+                    3,
+                    MonitorCommand::Request(MonitorRequest::visible(replacement.clone())),
+                ),
                 Err(DecoderClosed::SourceCapacityDeferred)
             );
             let diagnostics = coordinator.diagnostics();
@@ -5653,7 +5980,9 @@ mod tests {
                 .expect("open D3D11VA monitor for forced runtime fallback");
         assert_eq!(hardware.backend, DecodeBackend::D3D11VA);
         let mut sessions = HashMap::from([(original.media_id, hardware)]);
-        let commands = Arc::new(Mutex::new(Some(MonitorCommand::Request(newest.clone()))));
+        let commands = Arc::new(Mutex::new(Some(MonitorCommand::Request(
+            MonitorRequest::visible(newest.clone()),
+        ))));
         let stage_timings = DecoderStageTimingAccumulators::default();
         let session_pool = MonitorSessionPool::new(1, 0);
 
@@ -5723,8 +6052,11 @@ mod tests {
         let Some(MonitorCommand::Request(queued)) = queued.as_ref() else {
             panic!("same-generation request was unexpectedly removed")
         };
-        assert_eq!(queued.acceleration, AccelerationPreference::PreferHardware);
-        assert!(same_decode_generation(&original, queued));
+        assert_eq!(
+            queued.request.acceleration,
+            AccelerationPreference::PreferHardware
+        );
+        assert!(same_decode_generation(&original, &queued.request));
     }
 
     #[test]
@@ -6533,7 +6865,9 @@ mod tests {
             let mut newer = current.clone();
             newer.request_id += 1;
             newer.source_tick = 700_000 + step * 50_000;
-            *commands.lock().unwrap() = Some(MonitorCommand::Request(newer.clone()));
+            *commands.lock().unwrap() = Some(MonitorCommand::Request(MonitorRequest::visible(
+                newer.clone(),
+            )));
             match decode_monitor_request(
                 &mut sessions,
                 &frame_cache,
@@ -6580,7 +6914,9 @@ mod tests {
         let mut backward = current.clone();
         backward.request_id = 42;
         backward.source_tick = 100_000;
-        *commands.lock().unwrap() = Some(MonitorCommand::Request(backward.clone()));
+        *commands.lock().unwrap() = Some(MonitorCommand::Request(MonitorRequest::visible(
+            backward.clone(),
+        )));
         match decode_monitor_request(
             &mut sessions,
             &frame_cache,

@@ -375,6 +375,14 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       before/after latency runs pass the existing scheduler gate but do not demonstrate
       faster scrubbing. Restricted-CPU sustained/audio and windowed/cross-machine
       qualification remain open. See `docs/cpu-budget-conversion.md`.
+- [x] Suppress presentation events from speculative prewarm commands while preserving
+      background decode, cache/session warming, and backend/stage diagnostics. Both
+      standalone and coordinated workers retain visible foreground/reverse replies and
+      errors. Five regressions, 770 release tests, strict Clippy, repeated focused tests,
+      and independent review pass. The preceding four-CPU ten-minute run failed its
+      stale/non-converging-event allowance (289 versus 69); its evidence is preserved.
+      Restricted-CPU reruns and packaged/windowed qualification remain pending.
+      See `docs/silent-monitor-prewarm.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
       single-allocation packing cuts local native-1080p packing p50 from 2.658 to 1.363 ms and
