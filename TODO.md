@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Requalify the full 600-second Phase 0 seven-scenario soak at clean commit `773dd92`.
+  The authoritative schema-2 wrapper passed 76 complete matrices (532 scenario executions,
+  2,812 declared work iterations) over 607.115 measured seconds. All child report hashes are
+  unique; start/end commits match; no tracked changes, invocation/report failures or leftover
+  processes were observed. Headless Software decode/`h264_mf` evidence only; cross-hardware,
+  live audio, GUI and scanout gates remain open. See `docs/phase0-scenarios.md`.
 - [x] Add a clean-commit Phase 0 timeline-foundation runner around the existing release gates.
   The retained schema-1 run at `6576d91` passed ten independent 50,000-clip history trials
   (press/release p95 0.2672/0.7453 ms), wide/detail/playhead CPU p95
