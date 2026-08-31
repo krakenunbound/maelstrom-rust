@@ -326,8 +326,15 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       preroll, applies floor sampling before resetting clip-local time, and bounds the graph at the
       planned source range. A real five-color `0/40/110/150/240 ms` source trimmed to `100..240 ms`
       renders source identities `40/110/150/150 ms` at both 30 and 30000/1001 project rates, proving
-      preview/export trim-slip identity and the exclusive out-point. This remains open pending broad
-      real-media/cross-backend proof across more codecs, reorder patterns, and containers.
+      preview/export trim-slip identity and the exclusive out-point. Generated ProRes/DNxHR
+      MOV files with 7-second origins now pass 20 head/trim/slip/tail/final-frame export
+      cases at 30 and 30000/1001 fps: 88 matching source identities/counts and output
+      timestamps within one microsecond of decimal rounding. A nearest-frame mutation
+      fails both new regressions; the production policy is unchanged. These use the real
+      export graph with a test MPEG-4 encoder, not proof of H.264/hardware/color parity.
+      775 release tests, Clippy, fixture validation and the updated Phase 0 runner pass.
+      See `docs/shifted-vfr-export-parity.md`. This remains open pending broad real-media/
+      cross-backend proof across more codecs, reorder patterns, and containers.
 - [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX
       fixture exposed BT.709 frames being interpreted as BT.601 (4,644 differing RGBA bytes in a
       64x48 frame, maximum channel error 41). The corrected software path passes exact independent

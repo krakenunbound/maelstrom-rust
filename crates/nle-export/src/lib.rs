@@ -2304,6 +2304,9 @@ fn last_error_lines(stderr: &str) -> String {
 mod audio_boundary_tests;
 
 #[cfg(test)]
+mod vfr_export_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nle_compositor::video_fade_opacity;

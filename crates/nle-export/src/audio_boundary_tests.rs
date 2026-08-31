@@ -48,7 +48,7 @@ fn unique_temp_path(name: &str, extension: &str) -> PathBuf {
     ))
 }
 
-fn run_ffmpeg_bounded(ffmpeg: &Path, args: &[String], stderr: &Path) {
+pub(super) fn run_ffmpeg_bounded(ffmpeg: &Path, args: &[String], stderr: &Path) {
     let stderr_file = File::create(stderr).expect("create FFmpeg stderr capture");
     let mut child = BoundedChild(Some(
         Command::new(ffmpeg)

@@ -1,5 +1,8 @@
 # Ten-bit codec timing and preview color conversion
 
+Follow-up: [shifted VFR export source identity](shifted-vfr-export-parity.md) adds
+20 ProRes/DNxHR export-graph timing cases; it does not qualify export color fidelity.
+
 Follow-up: [hardware/native-resolution parity](hardware-decode-parity.md) adds
 explicit Windows hardware proof and fixes a separate planar/NV12 conversion
 inconsistency. Current reference filters include `accurate_rnd`; the checkpoint

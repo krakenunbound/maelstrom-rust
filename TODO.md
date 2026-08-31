@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Add 20 shifted ProRes/DNxHR VFR export checks: source heads, pretrimmed/slipped
+  ranges, tail exclusion and final frames at 30 and 30000/1001 fps. All 88 output
+  identities/counts/timestamps match; a nearest-frame mutation fails both tests.
+  Production policy is unchanged. 775 release tests, strict Clippy, seven fixture
+  contracts and the updated Phase 0 runner pass. Parent-reviewed; independent
+  agent unavailable. See `docs/shifted-vfr-export-parity.md`.
 - [x] Disable automatic Windows wake-priority boosts only on video monitor workers,
   preserving base/process/UI/audio priorities and full image quality. Same-binary
   control failed at 14,262 us; test-only no-boost runs passed at 89/59 us. Actual
@@ -232,7 +238,9 @@ Last updated: 2026-08-31
 - [ ] Expand VFR qualification across additional codecs, reorder patterns, containers, and decoder
   backends.
   Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 now have exact local Software
-  timing/pixel evidence. AV1, broader camera sources, hardware parity, and export parity remain open.
+  timing/pixel evidence. ProRes/DNxHR now also pass 20 export-graph source-identity
+  cases with a test MPEG-4 encoder. AV1, broader camera sources, hardware/color
+  parity and production-encoder conformance remain open.
 
 ## Phase 2 implementation queue
 
