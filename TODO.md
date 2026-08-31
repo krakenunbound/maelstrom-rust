@@ -9,6 +9,16 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Repair missing-backend evidence in the paused/full-resolution latency gate without
+  disabling prewarming or attributing cache hits to a decoder. Successful-work history is now
+  bounded and independent of latest-wins frame events. Deterministic before/after regression,
+  three 40-trial latency runs, 747 release tests, strict Clippy, 152 exact Windows hardware
+  pixel/timing cases, and independent review pass. Four-source scheduler p95: 189-270 us;
+  coarse matching-frame p95: 69-70 ms. This is not a windowed or sustained playback claim.
+  Portable package rebuilt with runtime/hash checks; SHA-256 starts `0F30B9388BB8861B`.
+  GUI smoke remains `not_run`; no editor launch. Previous executable archived locally.
+  Evidence: `docs/phase1-latency-comparison.md`.
+  Commit: `9df14ca58e21d79cf45321adb14e07e7f5ef7c28`.
 - [x] Correct native-size planar/NV12 color conversion without reducing resolution.
   GPU-free regression reproduces the old failure; four explicit Windows hardware
   tests pass 152 exact H.264/HEVC Main 10 timing/pixel cases, including full 1080p.
@@ -16,9 +26,7 @@ Last updated: 2026-08-31
   independent review pass. Portable package rebuilt without GUI launch, hash starts
   `8F0965B4489D34A11`; smoke remains `not_run`; runtime/hash/cleanup checks pass.
   Evidence and performance tradeoff: `docs/hardware-decode-parity.md`.
-- [ ] Resolve the old headless latency-comparison gate's missing-backend observation;
-  paused prewarming can return cached frames without backend provenance. Do not
-  count retained frames alone as fresh decoder/performance evidence.
+  Commit: `fb5335df898f69993f3ff5545260f0e47f157b1d`.
 - [ ] Requalify sustained/windowed playback after accurate conversion. The independent
   four-source worker gate passes, but it does not establish real-time display.
 - [ ] Optimize accurate native-size conversion while preserving exact layout parity;
@@ -147,6 +155,23 @@ Last updated: 2026-08-31
   channel layouts, shuttle audio, and loudness analysis.
 - [ ] Add multiple sequences, nesting, speed/remap, relink/consolidate, and project interchange in
   roadmap order.
+- [ ] Evaluate optional GPU Optical Flow interpolation (`fruc_vulkan`) for slow motion and
+  frame-rate conversion; preserve the working FFmpeg runtime during isolated qualification.
+  - Automatically detect usable devices, driver capabilities, and filter availability in the
+    actual runtime. Do not enable by GPU model-name matching alone. Probe Vulkan optical-flow
+    features, queues, supported formats/dimensions, and successful filter/session initialization.
+  - On multi-GPU systems, select a compatible processing device independently of the display
+    adapter, subject to a user's explicit device override. Keep probing bounded and off the UI thread.
+  - Enable the Optical Flow option only when usable; otherwise keep it visible but disabled with
+    a specific reason (runtime filter missing, unsupported GPU/driver, or unsupported clip format).
+    Recheck when the device/runtime changes; do not cache support indefinitely after device loss.
+  - Availability is automatic; applying interpolation remains the user's choice. Preserve saved
+    project settings when unavailable, warn visibly, and require an explicit alternative before
+    exporting with a different interpolation method. Never silently lower playback resolution.
+  - Test supported/unsupported and mixed-GPU systems, missing filters, initialization failure,
+    device loss, and preview/export parity before marking the feature implemented.
+  References: [FFmpeg filter](https://ffmpeg.org/ffmpeg-filters.html#fruc_005fvulkan),
+  [Vulkan capability contract](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html).
 - [ ] Keep the compact EN/JA interface, default panel sizing, border padding, nested menus, and
   draggable/scrubbable numeric controls consistent as features land.
 
