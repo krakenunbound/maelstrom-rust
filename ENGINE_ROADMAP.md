@@ -337,7 +337,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       rational rates in background, video, still, title and matte clocks instead
       of rounding to six decimals. Two regressions fail before/pass after; seven
       live FFmpeg clock cases, 777 release tests, strict Clippy, fixture contracts
-      and the updated Phase 0 runner pass. Package rebuild remains pending.
+      and the updated Phase 0 runner pass. A clean-source portable rebuild now
+      contains the fix (executable SHA-256 starts `41BD27272A4CFDE7`); previous
+      package backed up, runtime hashes/static imports and launcher check-only
+      mode pass. GUI/windowed package qualification remains pending.
       See `docs/exact-export-frame-rate.md`. This remains open pending broad real-media/
       cross-backend proof across more codecs, reorder patterns, and containers.
 - [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX

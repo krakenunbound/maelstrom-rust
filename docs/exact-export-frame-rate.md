@@ -66,7 +66,44 @@ The live clock test uses a null sink, not every production encoder/container.
 It does not establish multi-hour audio/video drift, H.264 hardware parity, color
 parity, full playback performance, or completion of the broader Phase 1 gate.
 
-No editor was launched. The portable executable is unchanged at SHA-256
-`5DD49EF46A5BEBD6226B17AD2A8CE0A4E1749C1738681017DA5369B3C21F37B2` and
-does **not** contain this production correction yet. Rebuilding and qualifying
-that package remains a separate, open checkpoint.
+At the source-test checkpoint, the portable executable was still
+`5DD49EF46A5BEBD6226B17AD2A8CE0A4E1749C1738681017DA5369B3C21F37B2` and did
+not contain the correction. The following build replaces it without a GUI launch.
+
+## Portable package checkpoint — 2026-08-31
+
+The package was rebuilt from clean source commit
+`ca99dfddc61e070186fab09f634b807bc76feb7b` using the existing packaging script's
+`-SkipSmoke` path. All 23 files in the previous package were archived and each
+ZIP entry verified by length and SHA-256 before replacing the exact non-reparse
+`dist/Maelstrom-Windows-x64` directory. The previous package is recoverable from
+`artifacts/phase1-multisource/package-exact-rate-ca99dfd/previous-package.zip`
+(SHA-256 `8F68D955BC8D84852A768EA362DBE7BA676B7699F9965B9D2823A1C36BE296FD`).
+
+The rebuilt executable SHA-256 is
+`41BD27272A4CFDE7843E8941FACB04D18B6C09AF7FDC9589EA551CF6ED8C1F7F`,
+matching both `target/release/nle-app.exe` and `PACKAGE-STATUS.json`.
+Packaging completed at `2026-08-31T19:57:10.2684816Z`.
+
+- The 23-file before/after inventory differs only in `Maelstrom.exe` and
+  `PACKAGE-STATUS.json`. Models, license notices, and runtime files are unchanged.
+- All 13 pinned FFmpeg tools/shared-library hashes match `BUILD-SHA256SUMS.txt`.
+  `vcruntime140.dll` matches the explicitly selected, authorized Visual Studio
+  VC Redist source; no individual DLL was downloaded or installed.
+- All 15 package executables/DLLs are AMD64 PE files. Static imports resolve to
+  adjacent files, known Windows modules present on this host, or recognized
+  Windows API-set contract names. API-set runtime resolution was not tested.
+- Packaged FFmpeg and FFprobe run their version checks successfully. The exact
+  `H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat --verify-runtime` check succeeds;
+  this branch exits before launching the editor.
+- Package verification was performed while tracked source was still clean at
+  the build commit. No Cargo/compiler/editor/media-tool processes remained.
+
+Build and verification helpers/logs are retained under ignored
+`artifacts/phase1-multisource/`; the complete file/import/hash inventory is in
+`package-exact-rate-ca99dfd/verification.json`. No package or binary was pushed.
+
+The package now contains the correction, but its `smoke_status` deliberately
+remains `not_run`. These are local static/runtime-tool checks, not clean-host,
+dynamic GPU-library, GUI playback/export, or windowed performance qualification.
+Those checks remain open and the editor has not been launched.

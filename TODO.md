@@ -15,9 +15,14 @@ Last updated: 2026-08-31
   Clippy, formatting, seven fixture contracts and the updated Phase 0 runner pass.
   No resolution/audio/preview policy change. Parent-reviewed; independent agent
   unavailable. See `docs/exact-export-frame-rate.md`.
-- [ ] Rebuild and qualify the portable package with the exact export-clock fix.
-  The existing `5DD49EF46A5BEBD6...` executable predates it; retain the old package
-  before rebuilding and do not launch the editor without explicit permission.
+- [x] Rebuild the portable package with the exact export-clock fix from `ca99dfd`.
+  New executable SHA-256 starts `41BD27272A4CFDE7`; the complete previous package
+  is backed up and hash-verified. All 23 files are inventoried, pinned runtime and
+  AMD64/static-import checks pass, and the launcher check-only mode passes.
+  Only executable/status changed; no editor launch, `smoke_status: not_run`.
+- [ ] Qualify the rebuilt package's GUI/export behavior and windowed performance
+  through the exact launcher after explicit launch permission. Static package
+  checks do not close this gate. See `docs/exact-export-frame-rate.md`.
 - [x] Add 20 shifted ProRes/DNxHR VFR export checks: source heads, pretrimmed/slipped
   ranges, tail exclusion and final frames at 30 and 30000/1001 fps. All 88 output
   identities/counts/timestamps match; a nearest-frame mutation fails both tests.
