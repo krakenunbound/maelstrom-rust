@@ -127,9 +127,14 @@ plus warmup and asserts four exact sources on every timed submission. It preserv
 all current thresholds, Full resolution, the continuous audio clock, and bounded
 source timestamp wrapping. Two new regression tests and all 772 release workspace
 tests pass (24 opt-in tests ignored), together with strict Clippy and formatting.
-Corrected restricted-CPU native-audio runs remain pending; the earlier failed run
-is not replaced by the unit-test result. See `docs/phase1-live-audio.md` for the
-coverage limitation on historical audio reports.
+The corrected uninstrumented four-CPU run retained all sources but failed at
+16,148 us submission p95 with one callback-lock failure and 480 underrun frames.
+Two temporary test-only traces localize the dominant submission delay to the
+source actor's wake notification, without proving its internal cause. The probes
+were archived and removed; a one-second timeline boundary margin remains in the
+test. Eight-CPU audio and a passing corrected qualification remain open. See
+`docs/restricted-live-audio-submission.md` for evidence and next steps, and
+`docs/phase1-live-audio.md` for historical coverage limits.
 
 The existing package remains unchanged at executable SHA-256
 `03E01F2EB32BFA3B301C161C638829257C2DDD1B0A78C604E070F25D365D6DFA`.

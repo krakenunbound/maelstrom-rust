@@ -19,15 +19,18 @@ Last updated: 2026-08-31
   98 us), with zero drops/errors and zero sessions after App drop. A 30-second
   four-CPU run still fails at 1,042 us; retain that variability evidence.
 - [x] Repair the native-audio harness's full-duration video workload. All four
-  timeline clips now cover measurement plus warmup, with exact four-source/Full
+  timeline clips now cover measurement plus warmup and one second of slack, with
+  exact four-source/Full
   assertions before every timed submission. Two new regressions, 772 release
   tests, strict Clippy, and formatting pass. Production code/limits are unchanged.
 - [ ] Requalify restricted-CPU native audio with the corrected full-duration workload.
-  The 30-second four-CPU attempt failed at 11,418 us and insufficient presentations;
-  video fixture clips ended after five seconds while audio continued. Audio had no
-  underruns/clock loss, but this is not a passing four-video/audio gate. Eight-CPU
-  audio remains unrun. Historical reports do not prove four-video load after five
-  seconds including warmup. Package remains the previous CPU-guard build.
+  The corrected 30-second four-CPU run delivered 2,340 actual layer requests but
+  failed at 16,148 us submission p95, one callback-lock failure, and 480 underrun
+  frames. Two archived test-only traces locate most submission delay at
+  `SourceLaneActor::submit`'s `wake.try_send`; determine lock contention versus
+  scheduling delay before choosing a fix. Attribute audio lock ownership separately.
+  No quality/threshold/priority changes. Eight-CPU audio remains unrun; package
+  remains the previous CPU-guard build. Evidence: `docs/restricted-live-audio-submission.md`.
 - [x] Correct the Windows scaler CPU guard under restricted process affinity. Actual
   initialized scaler probes pass for 1/4/7/8/28 allowed processors; 765 release tests,
   strict Clippy, 304 hardware pixel/timestamp cases, and independent review pass.

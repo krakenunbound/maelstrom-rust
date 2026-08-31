@@ -388,8 +388,12 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       clip-coverage defect in its longer-duration harness. A test-only correction
       extends all four clips through measurement plus warmup and asserts exact sources
       and Full resolution before every measured submission. Two new regressions and
-      772 release tests/Clippy/formatting pass; corrected native-audio requalification
-      and packaged/windowed/cross-machine proof remain pending.
+      772 release tests/Clippy/formatting pass. The corrected four-CPU 30-second run
+      kept all sources active (2,340 requests) but failed at 16,148 us submission
+      p95 with one audio callback-lock failure and 480 underrun frames. Archived
+      test-only probes localize most submission delay to the actor wake notification,
+      not its internal cause. Passing audio and packaged/windowed/cross-machine
+      proof remain pending. See `docs/restricted-live-audio-submission.md`.
       See `docs/silent-monitor-prewarm.md`.
 - [x] Remove intermediate RGBA packing allocations while preserving exact pixels, alpha,
       transparent-black padding, source identity, and immutable shared-cache ownership. Checked
@@ -496,7 +500,8 @@ Exit gate:
       seconds of video timeline coverage, including warmup. Their audio counters and
       early barrier observations remain evidence, but they do not prove sustained
       four-video load after that boundary. The test now extends video coverage and
-      asserts all four sources per submission; corrected qualification is pending.
+      asserts all four sources per submission. Corrected four-CPU qualification
+      exposes submission and audio failures; see `docs/restricted-live-audio-submission.md`.
       The exit remains open for realtime UI-present and cross-hardware proof; see
       `docs/phase1-sustained-soak.md` and `docs/phase1-live-audio.md`.
 - [x] A deliberately slow source cannot delay a ready source or the playback clock. The bounded

@@ -14082,6 +14082,8 @@ mod tests {
         );
         let clip_duration_ticks = requested_duration_seconds
             .saturating_add(PHASE1_LIVE_AUDIO_WARMUP_RESERVE_SECONDS)
+            // Leave room for a final poll/submit after a nearly exhausted warmup timeout.
+            .saturating_add(1)
             .saturating_mul(1_000_000)
             .min(i64::MAX as u64) as i64;
 
@@ -15357,7 +15359,7 @@ mod tests {
 
     #[test]
     fn phase1_multisource_duration_retains_four_video_targets_for_live_audio() {
-        const LIVE_AUDIO_FIXTURE_DURATION_TICKS: i64 = 40_000_000;
+        const LIVE_AUDIO_FIXTURE_DURATION_TICKS: i64 = 41_000_000;
         let sources = phase1_multisource_test_sources();
         let mut app = phase1_multisource_app_with_duration(
             &sources,
@@ -15367,7 +15369,7 @@ mod tests {
         app.editor.set_preview_quality(PreviewQuality::Full);
         app.editor.set_paused_preview_quality(PreviewQuality::Full);
 
-        for tick in [5_000_000, 30_000_000, 39_999_999] {
+        for tick in [5_000_000, 30_000_000, 40_999_999] {
             app.editor.set_playhead(nle_timeline::Tick(tick));
             assert_phase1_live_audio_preview(&preview_request(&app.editor), tick);
         }
