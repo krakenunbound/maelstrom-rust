@@ -40,8 +40,11 @@ Last updated: 2026-08-31
   and ambient `PATH` lookup is forbidden. Two new regressions pass with 806 release tests, both
   real-media proxy tests, strict Clippy, formatting, seven fixture contracts and seven Phase 0
   scenarios. No editor launch. See `docs/runtime-media-tools.md`.
-- [ ] Refresh the portable package with shared runtime-tool resolution and rerun its runtime,
-  static-import, launcher check-only and backup-integrity gates without launching the editor.
+- [x] Refresh the portable package from `5e39177` with shared runtime-tool resolution. The complete
+  previous 23-file package is archived and hash-verified; all 13 pinned runtime hashes, 15 AMD64
+  static-import inventories, FFmpeg/FFprobe loader checks and the exact full-path launcher's
+  check-only mode pass. Executable SHA-256 starts `C42458E86AE972F2`; only the executable and
+  package status changed. No editor launch; GUI smoke remains `not_run`.
 - [x] Rediscover matching local proxies after timeline placement/project reopen on the
   existing analysis worker; show ready but retain original-quality playback until explicit
   opt-in. Protect against stale projects, relinks and late replies after user actions.

@@ -29,3 +29,14 @@ a missing absolute executable and proves the interface action starts the worker 
 that path. At this stopping point, all 806 release workspace tests pass (24 ignored), as do the two
 explicit real-media proxy tests, strict Clippy, formatting, all seven fixture contracts, and all
 seven Phase 0 scenarios. No editor window was launched; packaged GUI qualification remains open.
+
+The portable package was rebuilt from source commit `5e391770aa5e568e047fe17055f8b4944687e224`.
+Its executable SHA-256 is
+`C42458E86AE972F2C985083A3B5686BA48F6CF5B2F098DDFC3F9059A5C23C72F`. The complete previous
+23-file package is retained in a verified ZIP with SHA-256
+`579FD305C30C29275523B0DDF575896F4C67DACC0D880E1F784D2C2F16D618AB`. Only
+`Maelstrom.exe` and `PACKAGE-STATUS.json` changed. All 13 pinned runtime copies match, all 15 PE
+files are AMD64 with only adjacent, present Windows-system, or identified API-set imports, both
+media-tool loader checks pass on a restricted path, and the exact full-path launcher passes
+`--verify-runtime`. The retained evidence is
+`artifacts/phase1-multisource/package-media-tools-5e39177/verification.json`. GUI smoke was not run.
