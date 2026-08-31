@@ -333,7 +333,12 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       fails both new regressions; the production policy is unchanged. These use the real
       export graph with a test MPEG-4 encoder, not proof of H.264/hardware/color parity.
       775 release tests, Clippy, fixture validation and the updated Phase 0 runner pass.
-      See `docs/shifted-vfr-export-parity.md`. This remains open pending broad real-media/
+      See `docs/shifted-vfr-export-parity.md`. Export now also preserves original
+      rational rates in background, video, still, title and matte clocks instead
+      of rounding to six decimals. Two regressions fail before/pass after; seven
+      live FFmpeg clock cases, 777 release tests, strict Clippy, fixture contracts
+      and the updated Phase 0 runner pass. Package rebuild remains pending.
+      See `docs/exact-export-frame-rate.md`. This remains open pending broad real-media/
       cross-backend proof across more codecs, reorder patterns, and containers.
 - [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX
       fixture exposed BT.709 frames being interpreted as BT.601 (4,644 differing RGBA bytes in a

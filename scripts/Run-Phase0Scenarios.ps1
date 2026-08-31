@@ -114,6 +114,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Shifted 10-bit VFR app regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-export --release vfr_export_tests -- --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted 10-bit VFR export source-identity regressions failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-export --release tests::real_ffmpeg_export_cadence_retains_exact_rational_time_base -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Exact rational export cadence regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::phase0_scenario_matrix -- --ignored --exact --test-threads=1
     $testExitCode = $LASTEXITCODE
 

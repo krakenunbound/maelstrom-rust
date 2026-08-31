@@ -6,6 +6,10 @@ cases, and no production timing, decoder, quality, or runtime setting was change
 This checkpoint adds regression coverage and integrates it into the existing
 Phase 0 scenario runner; it does not claim complete export or color parity.
 
+Subsequent production correction: [exact rational export clocks](exact-export-frame-rate.md)
+removes six-decimal frame-rate rounding. These source-identity checks still pass;
+the original checkpoint below describes its own test-only changes.
+
 ## Contract and evidence
 
 Both 320x180 fixtures contain eight 10-bit 4:2:2 frames with a 7-second container

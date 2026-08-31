@@ -9,6 +9,15 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Preserve exact rational export clocks for video, stills, titles, background
+  and transition mattes. Both new regressions fail on rounded decimal clocks and
+  pass on original fractions; seven live clock cases, 777 release tests, strict
+  Clippy, formatting, seven fixture contracts and the updated Phase 0 runner pass.
+  No resolution/audio/preview policy change. Parent-reviewed; independent agent
+  unavailable. See `docs/exact-export-frame-rate.md`.
+- [ ] Rebuild and qualify the portable package with the exact export-clock fix.
+  The existing `5DD49EF46A5BEBD6...` executable predates it; retain the old package
+  before rebuilding and do not launch the editor without explicit permission.
 - [x] Add 20 shifted ProRes/DNxHR VFR export checks: source heads, pretrimmed/slipped
   ranges, tail exclusion and final frames at 30 and 30000/1001 fps. All 88 output
   identities/counts/timestamps match; a nearest-frame mutation fails both tests.

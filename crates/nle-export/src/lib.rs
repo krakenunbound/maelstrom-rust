@@ -1264,7 +1264,9 @@ fn build_ffmpeg_job_with_title_assets(
     }
     let width = request.settings.size[0];
     let height = request.settings.size[1];
-    let fps = request.settings.fps[0] as f64 / request.settings.fps[1] as f64;
+    // Preserve the project ratio for every generated/input video clock. Decimal formatting
+    // changes NTSC-style rates before FFmpeg constructs its rational filter time bases.
+    let fps = format!("{}/{}", request.settings.fps[0], request.settings.fps[1]);
     let duration = tick_seconds(plan.duration);
     let mut args = vec![
         "-hide_banner".to_owned(),
@@ -1275,7 +1277,7 @@ fn build_ffmpeg_job_with_title_assets(
         "-t".to_owned(),
         duration.clone(),
         "-i".to_owned(),
-        format!("color=c=black:s={width}x{height}:r={fps:.6}"),
+        format!("color=c=black:s={width}x{height}:r={fps}"),
     ];
     let mut input_index = 1usize;
     let mut video_inputs = Vec::new();
@@ -1329,7 +1331,7 @@ fn build_ffmpeg_job_with_title_assets(
             "-loop".to_owned(),
             "1".to_owned(),
             "-framerate".to_owned(),
-            format!("{fps:.6}"),
+            fps.clone(),
             "-t".to_owned(),
             tick_seconds(asset.title.duration),
             "-i".to_owned(),
@@ -1345,7 +1347,12 @@ fn build_ffmpeg_job_with_title_assets(
     for track in &plan.video_tracks {
         for video in &track.clips {
             let layer = format!("vl{video_number}");
-            filters.push(video_filter(video_inputs[video_number], video, fps, &layer));
+            filters.push(video_filter(
+                video_inputs[video_number],
+                video,
+                &fps,
+                &layer,
+            ));
             let next = format!("vbase{}", video_number + 1);
             let (center_x, center_y) = quad_center(video.quad);
             let (overlay_x, overlay_y) = transition_overlay_position(video, center_x, center_y);
@@ -1357,7 +1364,7 @@ fn build_ffmpeg_job_with_title_assets(
             current_video = next;
             if let Some(matte) = &video.outgoing_matte {
                 let layer = format!("vdip{video_number}");
-                filters.push(dip_matte_filter(width, height, fps, matte, &layer));
+                filters.push(dip_matte_filter(width, height, &fps, matte, &layer));
                 let next = format!("vbase{}dip", video_number + 1);
                 filters.push(format!(
                     "[{current_video}][{layer}]overlay=eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
@@ -1371,7 +1378,7 @@ fn build_ffmpeg_job_with_title_assets(
     }
     for (number, (title, input)) in plan.titles.iter().zip(title_inputs).enumerate() {
         let layer = format!("title{number}");
-        filters.push(title_filter(input, &title.title, fps, &layer));
+        filters.push(title_filter(input, &title.title, &fps, &layer));
         let next = format!("vtitle{}", number + 1);
         let center_x = width as f32 * title.title.position_x;
         let center_y = height as f32 * title.title.position_y;
@@ -1433,10 +1440,10 @@ fn build_ffmpeg_job_with_title_assets(
     Ok((args, filters.join(";\n")))
 }
 
-fn title_filter(input: usize, title: &TitleOverlay, fps: f64, label: &str) -> String {
+fn title_filter(input: usize, title: &TitleOverlay, fps: &str, label: &str) -> String {
     let opacity = title_opacity_expression(title);
     format!(
-        "[{input}:v]format=rgba,fps={fps:.6},trim=duration={},setpts=PTS-STARTPTS,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*{opacity}',setpts=PTS+{}/TB[{label}]",
+        "[{input}:v]format=rgba,fps={fps},trim=duration={},setpts=PTS-STARTPTS,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*{opacity}',setpts=PTS+{}/TB[{label}]",
         tick_seconds(title.duration),
         tick_seconds(title.start),
     )
@@ -1516,7 +1523,7 @@ fn cleanup_title_assets(assets: &[TitleAsset]) {
     }
 }
 
-fn video_filter(input: usize, video: &VideoClipPlan, fps: f64, label: &str) -> String {
+fn video_filter(input: usize, video: &VideoClipPlan, fps: &str, label: &str) -> String {
     let transform = video.clip.transform.clamped();
     // The shared plan is authoritative for post-sizing/post-scale edge lengths. Export only
     // rounds at the raster boundary required by FFmpeg.
@@ -1544,12 +1551,12 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: f64, label: &str) -> S
     };
     let input_timing = if video.is_still {
         format!(
-            "setpts=PTS-STARTPTS,{still_prefix}fps={fps:.6},trim=duration={}",
+            "setpts=PTS-STARTPTS,{still_prefix}fps={fps},trim=duration={}",
             tick_seconds(video.input_duration)
         )
     } else {
         format!(
-            "fps={fps:.6}:round=up,trim=start=0:duration={},setpts=PTS-STARTPTS",
+            "fps={fps}:round=up,trim=start=0:duration={},setpts=PTS-STARTPTS",
             tick_seconds(video.input_duration)
         )
     };
@@ -1894,7 +1901,7 @@ fn transition_overlay_position(
     }
 }
 
-fn dip_matte_filter(width: u32, height: u32, fps: f64, matte: &DipMatte, label: &str) -> String {
+fn dip_matte_filter(width: u32, height: u32, fps: &str, matte: &DipMatte, label: &str) -> String {
     let opacity = if matte.outgoing_fade.duration.0 == 0 {
         "1".to_owned()
     } else {
@@ -1908,7 +1915,7 @@ fn dip_matte_filter(width: u32, height: u32, fps: f64, matte: &DipMatte, label: 
         format!("1-({outgoing})")
     };
     format!(
-        "color=c={}:s={width}x{height}:r={fps:.6},format=rgba,trim=duration={},setpts=PTS-STARTPTS,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*{opacity}',setpts=PTS+{}/TB[{label}]",
+        "color=c={}:s={width}x{height}:r={fps},format=rgba,trim=duration={},setpts=PTS-STARTPTS,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*{opacity}',setpts=PTS+{}/TB[{label}]",
         matte.color,
         tick_seconds(matte.duration),
         tick_seconds(matte.start),
@@ -2384,6 +2391,193 @@ mod tests {
             source_size: Some(PixelSize::new(640, 360)),
             has_audio: true,
         })
+    }
+
+    #[test]
+    fn export_graph_keeps_exact_frame_rate_for_every_visual_source() {
+        let mut editor = EditorState::new(Language::English, "Fractional export");
+        editor.add_media_paths(["left.mp4", "right.mp4", "still.png"].map(PathBuf::from));
+        let tracks: Vec<_> = editor
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .map(|track| track.id)
+            .collect();
+        let left = editor
+            .timeline
+            .insert_clip(
+                tracks[0],
+                MediaId(1),
+                Tick(0),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        let right = editor
+            .timeline
+            .insert_clip(
+                tracks[0],
+                MediaId(2),
+                Tick(2_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        editor
+            .timeline
+            .insert_clip(tracks[1], MediaId(3), Tick(0), Tick(1_000_000), Tick(0))
+            .unwrap();
+        editor
+            .timeline
+            .add_video_transition(tracks[0], left, right, Tick(1_000_000), 0.0)
+            .unwrap();
+        editor
+            .timeline
+            .add_title(Tick(0), Tick(1_000_000), "日本語")
+            .unwrap();
+        let mut snapshot = editor.snapshot();
+        snapshot.timeline.transitions[0].kind = VideoTransitionKind::DipToBlack;
+        for fps in [
+            [30, 1],
+            [24_000, 1_001],
+            [30_000, 1_001],
+            [60_000, 1_001],
+            [48_000, 2_002],
+            [u32::MAX, u32::MAX],
+        ] {
+            let request = ExportRequest {
+                snapshot: snapshot.clone(),
+                settings: ProjectSettings {
+                    fps,
+                    size: [320, 180],
+                },
+                ..request(&editor)
+            };
+            let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
+            let assets: Vec<_> = plan
+                .titles
+                .iter()
+                .map(|planned| TitleAsset {
+                    title: planned.title.clone(),
+                    path: PathBuf::from("title.tga"),
+                })
+                .collect();
+            let (args, graph) =
+                build_ffmpeg_job_with_title_assets(&request, &plan, H264Encoder::OpenH264, &assets)
+                    .unwrap();
+            let rate = format!("{}/{}", fps[0], fps[1]);
+            assert!(
+                args.iter()
+                    .any(|arg| arg == &format!("color=c=black:s=320x180:r={rate}")),
+                "background: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-framerate", rate.as_str()]),
+                "title input: {args:?}"
+            );
+            assert_eq!(
+                graph.matches(&format!("fps={rate}:round=up,")).count(),
+                2,
+                "video cadence: {graph}"
+            );
+            assert!(
+                graph.contains(&format!("loop=loop=-1:size=1:start=0,fps={rate},")),
+                "still cadence: {graph}"
+            );
+            assert!(
+                graph.contains(&format!("format=rgba,fps={rate},trim=duration=1.000000")),
+                "title cadence: {graph}"
+            );
+            assert!(
+                graph.contains(&format!("color=c=black:s=320x180:r={rate},")),
+                "matte cadence: {graph}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_ffmpeg_export_cadence_retains_exact_rational_time_base() {
+        let _guard = real_ffmpeg_test_guard();
+        let Some(root) = std::env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let ffmpeg = root.join("bin").join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let stderr = std::env::temp_dir().join(format!("maelstrom-rational-cadence-{nonce}.log"));
+        let _cleanup = TempFiles(vec![stderr.clone()]);
+        let mut editor = EditorState::new(Language::English, "Rational cadence");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        for (fps, reduced) in [
+            ([24_000, 1_001], [24_000, 1_001]),
+            ([30_000, 1_001], [30_000, 1_001]),
+            ([60_000, 1_001], [60_000, 1_001]),
+            ([25, 1], [25, 1]),
+            ([24_000, 1_007], [24_000, 1_007]),
+            ([48_000, 2_002], [24_000, 1_001]),
+            ([u32::MAX, u32::MAX], [1, 1]),
+        ] {
+            let request = ExportRequest {
+                settings: ProjectSettings {
+                    fps,
+                    size: [16, 16],
+                },
+                ..request(&editor)
+            };
+            let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
+            let (args, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+            let color = args
+                .iter()
+                .find(|arg| arg.starts_with("color=c=black:"))
+                .unwrap();
+            let cadence = graph
+                .split("fps=")
+                .nth(1)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap();
+            crate::audio_boundary_tests::run_ffmpeg_bounded(
+                &ffmpeg,
+                &[
+                    "-hide_banner".into(),
+                    "-nostdin".into(),
+                    "-loglevel".into(),
+                    "info".into(),
+                    "-f".into(),
+                    "lavfi".into(),
+                    "-i".into(),
+                    color.clone(),
+                    "-vf".into(),
+                    format!("fps={cadence},showinfo"),
+                    "-frames:v".into(),
+                    "2".into(),
+                    "-f".into(),
+                    "null".into(),
+                    "-".into(),
+                ],
+                &stderr,
+            );
+            let observed = fs::read_to_string(&stderr).unwrap();
+            let expected = format!(
+                "config in time_base: {}/{}, frame_rate: {}/{}",
+                reduced[1], reduced[0], reduced[0], reduced[1]
+            );
+            assert!(
+                observed.contains(&expected),
+                "fps={fps:?}: expected {expected}; actual {observed}"
+            );
+            println!("export cadence fps={fps:?}: {expected}");
+        }
     }
 
     fn brightness_contrast_node(
@@ -2933,7 +3127,7 @@ mod tests {
         );
         assert!(
             graph.contains(
-                "select='eq(n\\,0)',loop=loop=-1:size=1:start=0,fps=30.000000,trim=duration=1.500000,crop="
+                "select='eq(n\\,0)',loop=loop=-1:size=1:start=0,fps=30/1,trim=duration=1.500000,crop="
             ),
             "{graph}"
         );
@@ -3021,7 +3215,7 @@ mod tests {
         );
         assert!(
             graph.contains(
-                "fps=30.000000:round=up,trim=start=0:duration=2.500000,setpts=PTS-STARTPTS,crop="
+                "fps=30/1:round=up,trim=start=0:duration=2.500000,setpts=PTS-STARTPTS,crop="
             ),
             "{graph}"
         );
@@ -3089,7 +3283,7 @@ mod tests {
             ["-ss", "1.000000", "-noaccurate_seek", "-i"]
         );
         assert!(
-            graph.contains("color=c=black:s=1920x1080:r=30.000000"),
+            graph.contains("color=c=black:s=1920x1080:r=30/1"),
             "{graph}"
         );
         assert!(graph.contains("[vbase1][vdip0]overlay"), "{graph}");
