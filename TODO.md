@@ -14,7 +14,9 @@ Last updated: 2026-08-31
   reset retains bounded cleanup slots and rejects overlapping cache mutation until finished.
   One before-failing regression now passes; 804 release tests, both real-media proxy tests,
   strict Clippy, formatting, fixtures and Phase 0 scenarios pass. Parent-reviewed.
-- [ ] Refresh the portable package from the lifecycle checkpoint with a verified backup.
+- [x] Refresh the portable package from `9a17a2c`. Executable SHA-256 starts
+  `F61C4CA8A840478B`; full previous package backed up and hash-verified. Runtime/static-import
+  checks pass. No editor launch; GUI smoke remains `not_run`.
 - [x] Move proxy completion, enable and cache reconciliation file checks to one owned,
   bounded worker. Checking keeps original media active; late replies cannot undo newer
   choices, relinks, deletion or reset. Full-cache checks drain in batches instead of being
