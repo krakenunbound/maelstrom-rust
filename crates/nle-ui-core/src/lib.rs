@@ -10,10 +10,11 @@ pub use editor::{
     InvalidProjectFrameRate, LIVE_PIPELINE_TIMING_STAGE_COUNT, LivePipelineTiming,
     LivePipelineTimingRepresentative, LivePipelineTimingSample, LivePipelineTimingStage, MediaId,
     MediaKind, MediaMetadata, MediaStreamMetadata, MonitorFrame, PREVIEW_VIDEO_LAYER_COUNT,
-    PreviewQuality, ProjectFrameRate, ProxyMediaStatus, RuntimeDiagnostics, SourceFrameRate,
-    SourceFrameTimeIndex, TimelineCanvas, TimelineFlag, TimelineMarker, TimelineScrubGeometry,
-    TimelineTool, TimelineTrackDensity, TrackHeightSnapshot, VideoStripLayout, ViewerCanvas,
-    classify_path, show_editor, show_editor_with_canvases, show_editor_with_timeline_canvas,
+    PreviewQuality, PreviewSampling, ProjectFrameRate, ProxyMediaStatus, RuntimeDiagnostics,
+    SourceFrameRate, SourceFrameTimeIndex, TimelineCanvas, TimelineFlag, TimelineMarker,
+    TimelineScrubGeometry, TimelineTool, TimelineTrackDensity, TrackHeightSnapshot,
+    VideoStripLayout, ViewerCanvas, classify_path, show_editor, show_editor_with_canvases,
+    show_editor_with_timeline_canvas,
 };
 
 use egui::{

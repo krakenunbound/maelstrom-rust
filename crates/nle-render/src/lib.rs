@@ -33,7 +33,7 @@ pub use viewer_compositor::{
     MAX_COLOR_CORRECTIONS_PER_LAYER, ViewerColorCorrection, ViewerColorCurve,
     ViewerCompositorCallbackHandle, ViewerCompositorEncodeTiming, ViewerCompositorGpuTiming,
     ViewerCompositorRenderer, ViewerFrame, ViewerLayerPrimitive, ViewerPresentationEvidence,
-    ViewerRgbCurves, ViewerUploadError,
+    ViewerRgbCurves, ViewerSamplingQuality, ViewerUploadError,
 };
 
 const GPU_COMPLETION_SAMPLE_WINDOW: usize = 120;
@@ -167,6 +167,15 @@ impl HubRenderer {
     /// Shared retained input for the native project-monitor compositor.
     pub fn viewer_compositor(&self) -> ViewerCompositorCallbackHandle {
         self.viewer_compositor.clone()
+    }
+
+    /// Changes retained viewer-layer sampling. The next paint recomposes existing uploads.
+    pub fn set_viewer_sampling_quality(&mut self, sampling_quality: ViewerSamplingQuality) {
+        self.renderer
+            .callback_resources
+            .get_mut::<ViewerCompositorRenderer>()
+            .expect("viewer compositor renderer is registered")
+            .set_sampling_quality(sampling_quality);
     }
 
     /// Snapshot CPU command-encoding time for changed viewer compositions only.

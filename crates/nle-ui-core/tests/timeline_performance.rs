@@ -320,7 +320,7 @@ fn real_h264_scrub_stays_responsive_with_twenty_thousand_bars() {
                 height: 180,
                 is_scrubbing: true,
                 prewarm_scrub_workers: false,
-                high_quality_scaling: true,
+                scaling_quality: nle_decode::ScalingQuality::Bicubic,
                 progressive_scrub_frames: false,
                 source_frame_duration_tick: None,
                 acceleration: AccelerationPreference::Software,

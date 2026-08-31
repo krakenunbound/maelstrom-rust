@@ -37,6 +37,28 @@ pub struct ViewerCompositorGpuTiming {
     pub max_ms: f32,
 }
 
+/// Sampling used when a retained viewer layer is scaled during composition.
+///
+/// Bicubic is the default for monitor presentation. It is implemented in WGSL rather than
+/// relying on a WebGPU sampler mode, which only exposes nearest and linear filtering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewerSamplingQuality {
+    Nearest,
+    Bilinear,
+    #[default]
+    Bicubic,
+}
+
+impl ViewerSamplingQuality {
+    const fn shader_value(self) -> u32 {
+        match self {
+            Self::Nearest => 0,
+            Self::Bilinear => 1,
+            Self::Bicubic => 2,
+        }
+    }
+}
+
 /// Retained command-encoding evidence for the project-monitor presentation path.
 ///
 /// An upload serial identifies a successfully written layer texture. A painted serial is the
@@ -580,7 +602,8 @@ struct GpuColorCorrection {
 struct GpuColorCorrectionStack {
     corrections: [GpuColorCorrection; MAX_COLOR_CORRECTIONS_PER_LAYER],
     count: u32,
-    _padding: [u32; 3],
+    sampling_quality: u32,
+    _padding: [u32; 2],
 }
 
 #[repr(C)]
@@ -600,7 +623,8 @@ struct MatteVertex {
 
 struct LayerTexture {
     _texture: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
+    nearest_bind_group: wgpu::BindGroup,
+    bilinear_bind_group: wgpu::BindGroup,
     premultiply_bind_group: wgpu::BindGroup,
     premultiplied_view: wgpu::TextureView,
     _premultiplied_texture: wgpu::Texture,
@@ -648,7 +672,8 @@ pub struct ViewerCompositorRenderer {
     blit_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
     premultiply_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
+    nearest_sampler: wgpu::Sampler,
+    bilinear_sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
     matte_vertex_buffer: wgpu::Buffer,
     layers: [Option<LayerTexture>; MAX_COMPOSITE_LAYERS],
@@ -669,6 +694,7 @@ pub struct ViewerCompositorRenderer {
     input_generation: u64,
     applied_input_generation: u64,
     applied_frame_generation: u64,
+    sampling_quality: ViewerSamplingQuality,
     presentation: ViewerPresentationTracker,
     gpu_timing_enabled: bool,
     gpu_timestamps: Option<GpuTimestampResources>,
@@ -678,8 +704,17 @@ impl ViewerCompositorRenderer {
     pub fn new(device: &wgpu::Device, presentation_format: wgpu::TextureFormat) -> Self {
         let texture_layout = texture_layout(device);
         let premultiply_layout = premultiply_layout(device);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("viewer compositor sampler"),
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("viewer compositor nearest sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let bilinear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("viewer compositor bilinear sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
@@ -720,7 +755,8 @@ impl ViewerCompositorRenderer {
             blit_pipeline,
             texture_layout,
             premultiply_layout,
-            sampler,
+            nearest_sampler,
+            bilinear_sampler,
             vertex_buffer: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewer compositor vertices"),
                 size: (MAX_COMPOSITE_LAYERS
@@ -751,6 +787,7 @@ impl ViewerCompositorRenderer {
             input_generation: 0,
             applied_input_generation: u64::MAX,
             applied_frame_generation: u64::MAX,
+            sampling_quality: ViewerSamplingQuality::default(),
             presentation: ViewerPresentationTracker::default(),
             gpu_timing_enabled: false,
             gpu_timestamps: device
@@ -790,6 +827,19 @@ impl ViewerCompositorRenderer {
             Some(timestamps) => timestamps.timing.snapshot(true),
             None => ViewerCompositorGpuTiming::default(),
         }
+    }
+
+    /// Changes retained-layer sampling and schedules a composition without requiring a decode
+    /// upload or creating a shader/pipeline during playback.
+    pub fn set_sampling_quality(&mut self, sampling_quality: ViewerSamplingQuality) {
+        if self.sampling_quality != sampling_quality {
+            self.sampling_quality = sampling_quality;
+            self.input_generation = self.input_generation.wrapping_add(1);
+        }
+    }
+
+    pub fn sampling_quality(&self) -> ViewerSamplingQuality {
+        self.sampling_quality
     }
 
     pub fn gpu_timing_pending(&self) -> bool {
@@ -845,7 +895,8 @@ impl ViewerCompositorRenderer {
                     device,
                     &self.texture_layout,
                     &self.premultiply_layout,
-                    &self.sampler,
+                    &self.nearest_sampler,
+                    &self.bilinear_sampler,
                     width,
                     height,
                 )
@@ -973,7 +1024,8 @@ impl ViewerCompositorRenderer {
                     source,
                     frame.project_size,
                 );
-                let correction_stack = gpu_color_correction_stack(source);
+                let mut correction_stack = gpu_color_correction_stack(source);
+                correction_stack.sampling_quality = self.sampling_quality.shader_value();
                 let texture = self.layers[layer].as_ref().expect("checked layer texture");
                 queue.write_buffer(
                     &texture.correction_buffer,
@@ -1049,7 +1101,13 @@ impl ViewerCompositorRenderer {
                 continue;
             }
             let texture = self.layers[layer].as_ref().expect("checked layer texture");
-            pass.set_bind_group(0, &texture.bind_group, &[]);
+            let bind_group = match self.sampling_quality {
+                ViewerSamplingQuality::Nearest | ViewerSamplingQuality::Bicubic => {
+                    &texture.nearest_bind_group
+                }
+                ViewerSamplingQuality::Bilinear => &texture.bilinear_bind_group,
+            };
+            pass.set_bind_group(0, bind_group, &[]);
             let start = (layer * VERTICES_PER_LAYER) as u32;
             pass.draw(start..start + count, 0..1);
             pass.set_pipeline(&self.matte_pipeline);
@@ -1137,7 +1195,7 @@ impl ViewerCompositorRenderer {
         self.outputs = Some(self.take_outputs(size).unwrap_or_else(|| {
             self.pool_counters.output_allocations += 1;
             std::array::from_fn(|_| {
-                create_output(device, &self.texture_layout, &self.sampler, size)
+                create_output(device, &self.texture_layout, &self.bilinear_sampler, size)
             })
         }));
         self.output_size = Some(size);
@@ -1616,7 +1674,8 @@ fn create_layer_texture(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     premultiply_layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
+    nearest_sampler: &wgpu::Sampler,
+    bilinear_sampler: &wgpu::Sampler,
     width: u32,
     height: u32,
 ) -> LayerTexture {
@@ -1662,8 +1721,8 @@ fn create_layer_texture(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("viewer compositor input bind group"),
+    let nearest_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("viewer compositor nearest input bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
@@ -1672,7 +1731,29 @@ fn create_layer_texture(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::Sampler(nearest_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: correction_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: curve_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    let bilinear_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("viewer compositor bilinear input bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&premultiplied_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(bilinear_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -1694,13 +1775,14 @@ fn create_layer_texture(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::Sampler(nearest_sampler),
             },
         ],
     });
     LayerTexture {
         _texture: texture,
-        bind_group,
+        nearest_bind_group,
+        bilinear_bind_group,
         premultiply_bind_group,
         premultiplied_view,
         _premultiplied_texture: premultiplied_texture,
@@ -1844,7 +1926,8 @@ fn gpu_color_correction_stack(primitive: ViewerLayerPrimitive) -> GpuColorCorrec
     GpuColorCorrectionStack {
         corrections,
         count,
-        _padding: [0; 3],
+        sampling_quality: ViewerSamplingQuality::Nearest.shader_value(),
+        _padding: [0; 2],
     }
 }
 
@@ -2489,6 +2572,37 @@ mod tests {
     }
 
     #[test]
+    fn viewer_sampling_quality_defaults_to_manual_bicubic() {
+        assert_eq!(
+            ViewerSamplingQuality::default(),
+            ViewerSamplingQuality::Bicubic
+        );
+        assert_eq!(ViewerSamplingQuality::Nearest.shader_value(), 0);
+        assert_eq!(ViewerSamplingQuality::Bilinear.shader_value(), 1);
+        assert_eq!(ViewerSamplingQuality::Bicubic.shader_value(), 2);
+    }
+
+    #[test]
+    fn sampling_change_requires_composition_without_a_frame_change() {
+        let frame_generation = 17;
+        let input_generation = 29;
+        assert!(!composition_required(
+            false,
+            frame_generation,
+            frame_generation,
+            input_generation,
+            input_generation,
+        ));
+        assert!(composition_required(
+            false,
+            frame_generation,
+            frame_generation,
+            input_generation,
+            input_generation.wrapping_add(1),
+        ));
+    }
+
+    #[test]
     fn viewer_shader_premultiplies_in_the_current_encoded_srgb_space() {
         assert!(VIEWER_SHADER.contains("fn fs_premultiply"));
         assert!(VIEWER_SHADER.contains("straight.rgb * straight.a"));
@@ -2498,6 +2612,9 @@ mod tests {
         assert!(VIEWER_SHADER.contains("fn fs_blit_encoded"));
         assert!(VIEWER_SHADER.contains("srgb_to_linear(sample.rgb)"));
         assert!(VIEWER_SHADER.contains("input.color * input.opacity"));
+        assert!(VIEWER_SHADER.contains("fn texture_sample_bicubic"));
+        assert!(VIEWER_SHADER.contains("textureLoad(source_texture, texel, 0)"));
+        assert!(VIEWER_SHADER.contains("alpha_safe_premultiplied"));
     }
 
     #[test]
@@ -3048,7 +3165,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a real GPU adapter; run with --ignored --nocapture"]
-    fn gpu_filters_premultiplied_edges_without_dark_halos() {
+    fn gpu_bicubic_filters_premultiplied_edges_without_dark_halos() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -3067,6 +3184,7 @@ mod tests {
         .expect("premultiplied edge test device");
         let mut renderer =
             ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert_eq!(renderer.sampling_quality(), ViewerSamplingQuality::Bicubic);
         renderer
             .upload_layer_rgba(&device, &queue, 0, 2, 1, &[255, 0, 0, 255, 0, 0, 0, 0])
             .expect("straight-alpha edge upload");
@@ -3153,6 +3271,34 @@ mod tests {
             (125..=130).contains(&pixel[0]) && pixel[1] <= 1 && pixel[2] <= 1 && pixel[3] == 255,
             "filtered straight edge must contribute half-strength red over black, got {pixel:?}"
         );
+
+        let upload_serials = renderer.presentation_evidence().upload_serials;
+        renderer.set_sampling_quality(ViewerSamplingQuality::Bilinear);
+        let mut resample_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        assert!(renderer.prepare(
+            &device,
+            &queue,
+            &mut resample_encoder,
+            Some(frame),
+            1,
+            PixelSize::new(1, 1),
+        ));
+        queue.submit([resample_encoder.finish()]);
+        assert_eq!(
+            renderer.presentation_evidence().upload_serials,
+            upload_serials
+        );
+        let mut unchanged_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        assert!(!renderer.prepare(
+            &device,
+            &queue,
+            &mut unchanged_encoder,
+            Some(frame),
+            1,
+            PixelSize::new(1, 1),
+        ));
 
         let display = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("encoded edge presentation target"),

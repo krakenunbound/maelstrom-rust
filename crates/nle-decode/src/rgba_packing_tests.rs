@@ -103,17 +103,26 @@ fn monitor_frame_pack_keeps_identity_and_records_complete_packing_span() {
     let decoded = patterned_rgba(4, 2);
     let timings = DecoderStageTimingAccumulators::default();
     let mut scaler = Some(
-        ScalingContext::get(Pixel::RGBA, 4, 2, Pixel::RGBA, 4, 2, scaling_flags(true)).unwrap(),
+        ScalingContext::get(
+            Pixel::RGBA,
+            4,
+            2,
+            Pixel::RGBA,
+            4,
+            2,
+            scaling_flags(ScalingQuality::Bicubic),
+        )
+        .unwrap(),
     );
     let packed = pack_decoded_monitor_frame(
         &mut scaler,
         &mut Some((Pixel::RGBA, 4, 2)),
-        &mut Some(true),
+        &mut Some(ScalingQuality::Bicubic),
         &mut (4, 2),
         &decoded,
         false,
         (4, 4),
-        true,
+        ScalingQuality::Bicubic,
         7,
         83_334,
         83_333,

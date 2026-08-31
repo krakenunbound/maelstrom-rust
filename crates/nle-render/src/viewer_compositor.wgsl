@@ -14,7 +14,8 @@ struct ColorCorrection {
 struct ColorCorrectionStack {
     corrections: array<ColorCorrection, 8>,
     count: u32,
-    _padding_0: u32,
+    // 0 = nearest, 1 = bilinear, 2 = manually filtered bicubic.
+    sampling_quality: u32,
     _padding_1: u32,
     _padding_2: u32,
 };
@@ -118,9 +119,53 @@ fn apply_curve_lut(encoded: vec3<f32>, correction_index: u32) -> vec3<f32> {
     );
 }
 
+fn alpha_safe_premultiplied(sample: vec4<f32>) -> vec4<f32> {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    return vec4<f32>(clamp(sample.rgb, vec3<f32>(0.0), vec3<f32>(alpha)), alpha);
+}
+
+fn cubic_weight(distance: f32) -> f32 {
+    let x = abs(distance);
+    if (x <= 1.0) {
+        return ((1.5 * x - 2.5) * x * x) + 1.0;
+    }
+    if (x < 2.0) {
+        return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
+    }
+    return 0.0;
+}
+
+// WebGPU samplers support nearest and linear filtering only. The source is already
+// encoded-premultiplied, so filter all four components together and clamp Catmull-Rom's
+// overshoot back into the premultiplied-alpha-safe range before color correction.
+fn texture_sample_bicubic(uv: vec2<f32>) -> vec4<f32> {
+    let dimensions = textureDimensions(source_texture);
+    let sample_position = uv * vec2<f32>(dimensions) - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(sample_position));
+    let fraction = fract(sample_position);
+    let maximum = vec2<i32>(dimensions) - vec2<i32>(1);
+    var result = vec4<f32>(0.0);
+    for (var y = -1; y <= 2; y = y + 1) {
+        let weight_y = cubic_weight(f32(y) - fraction.y);
+        for (var x = -1; x <= 2; x = x + 1) {
+            let texel = clamp(base + vec2<i32>(x, y), vec2<i32>(0), maximum);
+            let weight = cubic_weight(f32(x) - fraction.x) * weight_y;
+            result += textureLoad(source_texture, texel, 0) * weight;
+        }
+    }
+    return alpha_safe_premultiplied(result);
+}
+
+fn sampled_compositor_texture(uv: vec2<f32>) -> vec4<f32> {
+    if (color_stack.sampling_quality == 2u) {
+        return texture_sample_bicubic(uv);
+    }
+    return alpha_safe_premultiplied(textureSample(source_texture, source_sampler, uv));
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let sample = textureSample(source_texture, source_sampler, input.uv);
+    let sample = sampled_compositor_texture(input.uv);
     let alpha = sample.a;
     // Composition textures contain premultiplied encoded-sRGB values. Color operations remain
     // defined on straight encoded color until the Phase 4 linear working-space migration.
@@ -170,7 +215,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_premultiply(input: VertexOutput) -> @location(0) vec4<f32> {
-    let straight = textureSample(source_texture, source_sampler, input.uv);
+    // This pass is a one-to-one upload prepass. textureLoad preserves exact texels instead of
+    // allowing monitor sampling quality to alter encoded source pixels before premultiplication.
+    let dimensions = textureDimensions(source_texture);
+    let texel = clamp(
+        vec2<i32>(input.position.xy),
+        vec2<i32>(0),
+        vec2<i32>(dimensions) - vec2<i32>(1),
+    );
+    let straight = textureLoad(source_texture, texel, 0);
     return vec4<f32>(straight.rgb * straight.a, straight.a);
 }
 

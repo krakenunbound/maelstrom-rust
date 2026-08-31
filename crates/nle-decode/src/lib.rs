@@ -596,6 +596,21 @@ pub enum AccelerationPreference {
     Software,
 }
 
+/// Sampling filter applied while producing the monitor raster.
+///
+/// This is part of a decoded frame's pixel identity. Changing it must never
+/// reuse cached pixels or a sticky FFmpeg scaling context from another mode.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub enum ScalingQuality {
+    /// Preserve source samples without interpolation.
+    Nearest,
+    /// Interpolate adjacent source samples.
+    Bilinear,
+    /// Use FFmpeg's bicubic interpolation for the monitor raster.
+    #[default]
+    Bicubic,
+}
+
 /// One latest-wins request for a monitor frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodeRequest {
@@ -613,8 +628,8 @@ pub struct DecodeRequest {
     pub is_scrubbing: bool,
     /// Warms the bounded random-access lane pool while the viewer is paused.
     pub prewarm_scrub_workers: bool,
-    /// Selects the higher-quality FFmpeg scaling filter for the monitor raster.
-    pub high_quality_scaling: bool,
+    /// Selects the FFmpeg sampling filter for the monitor raster.
+    pub scaling_quality: ScalingQuality,
     /// Publishes timed intermediate frames while a scrub traverses an inter-frame GOP.
     /// Frames between publication intervals remain decode-only and avoid scaling/copying work.
     pub progressive_scrub_frames: bool,
@@ -1947,7 +1962,7 @@ struct MonitorFrameCache {
     scrub_frames: HashMap<FrameStreamKey, BTreeMap<i64, FrameKey>>,
     scrub_order: VecDeque<(FrameStreamKey, i64)>,
     project_epoch: Option<u64>,
-    high_quality_scaling: Option<bool>,
+    scaling_quality: Option<ScalingQuality>,
     sources: HashMap<u32, PathBuf>,
 }
 
@@ -1972,7 +1987,7 @@ impl MonitorFrameCache {
             scrub_frames: HashMap::new(),
             scrub_order: VecDeque::new(),
             project_epoch: None,
-            high_quality_scaling: None,
+            scaling_quality: None,
             sources: HashMap::new(),
         }
     }
@@ -1989,7 +2004,7 @@ impl MonitorFrameCache {
         // FrameKey is shared with the generic cache and intentionally does not carry scaler
         // policy. Clearing at a scaler-policy transition prevents either quality from reusing
         // pixels produced by the other.
-        let scaling_changed = self.high_quality_scaling != Some(request.high_quality_scaling);
+        let scaling_changed = self.scaling_quality != Some(request.scaling_quality);
         let source_changed = self
             .sources
             .get(&request.media_id)
@@ -2007,7 +2022,7 @@ impl MonitorFrameCache {
         self.sources
             .entry(request.media_id)
             .or_insert_with(|| request.path.clone());
-        self.high_quality_scaling = Some(request.high_quality_scaling);
+        self.scaling_quality = Some(request.scaling_quality);
         reset_cache
     }
 
@@ -2020,7 +2035,7 @@ impl MonitorFrameCache {
         self.scrub_order.clear();
         self.sources.clear();
         self.project_epoch = None;
-        self.high_quality_scaling = None;
+        self.scaling_quality = None;
     }
 
     fn get(&mut self, key: &FrameKey) -> Option<FrameValue> {
@@ -2029,7 +2044,7 @@ impl MonitorFrameCache {
 
     fn accepts_request(&self, request: &DecodeRequest) -> bool {
         self.project_epoch == Some(request.cache_epoch)
-            && self.high_quality_scaling == Some(request.high_quality_scaling)
+            && self.scaling_quality == Some(request.scaling_quality)
             && self.sources.get(&request.media_id) == Some(&request.path)
     }
 
@@ -2530,7 +2545,7 @@ fn same_decode_generation(left: &DecodeRequest, right: &DecodeRequest) -> bool {
         && left.height == right.height
         && left.is_scrubbing == right.is_scrubbing
         && left.prewarm_scrub_workers == right.prewarm_scrub_workers
-        && left.high_quality_scaling == right.high_quality_scaling
+        && left.scaling_quality == right.scaling_quality
         && left.progressive_scrub_frames == right.progressive_scrub_frames
         && left.source_frame_duration_tick == right.source_frame_duration_tick
         && left.acceleration == right.acceleration
@@ -2965,7 +2980,7 @@ struct StickyMonitor {
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ScalingContext>,
     scaler_input: Option<(Pixel, u32, u32)>,
-    scaler_high_quality: Option<bool>,
+    scaler_quality: Option<ScalingQuality>,
     output_size: (u32, u32),
     scaled_size: (u32, u32),
     last_source_tick: Option<i64>,
@@ -3017,7 +3032,7 @@ impl StickyMonitor {
                     source_height,
                     width,
                     height,
-                    request.high_quality_scaling,
+                    request.scaling_quality,
                 )?;
                 (Some(scaler), scaled_size)
             }
@@ -3036,7 +3051,7 @@ impl StickyMonitor {
             decoder,
             scaler,
             scaler_input,
-            scaler_high_quality: Some(request.high_quality_scaling),
+            scaler_quality: Some(request.scaling_quality),
             output_size: (width, height),
             scaled_size,
             last_source_tick: None,
@@ -3053,7 +3068,7 @@ impl StickyMonitor {
         source_height: u32,
         width: u32,
         height: u32,
-        high_quality_scaling: bool,
+        scaling_quality: ScalingQuality,
     ) -> Result<(ScalingContext, (u32, u32)), String> {
         let scaled_size = fitted_size(source_width, source_height, width, height);
         let scaler = ScalingContext::get(
@@ -3063,7 +3078,7 @@ impl StickyMonitor {
             Pixel::RGBA,
             scaled_size.0,
             scaled_size.1,
-            scaling_flags(high_quality_scaling),
+            scaling_flags(scaling_quality),
         )
         .map_err(|error| format!("could not create RGBA scaler: {error}"))?;
         Ok((scaler, scaled_size))
@@ -3119,7 +3134,7 @@ impl StickyMonitor {
     ) -> Result<MonitorDecodeAttempt, String> {
         let (width, height, _) = bounded_dimensions(request.width, request.height);
         if self.output_size != (width, height)
-            || self.scaler_high_quality != Some(request.high_quality_scaling)
+            || self.scaler_quality != Some(request.scaling_quality)
         {
             if let Some((format, source_width, source_height)) = self.scaler_input {
                 let (scaler, scaled_size) = Self::make_scaler(
@@ -3128,7 +3143,7 @@ impl StickyMonitor {
                     source_height,
                     width,
                     height,
-                    request.high_quality_scaling,
+                    request.scaling_quality,
                 )?;
                 self.scaler = Some(scaler);
                 self.scaled_size = scaled_size;
@@ -3137,7 +3152,7 @@ impl StickyMonitor {
                     fitted_size(self.decoder.width(), self.decoder.height(), width, height);
             }
             self.output_size = (width, height);
-            self.scaler_high_quality = Some(request.high_quality_scaling);
+            self.scaler_quality = Some(request.scaling_quality);
         }
         let mut target = request.source_tick.max(0);
         let mut progress_target = target;
@@ -3209,7 +3224,7 @@ impl StickyMonitor {
         let decoder = &mut self.decoder;
         let scaler = &mut self.scaler;
         let scaler_input = &mut self.scaler_input;
-        let scaler_high_quality = &mut self.scaler_high_quality;
+        let scaler_quality = &mut self.scaler_quality;
         let scaled_size = &mut self.scaled_size;
         let mut last_tick = self.last_source_tick;
         let mut last_progress_published = None;
@@ -3300,12 +3315,12 @@ impl StickyMonitor {
                         let frame = pack_decoded_monitor_frame(
                             scaler,
                             scaler_input,
-                            scaler_high_quality,
+                            scaler_quality,
                             scaled_size,
                             &decoded,
                             transfer_hardware_frames,
                             output_size,
-                            request.high_quality_scaling,
+                            request.scaling_quality,
                             completed_request_id,
                             target,
                             source_tick,
@@ -3325,12 +3340,12 @@ impl StickyMonitor {
                 let frame = pack_decoded_monitor_frame(
                     scaler,
                     scaler_input,
-                    scaler_high_quality,
+                    scaler_quality,
                     scaled_size,
                     &decoded,
                     transfer_hardware_frames,
                     output_size,
-                    request.high_quality_scaling,
+                    request.scaling_quality,
                     completed_request_id,
                     target,
                     source_tick,
@@ -3396,12 +3411,12 @@ impl StickyMonitor {
                     let frame = pack_decoded_monitor_frame(
                         scaler,
                         scaler_input,
-                        scaler_high_quality,
+                        scaler_quality,
                         scaled_size,
                         &decoded,
                         transfer_hardware_frames,
                         output_size,
-                        request.high_quality_scaling,
+                        request.scaling_quality,
                         completed_request_id,
                         target,
                         source_tick,
@@ -3421,12 +3436,12 @@ impl StickyMonitor {
             let frame = pack_decoded_monitor_frame(
                 scaler,
                 scaler_input,
-                scaler_high_quality,
+                scaler_quality,
                 scaled_size,
                 &decoded,
                 transfer_hardware_frames,
                 output_size,
-                request.high_quality_scaling,
+                request.scaling_quality,
                 completed_request_id,
                 target,
                 source_tick,
@@ -3451,12 +3466,12 @@ impl StickyMonitor {
 fn pack_decoded_monitor_frame(
     scaler: &mut Option<ScalingContext>,
     scaler_input: &mut Option<(Pixel, u32, u32)>,
-    scaler_high_quality: &mut Option<bool>,
+    scaler_quality: &mut Option<ScalingQuality>,
     scaled_size: &mut (u32, u32),
     decoded: &Video,
     transfer_hardware_frames: bool,
     output_size: (u32, u32),
-    high_quality_scaling: bool,
+    scaling_quality: ScalingQuality,
     request_id: u64,
     target_tick: i64,
     source_tick: i64,
@@ -3465,12 +3480,12 @@ fn pack_decoded_monitor_frame(
     let rgba_frame = scale_monitor_frame(
         scaler,
         scaler_input,
-        scaler_high_quality,
+        scaler_quality,
         scaled_size,
         decoded,
         transfer_hardware_frames,
         output_size,
-        high_quality_scaling,
+        scaling_quality,
         stage_timings,
     )?;
     let rgba = {
@@ -3798,12 +3813,12 @@ unsafe extern "C" fn select_videotoolbox_format(
 fn scale_monitor_frame(
     scaler: &mut Option<ScalingContext>,
     scaler_input: &mut Option<(Pixel, u32, u32)>,
-    scaler_high_quality: &mut Option<bool>,
+    scaler_quality: &mut Option<ScalingQuality>,
     scaled_size: &mut (u32, u32),
     decoded: &Video,
     transfer_hardware_frame: bool,
     output_size: (u32, u32),
-    high_quality_scaling: bool,
+    scaling_quality: ScalingQuality,
     stage_timings: &DecoderStageTimingAccumulators,
 ) -> Result<Video, String> {
     let mut rgba_frame = Video::empty();
@@ -3833,7 +3848,7 @@ fn scale_monitor_frame(
         let required_scaled_size = fitted_size(input.1, input.2, output_size.0, output_size.1);
         if *scaler_input != Some(input)
             || *scaled_size != required_scaled_size
-            || *scaler_high_quality != Some(high_quality_scaling)
+            || *scaler_quality != Some(scaling_quality)
         {
             *scaler = Some(
                 ScalingContext::get(
@@ -3843,13 +3858,13 @@ fn scale_monitor_frame(
                     Pixel::RGBA,
                     required_scaled_size.0,
                     required_scaled_size.1,
-                    scaling_flags(high_quality_scaling),
+                    scaling_flags(scaling_quality),
                 )
                 .map_err(|error| format!("could not create RGBA scaler: {error}"))?,
             );
             *scaler_input = Some(input);
             *scaled_size = required_scaled_size;
-            *scaler_high_quality = Some(high_quality_scaling);
+            *scaler_quality = Some(scaling_quality);
         }
         {
             let _timer = StageTimer::new(&stage_timings.scaler);
@@ -3928,14 +3943,14 @@ fn configure_scaler_color(
     Ok(())
 }
 
-const fn scaling_flags(high_quality_scaling: bool) -> ScalingFlags {
+const fn scaling_flags(scaling_quality: ScalingQuality) -> ScalingFlags {
     // Unscaled planar YUV and hardware-transferred NV12 otherwise select different
     // RGB conversion shortcuts, including visibly different chroma-edge sampling.
     // Keep both layouts on the accurate path without changing resolution or filter.
-    if high_quality_scaling {
-        ScalingFlags::BICUBIC.union(ScalingFlags::ACCURATE_RND)
-    } else {
-        ScalingFlags::BILINEAR.union(ScalingFlags::ACCURATE_RND)
+    match scaling_quality {
+        ScalingQuality::Nearest => ScalingFlags::POINT.union(ScalingFlags::ACCURATE_RND),
+        ScalingQuality::Bilinear => ScalingFlags::BILINEAR.union(ScalingFlags::ACCURATE_RND),
+        ScalingQuality::Bicubic => ScalingFlags::BICUBIC.union(ScalingFlags::ACCURATE_RND),
     }
 }
 
@@ -4288,7 +4303,7 @@ mod tests {
             height: 30,
             is_scrubbing: false,
             prewarm_scrub_workers: false,
-            high_quality_scaling: true,
+            scaling_quality: ScalingQuality::Bicubic,
             progressive_scrub_frames: false,
             source_frame_duration_tick: None,
             acceleration: AccelerationPreference::Software,
@@ -4593,7 +4608,7 @@ mod tests {
         second_request.cache_epoch = 89;
         second_request.width = 80;
         second_request.height = 45;
-        second_request.high_quality_scaling = !second_request.high_quality_scaling;
+        second_request.scaling_quality = ScalingQuality::Bilinear;
         second
             .request(second_request.clone())
             .expect("second request");
@@ -5940,7 +5955,7 @@ mod tests {
             decoder,
             scaler: None,
             scaler_input: None,
-            scaler_high_quality: None,
+            scaler_quality: None,
             output_size,
             scaled_size,
             last_source_tick: None,
@@ -6261,7 +6276,7 @@ mod tests {
         );
 
         let mut distinct_policy = original.clone();
-        distinct_policy.high_quality_scaling = false;
+        distinct_policy.scaling_quality = ScalingQuality::Bilinear;
         assert!(cache.prepare_request(&distinct_policy));
         assert!(cache.get(&frame_cache_key(&distinct_policy, 0)).is_none());
     }
@@ -6312,9 +6327,9 @@ mod tests {
         ));
         assert!(cache.get(&key).is_some());
 
-        let mut changed = original.clone();
-        changed.high_quality_scaling = false;
-        assert!(cache.prepare_request(&changed));
+        let mut nearest = original.clone();
+        nearest.scaling_quality = ScalingQuality::Nearest;
+        assert!(cache.prepare_request(&nearest));
         assert!(cache.get(&key).is_none());
         assert!(!cache.insert_if_current(
             &original,
@@ -6323,22 +6338,37 @@ mod tests {
         ));
         assert!(cache.get(&key).is_none());
         assert!(cache.insert_if_current(
-            &changed,
+            &nearest,
             key,
             FrameValue::new(0, 40, 30, vec![2; 40 * 30 * 4].into()),
+        ));
+
+        let mut bilinear = original;
+        bilinear.scaling_quality = ScalingQuality::Bilinear;
+        assert!(cache.prepare_request(&bilinear));
+        assert!(cache.get(&key).is_none());
+        assert!(!cache.insert_if_current(
+            &nearest,
+            key,
+            FrameValue::new(0, 40, 30, vec![3; 40 * 30 * 4].into()),
         ));
     }
 
     #[test]
     fn scaler_policy_selects_requested_ffmpeg_filter() {
         assert_eq!(
-            scaling_flags(true),
-            ScalingFlags::BICUBIC.union(ScalingFlags::ACCURATE_RND)
+            scaling_flags(ScalingQuality::Nearest),
+            ScalingFlags::POINT.union(ScalingFlags::ACCURATE_RND)
         );
         assert_eq!(
-            scaling_flags(false),
+            scaling_flags(ScalingQuality::Bilinear),
             ScalingFlags::BILINEAR.union(ScalingFlags::ACCURATE_RND)
         );
+        assert_eq!(
+            scaling_flags(ScalingQuality::Bicubic),
+            ScalingFlags::BICUBIC.union(ScalingFlags::ACCURATE_RND)
+        );
+        assert_eq!(ScalingQuality::default(), ScalingQuality::Bicubic);
     }
 
     #[test]
@@ -6637,7 +6667,7 @@ mod tests {
         );
 
         let mut lower_quality_scaler = current.clone();
-        lower_quality_scaler.high_quality_scaling = false;
+        lower_quality_scaler.scaling_quality = ScalingQuality::Bilinear;
         assert!(
             !same_decode_generation(&current, &lower_quality_scaler),
             "a scaler-policy change must rebuild the sticky decoder generation"

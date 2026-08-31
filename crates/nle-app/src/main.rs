@@ -25,15 +25,16 @@ use nle_render::{
     HubRenderer, MAX_COLOR_CORRECTIONS_PER_LAYER, RectInstance, SplashRenderer, SplashRgba,
     TextureInstance, TexturedRect, TimelineRectCallbackHandle, TimelineTextureCallbackHandle,
     ViewerColorCorrection, ViewerColorCurve, ViewerCompositorCallbackHandle, ViewerFrame,
-    ViewerLayerPrimitive, ViewerRgbCurves,
+    ViewerLayerPrimitive, ViewerRgbCurves, ViewerSamplingQuality,
 };
 use nle_ui_core::{
     ActivePreviewDecoderBackend, ActivePreviewDiagnostic, ActivePreviewFallbackReason,
     ActivePreviewSourceKind, EditorAction, EditorProjectSnapshot, EditorState, HubAction,
     HubBackdrops, Language, LivePipelineTiming, LivePipelineTimingRepresentative,
     LivePipelineTimingSample, LivePipelineTimingStage, MediaKind, MonitorFrame, PreviewQuality,
-    ProjectFrameRate, ProjectHubState, ProxyMediaStatus, RuntimeDiagnostics, TimelineCanvas,
-    ViewerCanvas, classify_path, configure_fonts, show_editor_with_canvases, show_with_backdrops,
+    PreviewSampling, ProjectFrameRate, ProjectHubState, ProxyMediaStatus, RuntimeDiagnostics,
+    TimelineCanvas, ViewerCanvas, classify_path, configure_fonts, show_editor_with_canvases,
+    show_with_backdrops,
 };
 use winit::{
     application::ApplicationHandler,
@@ -1165,11 +1166,37 @@ struct MonitorRequestKey {
     height: u32,
     is_scrubbing: bool,
     prewarm_scrub_workers: bool,
-    high_quality_scaling: bool,
+    preview_sampling: PreviewSampling,
     selected_quality: PreviewQuality,
     resolved_quality: PreviewQuality,
     source_frame_rate: Option<nle_ui_core::SourceFrameRate>,
     source_frame_duration_tick: Option<i64>,
+}
+
+const fn decode_scaling_quality(sampling: PreviewSampling) -> nle_decode::ScalingQuality {
+    match sampling {
+        PreviewSampling::Nearest => nle_decode::ScalingQuality::Nearest,
+        PreviewSampling::Bilinear => nle_decode::ScalingQuality::Bilinear,
+        PreviewSampling::Bicubic => nle_decode::ScalingQuality::Bicubic,
+    }
+}
+
+const fn viewer_sampling_quality(sampling: PreviewSampling) -> ViewerSamplingQuality {
+    match sampling {
+        PreviewSampling::Nearest => ViewerSamplingQuality::Nearest,
+        PreviewSampling::Bilinear => ViewerSamplingQuality::Bilinear,
+        PreviewSampling::Bicubic => ViewerSamplingQuality::Bicubic,
+    }
+}
+
+/// The native compositor implements all three policies. The emergency egui texture path only
+/// exposes nearest/linear filtering, so bicubic retains its bicubic decoder raster and uses the
+/// closest available presentation filter instead of claiming an unsupported GPU path.
+fn fallback_texture_options(sampling: PreviewSampling) -> egui::TextureOptions {
+    match sampling {
+        PreviewSampling::Nearest => egui::TextureOptions::NEAREST,
+        PreviewSampling::Bilinear | PreviewSampling::Bicubic => egui::TextureOptions::LINEAR,
+    }
 }
 
 const fn active_preview_decoder_backend(
@@ -4380,9 +4407,11 @@ impl App {
             let primitives = context.tessellate(output.shapes, output.pixels_per_point);
             let measure_gpu_completion = self.screen == Screen::Editor
                 && (self.surface_submission_probe.is_some() || self.phase1_ui_probe.is_some());
+            let viewer_sampling = viewer_sampling_quality(self.editor.preview_sampling());
             let hub_renderer = self
                 .hub_renderer
                 .get_or_insert_with(|| HubRenderer::new(&device, config.format));
+            hub_renderer.set_viewer_sampling_quality(viewer_sampling);
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [config.width, config.height],
                 pixels_per_point: output.pixels_per_point,
@@ -6531,7 +6560,8 @@ impl App {
         );
         let [width, height] = preview.output_size;
         let acceleration = self.monitor_acceleration();
-        let high_quality_scaling = self.editor.high_quality_playback();
+        let preview_sampling = self.editor.preview_sampling();
+        let scaling_quality = decode_scaling_quality(preview_sampling);
         // Only the top visible source may fill background lanes while paused. Lower layers keep
         // their foreground decoder warm without multiplying speculative FFmpeg sessions.
         let prewarm_layer = (!self.editor.playing && !preview.is_scrubbing)
@@ -6610,8 +6640,8 @@ impl App {
                 || previous.is_some_and(|previous| previous.media_id != source.media_id);
             let output_changed = previous
                 .is_some_and(|previous| previous.width != width || previous.height != height);
-            let scaling_changed = previous
-                .is_some_and(|previous| previous.high_quality_scaling != high_quality_scaling);
+            let scaling_changed =
+                previous.is_some_and(|previous| previous.preview_sampling != preview_sampling);
             if source_changed || media_changed || output_changed || scaling_changed {
                 let _ = self.monitor_decoders[layer].cancel_pending();
                 self.invalidate_monitor_request(layer);
@@ -6637,7 +6667,7 @@ impl App {
                 height,
                 is_scrubbing: preview.is_scrubbing,
                 prewarm_scrub_workers: prewarm_layer == Some(layer),
-                high_quality_scaling,
+                preview_sampling,
                 selected_quality: preview.selected_quality,
                 resolved_quality: preview.resolved_quality,
                 source_frame_rate: source.source_frame_rate,
@@ -6702,7 +6732,7 @@ impl App {
                 height: key.height,
                 is_scrubbing: preview.is_scrubbing,
                 prewarm_scrub_workers: key.prewarm_scrub_workers,
-                high_quality_scaling,
+                scaling_quality,
                 progressive_scrub_frames: progressive_scrub_frames(&preview),
                 source_frame_duration_tick: monitor_source_frame_duration_tick(
                     source.source_frame_rate,
@@ -7177,22 +7207,20 @@ impl App {
         rgba: &[u8],
     ) -> bool {
         let native_uploaded = self.upload_native_viewer_layer(layer, width, height, rgba);
+        let texture_options = fallback_texture_options(self.editor.preview_sampling());
         let texture = self.monitor_textures[layer].get_or_insert_with(|| {
             let image = if native_uploaded {
                 egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 255])
             } else {
                 egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba)
             };
-            self.egui_context.load_texture(
-                format!("monitor-frame-{layer}"),
-                image,
-                egui::TextureOptions::LINEAR,
-            )
+            self.egui_context
+                .load_texture(format!("monitor-frame-{layer}"), image, texture_options)
         });
         if !native_uploaded {
             texture.set(
                 egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba),
-                egui::TextureOptions::LINEAR,
+                texture_options,
             );
         }
         self.editor.set_monitor_frame_for_layer(
@@ -9526,6 +9554,34 @@ mod tests {
     }
 
     #[test]
+    fn preview_sampling_maps_explicitly_across_decode_render_and_fallback_paths() {
+        for (sampling, decode, viewer, fallback) in [
+            (
+                PreviewSampling::Nearest,
+                nle_decode::ScalingQuality::Nearest,
+                ViewerSamplingQuality::Nearest,
+                egui::TextureOptions::NEAREST,
+            ),
+            (
+                PreviewSampling::Bilinear,
+                nle_decode::ScalingQuality::Bilinear,
+                ViewerSamplingQuality::Bilinear,
+                egui::TextureOptions::LINEAR,
+            ),
+            (
+                PreviewSampling::Bicubic,
+                nle_decode::ScalingQuality::Bicubic,
+                ViewerSamplingQuality::Bicubic,
+                egui::TextureOptions::LINEAR,
+            ),
+        ] {
+            assert_eq!(decode_scaling_quality(sampling), decode);
+            assert_eq!(viewer_sampling_quality(sampling), viewer);
+            assert_eq!(fallback_texture_options(sampling), fallback);
+        }
+    }
+
+    #[test]
     fn adaptive_preview_ignores_drag_time_proxy_turnaround() {
         assert!(adaptive_preview_can_observe(PreviewQuality::Auto, false));
         assert!(!adaptive_preview_can_observe(PreviewQuality::Auto, true));
@@ -10645,7 +10701,7 @@ mod tests {
             height: 1080,
             is_scrubbing: false,
             prewarm_scrub_workers: false,
-            high_quality_scaling: true,
+            preview_sampling: PreviewSampling::Bicubic,
             selected_quality: PreviewQuality::Full,
             resolved_quality: PreviewQuality::Full,
             source_frame_rate: nle_ui_core::SourceFrameRate::new(30, 1),
@@ -11585,7 +11641,7 @@ mod tests {
                     height: 1,
                     is_scrubbing: false,
                     prewarm_scrub_workers: false,
-                    high_quality_scaling: false,
+                    preview_sampling: PreviewSampling::Bilinear,
                     selected_quality: PreviewQuality::Full,
                     resolved_quality: PreviewQuality::Full,
                     source_frame_rate: None,
@@ -11869,7 +11925,7 @@ mod tests {
                 height: 1,
                 is_scrubbing: false,
                 prewarm_scrub_workers: false,
-                high_quality_scaling: false,
+                preview_sampling: PreviewSampling::Bilinear,
                 selected_quality: PreviewQuality::Full,
                 resolved_quality: PreviewQuality::Full,
                 source_frame_rate: None,
@@ -12591,7 +12647,7 @@ mod tests {
             height: 48,
             is_scrubbing: false,
             prewarm_scrub_workers: false,
-            high_quality_scaling: true,
+            scaling_quality: nle_decode::ScalingQuality::Bicubic,
             progressive_scrub_frames: false,
             source_frame_duration_tick: None,
             acceleration: nle_decode::AccelerationPreference::Software,
@@ -16992,7 +17048,7 @@ mod tests {
                             height: 90,
                             is_scrubbing: true,
                             prewarm_scrub_workers: false,
-                            high_quality_scaling: false,
+                            scaling_quality: nle_decode::ScalingQuality::Bilinear,
                             progressive_scrub_frames: true,
                             source_frame_duration_tick: Some(SOURCE_FRAME_DURATION_TICK),
                             acceleration: nle_decode::AccelerationPreference::Software,
@@ -17098,7 +17154,7 @@ mod tests {
                         height: 90,
                         is_scrubbing: false,
                         prewarm_scrub_workers: false,
-                        high_quality_scaling: false,
+                        scaling_quality: nle_decode::ScalingQuality::Bilinear,
                         progressive_scrub_frames: false,
                         source_frame_duration_tick: Some(33_367),
                         acceleration: nle_decode::AccelerationPreference::Software,
@@ -17136,7 +17192,7 @@ mod tests {
                         height: 90,
                         is_scrubbing: false,
                         prewarm_scrub_workers: false,
-                        high_quality_scaling: false,
+                        scaling_quality: nle_decode::ScalingQuality::Bilinear,
                         progressive_scrub_frames: false,
                         source_frame_duration_tick: Some(33_367),
                         acceleration: nle_decode::AccelerationPreference::Software,
@@ -17467,7 +17523,7 @@ mod tests {
                                     height: FRAME_HEIGHT,
                                     is_scrubbing: false,
                                     prewarm_scrub_workers: false,
-                                    high_quality_scaling: false,
+                                    scaling_quality: nle_decode::ScalingQuality::Bilinear,
                                     progressive_scrub_frames: false,
                                     source_frame_duration_tick: Some(33_367),
                                     acceleration: nle_decode::AccelerationPreference::Software,

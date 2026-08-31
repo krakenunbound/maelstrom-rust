@@ -729,7 +729,7 @@ fn scrub_request(path: std::path::PathBuf, request_id: u64) -> DecodeRequest {
         height: 48,
         is_scrubbing: false,
         prewarm_scrub_workers: false,
-        high_quality_scaling: true,
+        scaling_quality: ScalingQuality::Bicubic,
         progressive_scrub_frames: false,
         source_frame_duration_tick: Some(33_334),
         acceleration: AccelerationPreference::Software,
@@ -1131,10 +1131,11 @@ fn scaler_color_metadata_changes_match_independent_cli_reference() {
     for (plane, value) in [100, 150, 200].into_iter().enumerate() {
         decoded.data_mut(plane).fill(value);
     }
-    let (context, size) = StickyMonitor::make_scaler(Pixel::YUV444P, 8, 8, 8, 8, true).unwrap();
+    let (context, size) =
+        StickyMonitor::make_scaler(Pixel::YUV444P, 8, 8, 8, 8, ScalingQuality::Bicubic).unwrap();
     let mut scaler = Some(context);
     let mut scaler_input = Some((Pixel::YUV444P, 8, 8));
-    let mut quality = Some(true);
+    let mut quality = Some(ScalingQuality::Bicubic);
     let mut scaled_size = size;
     let timings = DecoderStageTimingAccumulators::default();
     let mut results = Vec::new();
@@ -1157,7 +1158,7 @@ fn scaler_color_metadata_changes_match_independent_cli_reference() {
             &decoded,
             false,
             (8, 8),
-            true,
+            ScalingQuality::Bicubic,
             &timings,
         )
         .unwrap();
@@ -1230,7 +1231,8 @@ fn scaler_color_metadata_changes_match_independent_cli_reference() {
     }
     jpeg.set_color_space(Space::BT709);
     jpeg.set_color_range(Range::Unspecified);
-    let (context, size) = StickyMonitor::make_scaler(Pixel::YUVJ444P, 8, 8, 8, 8, true).unwrap();
+    let (context, size) =
+        StickyMonitor::make_scaler(Pixel::YUVJ444P, 8, 8, 8, 8, ScalingQuality::Bicubic).unwrap();
     scaler = Some(context);
     scaler_input = Some((Pixel::YUVJ444P, 8, 8));
     scaled_size = size;
@@ -1242,7 +1244,7 @@ fn scaler_color_metadata_changes_match_independent_cli_reference() {
         &jpeg,
         false,
         (8, 8),
-        true,
+        ScalingQuality::Bicubic,
         &timings,
     )
     .unwrap();
@@ -1256,16 +1258,17 @@ fn scaler_color_setup_preserves_rgb_pixels_and_alpha() {
         pixel.copy_from_slice(&[23, 151, 202, 97]);
     }
     let expected = copy_rgba_frame(&decoded, 8, 8).unwrap();
-    let (context, mut size) = StickyMonitor::make_scaler(Pixel::RGBA, 8, 8, 8, 8, true).unwrap();
+    let (context, mut size) =
+        StickyMonitor::make_scaler(Pixel::RGBA, 8, 8, 8, 8, ScalingQuality::Bicubic).unwrap();
     let converted = scale_monitor_frame(
         &mut Some(context),
         &mut Some((Pixel::RGBA, 8, 8)),
-        &mut Some(true),
+        &mut Some(ScalingQuality::Bicubic),
         &mut size,
         &decoded,
         false,
         (8, 8),
-        true,
+        ScalingQuality::Bicubic,
         &DecoderStageTimingAccumulators::default(),
     )
     .unwrap();

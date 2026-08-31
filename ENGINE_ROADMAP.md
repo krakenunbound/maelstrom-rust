@@ -665,7 +665,15 @@ Replace “topmost clip wins” with a generation-aware retained compositor.
       Phase 4 linear working space, texture pooling, memory-pressure or cross-adapter gates. See
       `docs/premultiplied-alpha.md`.
 - [x] Add still-image layers with bounded texture downscaling.
-- [ ] Add nearest/bilinear/bicubic preview sampling options where supported.
+- [x] Add nearest/bilinear/bicubic preview sampling options where supported. The Bicubic default is
+      independent from moving/paused/Auto resolution and export; legacy projects migrate the old
+      high-quality boolean. Monitor requests, decoded-frame caches and sticky/hardware-transfer
+      scalers carry explicit FFmpeg point/bilinear/bicubic identity. The retained viewer uses
+      nearest/linear samplers plus a manual alpha-safe Catmull-Rom shader, with setting-only
+      recomposition and no upload or pipeline rebuild. EN/JA state/migration, cache/scaler, WGSL,
+      full release workspace, strict Clippy and real-GPU edge/readback regressions pass. Practical
+      four-layer 4K, physical scanout and broad cross-adapter performance remain open. See
+      `docs/preview-sampling.md`.
 - [x] Double-buffer viewer outputs so graph execution never blocks timeline drawing.
 - [x] Reuse compiled pipelines and bind groups; no shader/pipeline compilation during playback.
 - [x] Report composite time, active layer count, and selected preview scale. The bilingual live

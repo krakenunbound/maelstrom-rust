@@ -355,7 +355,7 @@ mod tests {
             Pixel::RGBA,
             1_920,
             1_080,
-            crate::scaling_flags(true),
+            crate::scaling_flags(crate::ScalingQuality::Bicubic),
         )
         .unwrap();
         let actual_threads = scaler.selected_thread_count();

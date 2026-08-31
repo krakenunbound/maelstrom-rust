@@ -9,6 +9,15 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
+  EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
+  part of monitor request, cache, sticky scaler and hardware-transfer identity without changing
+  playback resolution or export. FFmpeg uses explicit point/bilinear/bicubic filters; the retained
+  viewer uses nearest/linear samplers or a manual alpha-safe Catmull-Rom shader and recomposes an
+  existing upload when the setting changes. Focused migration/cache/WGSL tests, the full release
+  workspace, strict Clippy and a real-GPU bicubic edge/readback gate pass. Practical four-layer 4K,
+  physical scanout and broad cross-adapter performance remain open. See
+  `docs/preview-sampling.md`.
 - [x] Bound project-monitor resource churn with exact-size layer/output reuse. The free pool shares
   a 32 MiB logical-payload cap, four-layer and one-output-pair entry limits, oldest eviction,
   oversize rejection, and a full-clear purge. Fixed CPU command scratch is retained; the compositor

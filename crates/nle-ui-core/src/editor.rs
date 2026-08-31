@@ -294,7 +294,11 @@ pub struct EditorViewSnapshot {
     /// User-selected resolution used when playback is paused.
     #[serde(default)]
     pub paused_preview_quality: PreviewQuality,
-    /// Keep the normal playback pipeline at its full-quality path unless the user opts out.
+    /// The sampling method selected for preview composition. `None` identifies documents saved
+    /// before this preference existed so restore can migrate their legacy boolean correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_sampling: Option<PreviewSampling>,
+    /// Legacy compatibility mirror for projects and callers that predate `preview_sampling`.
     #[serde(default = "default_true")]
     pub high_quality_playback: bool,
     #[serde(default)]
@@ -336,6 +340,16 @@ impl PreviewQuality {
             Self::Eighth => 8,
         }
     }
+}
+
+/// Sampling used when the preview compositor scales decoded frames. This is independent from
+/// moving/paused decode resolution and never changes export sampling.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub enum PreviewSampling {
+    Nearest,
+    Bilinear,
+    #[default]
+    Bicubic,
 }
 
 fn default_true() -> bool {
@@ -1469,8 +1483,8 @@ pub struct EditorState {
     preview_quality: PreviewQuality,
     /// Durable user preference for the paused viewer decode resolution.
     paused_preview_quality: PreviewQuality,
-    /// Durable opt-in/out for the high-quality playback path.
-    high_quality_playback: bool,
+    /// Durable sampling method for preview composition.
+    preview_sampling: PreviewSampling,
     /// Runtime-only resolution selected by the adaptive decode policy when Auto is selected.
     auto_preview_quality: PreviewQuality,
     pub track_density: TimelineTrackDensity,
@@ -1624,7 +1638,7 @@ impl EditorState {
             show_audio_waveforms: true,
             preview_quality: PreviewQuality::Full,
             paused_preview_quality: PreviewQuality::Full,
-            high_quality_playback: true,
+            preview_sampling: PreviewSampling::Bicubic,
             auto_preview_quality: PreviewQuality::Full,
             track_density: TimelineTrackDensity::Normal,
             markers: Vec::new(),
@@ -2177,7 +2191,8 @@ impl EditorState {
                 preview_quality: self.preview_quality,
                 preview_quality_is_explicit: true,
                 paused_preview_quality: self.paused_preview_quality,
-                high_quality_playback: self.high_quality_playback,
+                preview_sampling: Some(self.preview_sampling),
+                high_quality_playback: self.high_quality_playback(),
                 track_density: self.track_density,
                 markers: self.markers.clone(),
                 flags: self.flags.clone(),
@@ -2372,7 +2387,13 @@ impl EditorState {
             snapshot.view.preview_quality
         };
         state.paused_preview_quality = snapshot.view.paused_preview_quality;
-        state.high_quality_playback = snapshot.view.high_quality_playback;
+        state.preview_sampling = snapshot.view.preview_sampling.unwrap_or({
+            if snapshot.view.high_quality_playback {
+                PreviewSampling::Bicubic
+            } else {
+                PreviewSampling::Bilinear
+            }
+        });
         state.track_density = snapshot.view.track_density;
         state.markers = snapshot
             .view
@@ -2927,19 +2948,33 @@ impl EditorState {
         true
     }
 
-    /// Whether playback uses the high-quality path.
-    pub const fn high_quality_playback(&self) -> bool {
-        self.high_quality_playback
+    /// The persisted preview sampling method.
+    pub const fn preview_sampling(&self) -> PreviewSampling {
+        self.preview_sampling
     }
 
-    /// Stores the high-quality playback preference.
-    pub fn set_high_quality_playback(&mut self, enabled: bool) -> bool {
-        if self.high_quality_playback == enabled {
+    /// Selects the durable preview sampling method without changing decode resolution.
+    pub fn set_preview_sampling(&mut self, sampling: PreviewSampling) -> bool {
+        if self.preview_sampling == sampling {
             return false;
         }
-        self.high_quality_playback = enabled;
+        self.preview_sampling = sampling;
         self.mark_durable_edit();
         true
+    }
+
+    /// Legacy compatibility shim. Only bicubic sampling represents the former high-quality path.
+    pub const fn high_quality_playback(&self) -> bool {
+        matches!(self.preview_sampling, PreviewSampling::Bicubic)
+    }
+
+    /// Legacy compatibility shim mapping enabled to bicubic and disabled to bilinear.
+    pub fn set_high_quality_playback(&mut self, enabled: bool) -> bool {
+        self.set_preview_sampling(if enabled {
+            PreviewSampling::Bicubic
+        } else {
+            PreviewSampling::Bilinear
+        })
     }
 
     /// Updates Auto's runtime decision without changing the project document.
@@ -5918,16 +5953,10 @@ fn playback_menu(ui: &mut Ui, state: &mut EditorState) {
             },
         );
         ui.separator();
-        let mut high_quality = state.high_quality_playback();
-        if ui
-            .checkbox(
-                &mut high_quality,
-                menu_text(state.language, "High Quality Playback", "高品質再生"),
-            )
-            .changed()
-        {
-            state.set_high_quality_playback(high_quality);
-        }
+        ui.menu_button(
+            menu_text(state.language, "Sampling Quality", "サンプリング品質"),
+            |ui| preview_sampling_menu(ui, state),
+        );
         ui.separator();
         if ui
             .button(menu_text(
@@ -6007,6 +6036,31 @@ fn preview_quality_menu(ui: &mut Ui, state: &mut EditorState, paused: bool) {
             ui.close();
         }
     }
+}
+
+fn preview_sampling_menu(ui: &mut Ui, state: &mut EditorState) {
+    let selected = state.preview_sampling();
+    for &sampling in preview_sampling_menu_choices() {
+        if ui
+            .selectable_label(
+                selected == sampling,
+                preview_sampling_option_label(state.language, sampling),
+            )
+            .on_hover_text(preview_sampling_tooltip(state.language, sampling))
+            .clicked()
+        {
+            state.set_preview_sampling(sampling);
+            ui.close();
+        }
+    }
+}
+
+const fn preview_sampling_menu_choices() -> &'static [PreviewSampling] {
+    &[
+        PreviewSampling::Nearest,
+        PreviewSampling::Bilinear,
+        PreviewSampling::Bicubic,
+    ]
 }
 
 const fn preview_quality_menu_choices(paused: bool) -> &'static [PreviewQuality] {
@@ -7588,6 +7642,36 @@ fn preview_quality_tooltip(language: Language, quality: PreviewQuality) -> &'sta
         }
         (Language::Japanese, PreviewQuality::Eighth) => {
             "最大限の応答性のため1/8解像度でデコードします。"
+        }
+    }
+}
+
+fn preview_sampling_option_label(language: Language, sampling: PreviewSampling) -> &'static str {
+    match (language, sampling) {
+        (Language::English, PreviewSampling::Nearest) => "Nearest",
+        (Language::Japanese, PreviewSampling::Nearest) => "ニアレスト",
+        (Language::English, PreviewSampling::Bilinear) => "Bilinear",
+        (Language::Japanese, PreviewSampling::Bilinear) => "バイリニア",
+        (Language::English, PreviewSampling::Bicubic) => "Bicubic",
+        (Language::Japanese, PreviewSampling::Bicubic) => "バイキュービック",
+    }
+}
+
+fn preview_sampling_tooltip(language: Language, sampling: PreviewSampling) -> &'static str {
+    match (language, sampling) {
+        (Language::English, PreviewSampling::Nearest) => "Fastest scaling with crisp pixel edges.",
+        (Language::Japanese, PreviewSampling::Nearest) => {
+            "最速で、ピクセルの輪郭をくっきり表示します。"
+        }
+        (Language::English, PreviewSampling::Bilinear) => "Balanced smooth preview scaling.",
+        (Language::Japanese, PreviewSampling::Bilinear) => {
+            "滑らかさと速度のバランスがよい表示です。"
+        }
+        (Language::English, PreviewSampling::Bicubic) => {
+            "Highest-quality smooth preview. Compatibility mode may use a simpler display filter."
+        }
+        (Language::Japanese, PreviewSampling::Bicubic) => {
+            "最も高品質で滑らかなプレビューです。互換表示では簡易フィルターを使用する場合があります。"
         }
     }
 }
@@ -22848,19 +22932,24 @@ mod tests {
     }
 
     #[test]
-    fn playback_quality_preferences_persist_and_legacy_fields_default_to_full() {
+    fn playback_preferences_persist_and_legacy_resolution_fields_default_to_full() {
         let mut editor = EditorState::new(Language::English, "Preview quality");
         assert!(editor.set_preview_quality(PreviewQuality::Eighth));
         assert!(editor.set_paused_preview_quality(PreviewQuality::Half));
-        assert!(editor.set_high_quality_playback(false));
+        assert!(editor.set_preview_sampling(PreviewSampling::Nearest));
         let snapshot = editor.snapshot();
         assert_eq!(snapshot.view.preview_quality, PreviewQuality::Eighth);
         assert_eq!(snapshot.view.paused_preview_quality, PreviewQuality::Half);
+        assert_eq!(
+            snapshot.view.preview_sampling,
+            Some(PreviewSampling::Nearest)
+        );
         assert!(!snapshot.view.high_quality_playback);
         let restored =
             EditorState::restore(Language::English, "Preview quality", snapshot).unwrap();
         assert_eq!(restored.preview_quality(), PreviewQuality::Eighth);
         assert_eq!(restored.paused_preview_quality(), PreviewQuality::Half);
+        assert_eq!(restored.preview_sampling(), PreviewSampling::Nearest);
         assert!(!restored.high_quality_playback());
 
         let mut legacy_json = serde_json::to_value(editor.snapshot()).unwrap();
@@ -22879,6 +22968,10 @@ mod tests {
         legacy_json["view"]
             .as_object_mut()
             .unwrap()
+            .remove("preview_sampling");
+        legacy_json["view"]
+            .as_object_mut()
+            .unwrap()
             .remove("high_quality_playback");
         let legacy: EditorProjectSnapshot = serde_json::from_value(legacy_json).unwrap();
         let restored = EditorState::restore(Language::English, "Preview quality", legacy).unwrap();
@@ -22889,6 +22982,7 @@ mod tests {
             restored.resolved_paused_preview_quality(),
             PreviewQuality::Full
         );
+        assert_eq!(restored.preview_sampling(), PreviewSampling::Bicubic);
         assert!(restored.high_quality_playback());
 
         let mut legacy_auto_json = serde_json::to_value(editor.snapshot()).unwrap();
@@ -22910,25 +23004,92 @@ mod tests {
     }
 
     #[test]
-    fn paused_quality_and_high_quality_playback_are_independent_durable_preferences() {
+    fn preview_sampling_is_independent_from_resolution_and_auto_preferences() {
         let mut editor = EditorState::new(Language::English, "Playback preferences");
         editor.monitor_decode_size = quantize_monitor_size(641.0, 361.0, 1.0);
         let generation = editor.durable_generation();
 
         assert_eq!(editor.preview_quality(), PreviewQuality::Full);
         assert_eq!(editor.paused_preview_quality(), PreviewQuality::Full);
+        assert_eq!(editor.preview_sampling(), PreviewSampling::Bicubic);
         assert!(editor.high_quality_playback());
-        assert!(editor.set_preview_quality(PreviewQuality::Half));
+        assert!(editor.set_preview_quality(PreviewQuality::Auto));
         assert!(editor.set_paused_preview_quality(PreviewQuality::Quarter));
-        assert!(editor.set_high_quality_playback(false));
+        assert!(editor.set_auto_preview_quality(PreviewQuality::Half));
+        assert!(editor.set_preview_sampling(PreviewSampling::Nearest));
         assert_eq!(editor.durable_generation(), generation + 3);
         assert_eq!(editor.monitor_playback_decode_size_hint(), (320, 176));
         assert_eq!(editor.monitor_scrub_decode_size_hint(), (320, 176));
         assert_eq!(editor.monitor_paused_decode_size_hint(), (160, 88));
-        assert!(!editor.set_preview_quality(PreviewQuality::Half));
+        assert_eq!(editor.preview_quality(), PreviewQuality::Auto);
+        assert_eq!(editor.resolved_preview_quality(), PreviewQuality::Half);
+        assert_eq!(editor.paused_preview_quality(), PreviewQuality::Quarter);
+        assert_eq!(editor.preview_sampling(), PreviewSampling::Nearest);
+        assert!(!editor.set_preview_quality(PreviewQuality::Auto));
         assert!(!editor.set_paused_preview_quality(PreviewQuality::Quarter));
-        assert!(!editor.set_high_quality_playback(false));
+        assert!(!editor.set_preview_sampling(PreviewSampling::Nearest));
         assert_eq!(editor.durable_generation(), generation + 3);
+    }
+
+    #[test]
+    fn legacy_high_quality_playback_migrates_to_sampling_when_missing() {
+        for (legacy_high_quality, expected) in [
+            (true, PreviewSampling::Bicubic),
+            (false, PreviewSampling::Bilinear),
+        ] {
+            let mut legacy_json = serde_json::to_value(
+                EditorState::new(Language::English, "Legacy sampling").snapshot(),
+            )
+            .unwrap();
+            legacy_json["view"]["high_quality_playback"] = serde_json::json!(legacy_high_quality);
+            legacy_json["view"]
+                .as_object_mut()
+                .unwrap()
+                .remove("preview_sampling");
+            let legacy: EditorProjectSnapshot = serde_json::from_value(legacy_json).unwrap();
+            let restored =
+                EditorState::restore(Language::English, "Legacy sampling", legacy).unwrap();
+            assert_eq!(restored.preview_sampling(), expected);
+            assert_eq!(restored.high_quality_playback(), legacy_high_quality);
+        }
+    }
+
+    #[test]
+    fn high_quality_playback_compatibility_shims_map_bicubic_and_bilinear() {
+        let mut editor = EditorState::new(Language::English, "Sampling shim");
+        assert_eq!(editor.preview_sampling(), PreviewSampling::Bicubic);
+        assert!(editor.high_quality_playback());
+        assert!(editor.set_high_quality_playback(false));
+        assert_eq!(editor.preview_sampling(), PreviewSampling::Bilinear);
+        assert!(!editor.high_quality_playback());
+        assert!(editor.set_high_quality_playback(true));
+        assert_eq!(editor.preview_sampling(), PreviewSampling::Bicubic);
+        assert!(editor.high_quality_playback());
+    }
+
+    #[test]
+    fn preview_sampling_labels_and_choices_are_localized() {
+        assert_eq!(
+            preview_sampling_menu_choices(),
+            &[
+                PreviewSampling::Nearest,
+                PreviewSampling::Bilinear,
+                PreviewSampling::Bicubic,
+            ]
+        );
+        assert_eq!(
+            preview_sampling_option_label(Language::English, PreviewSampling::Nearest),
+            "Nearest"
+        );
+        assert_eq!(
+            preview_sampling_option_label(Language::Japanese, PreviewSampling::Bilinear),
+            "バイリニア"
+        );
+        assert_eq!(
+            preview_sampling_option_label(Language::English, PreviewSampling::Bicubic),
+            "Bicubic"
+        );
+        assert!(!preview_sampling_tooltip(Language::Japanese, PreviewSampling::Bicubic).is_empty());
     }
 
     #[test]

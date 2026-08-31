@@ -205,7 +205,9 @@ Gate: four 1080p sources requested at once; timeline latency unchanged; slow sou
 
 ### Then — Phase 2 holes
 
-Open: premultiplied alpha, sampling quality, composite-time HUD, integrated-GPU two-layer Auto proof.
+Open: integrated-GPU two-layer Auto proof plus broader compositor memory/performance qualification.
+Premultiplied alpha, independent preview sampling, and the composite-time HUD are implemented; see
+`docs/premultiplied-alpha.md`, `docs/preview-sampling.md`, and the authoritative roadmap evidence.
 
 ### Parallel-safe only if schema/playback ownership is untouched
 

@@ -83,7 +83,7 @@ fn patterned_nv12(width: u32, height: u32) -> Video {
 fn scale_layout_once(
     frame: &Video,
     output_size: (u32, u32),
-    high_quality: bool,
+    scaling_quality: ScalingQuality,
     timings: &DecoderStageTimingAccumulators,
 ) -> Vec<u8> {
     let (context, mut scaled_size) = StickyMonitor::make_scaler(
@@ -92,21 +92,21 @@ fn scale_layout_once(
         frame.height(),
         output_size.0,
         output_size.1,
-        high_quality,
+        scaling_quality,
     )
     .expect("create synthetic layout scaler");
     let mut scaler = Some(context);
     let mut scaler_input = Some((frame.format(), frame.width(), frame.height()));
-    let mut scaler_high_quality = Some(high_quality);
+    let mut scaler_quality = Some(scaling_quality);
     let rgba = scale_monitor_frame(
         &mut scaler,
         &mut scaler_input,
-        &mut scaler_high_quality,
+        &mut scaler_quality,
         &mut scaled_size,
         frame,
         false,
         output_size,
-        high_quality,
+        scaling_quality,
         timings,
     )
     .expect("scale synthetic layout frame");
@@ -134,13 +134,17 @@ fn assert_active_rgba_rows_equal(label: &str, left: &[u8], right: &[u8], width: 
 fn scaler_layout_yuv420p_and_nv12_match_for_native_and_downscaled_rgba() {
     let planar = patterned_yuv420p(WIDTH, HEIGHT);
     let nv12 = patterned_nv12(WIDTH, HEIGHT);
-    for high_quality in [false, true] {
+    for scaling_quality in [
+        ScalingQuality::Nearest,
+        ScalingQuality::Bilinear,
+        ScalingQuality::Bicubic,
+    ] {
         for output_size in [(WIDTH, HEIGHT), (80, 45)] {
             let timings = DecoderStageTimingAccumulators::default();
-            let planar_rgba = scale_layout_once(&planar, output_size, high_quality, &timings);
-            let nv12_rgba = scale_layout_once(&nv12, output_size, high_quality, &timings);
+            let planar_rgba = scale_layout_once(&planar, output_size, scaling_quality, &timings);
+            let nv12_rgba = scale_layout_once(&nv12, output_size, scaling_quality, &timings);
             assert_active_rgba_rows_equal(
-                &format!("{output_size:?}, high_quality={high_quality}"),
+                &format!("{output_size:?}, scaling_quality={scaling_quality:?}"),
                 &planar_rgba,
                 &nv12_rgba,
                 output_size.0,
@@ -153,25 +157,25 @@ fn scaler_layout_yuv420p_and_nv12_match_for_native_and_downscaled_rgba() {
 struct RetainedScaler {
     scaler: Option<ScalingContext>,
     input: Option<(Pixel, u32, u32)>,
-    high_quality: Option<bool>,
+    scaling_quality: Option<ScalingQuality>,
     scaled_size: (u32, u32),
 }
 
 impl RetainedScaler {
-    fn new(frame: &Video, output_size: (u32, u32), high_quality: bool) -> Self {
+    fn new(frame: &Video, output_size: (u32, u32), scaling_quality: ScalingQuality) -> Self {
         let (scaler, scaled_size) = StickyMonitor::make_scaler(
             frame.format(),
             frame.width(),
             frame.height(),
             output_size.0,
             output_size.1,
-            high_quality,
+            scaling_quality,
         )
         .expect("create full-HD synthetic layout scaler");
         Self {
             scaler: Some(scaler),
             input: Some((frame.format(), frame.width(), frame.height())),
-            high_quality: Some(high_quality),
+            scaling_quality: Some(scaling_quality),
             scaled_size,
         }
     }
@@ -180,18 +184,18 @@ impl RetainedScaler {
         &mut self,
         frame: &Video,
         output_size: (u32, u32),
-        high_quality: bool,
+        scaling_quality: ScalingQuality,
         timings: &DecoderStageTimingAccumulators,
     ) -> Vec<u8> {
         let rgba = scale_monitor_frame(
             &mut self.scaler,
             &mut self.input,
-            &mut self.high_quality,
+            &mut self.scaling_quality,
             &mut self.scaled_size,
             frame,
             false,
             output_size,
-            high_quality,
+            scaling_quality,
             timings,
         )
         .expect("scale full-HD synthetic layout frame");
@@ -211,7 +215,7 @@ struct RawSwsContext(*mut ffmpeg::ffi::SwsContext);
 struct LegacyScaler(ffmpeg::software::scaling::context::Context);
 
 impl LegacyScaler {
-    fn new(frame: &Video, output_size: (u32, u32), high_quality: bool) -> Self {
+    fn new(frame: &Video, output_size: (u32, u32), scaling_quality: ScalingQuality) -> Self {
         Self(
             ffmpeg::software::scaling::context::Context::get(
                 frame.format(),
@@ -220,7 +224,7 @@ impl LegacyScaler {
                 Pixel::RGBA,
                 output_size.0,
                 output_size.1,
-                scaling_flags(high_quality),
+                scaling_flags(scaling_quality),
             )
             .expect("create original single-slice scaler"),
         )
@@ -230,7 +234,7 @@ impl LegacyScaler {
         &mut self,
         frame: &Video,
         output_size: (u32, u32),
-        _high_quality: bool,
+        _scaling_quality: ScalingQuality,
         _timings: &DecoderStageTimingAccumulators,
     ) -> Vec<u8> {
         // These test cases explicitly declare their matrix/range. The independent
@@ -268,7 +272,7 @@ impl RawSwsContext {
     fn new(
         frame: &Video,
         output_size: (u32, u32),
-        high_quality: bool,
+        scaling_quality: ScalingQuality,
         threads: i64,
     ) -> Result<Self, String> {
         // SAFETY: `sws_alloc_context` creates an uninitialized context. All required
@@ -298,7 +302,7 @@ impl RawSwsContext {
                 Ok(())
             }
         };
-        let flags = scaling_flags(high_quality).bits() as i64;
+        let flags = scaling_flags(scaling_quality).bits() as i64;
         let src_format: ffmpeg::ffi::AVPixelFormat = frame.format().into();
         let dst_format: ffmpeg::ffi::AVPixelFormat = Pixel::RGBA.into();
         set_int(b"srcw\0", frame.width().into())?;
@@ -390,25 +394,27 @@ fn verify_threaded_layouts(
     planar: &Video,
     nv12: &Video,
     output_size: (u32, u32),
-    high_quality: bool,
+    scaling_quality: ScalingQuality,
 ) {
     let timings = DecoderStageTimingAccumulators::default();
-    let mut planar_baseline = LegacyScaler::new(planar, output_size, high_quality);
-    let mut nv12_baseline = LegacyScaler::new(nv12, output_size, high_quality);
+    let mut planar_baseline = LegacyScaler::new(planar, output_size, scaling_quality);
+    let mut nv12_baseline = LegacyScaler::new(nv12, output_size, scaling_quality);
     for (layout, frame, baseline) in [
         ("yuv420p", planar, &mut planar_baseline),
         ("nv12", nv12, &mut nv12_baseline),
     ] {
-        let expected = baseline.scale(frame, output_size, high_quality, &timings);
+        let expected = baseline.scale(frame, output_size, scaling_quality, &timings);
         for threads in [1, 2, 4] {
-            let mut threaded = RawSwsContext::new(frame, output_size, high_quality, threads)
+            let mut threaded = RawSwsContext::new(frame, output_size, scaling_quality, threads)
                 .unwrap_or_else(|error| panic!("{layout} threads={threads}: {error}"));
             let (rgba, _) = threaded_convert(&mut threaded, frame, output_size)
                 .unwrap_or_else(|error| panic!("{layout} threads={threads}: {error}"));
             let actual = copy_rgba_frame(&rgba, output_size.0, output_size.1)
                 .unwrap_or_else(|error| panic!("{layout} threads={threads}: {error}"));
             assert_active_rgba_rows_equal(
-                &format!("{layout} threads={threads} {output_size:?} high_quality={high_quality}"),
+                &format!(
+                    "{layout} threads={threads} {output_size:?} scaling_quality={scaling_quality:?}"
+                ),
                 &actual,
                 &expected,
                 output_size.0,
@@ -424,19 +430,23 @@ fn scaler_layout_full_hd_timing() {
     let output_size = (1_920, 1_080);
     let planar = patterned_yuv420p(output_size.0, output_size.1);
     let nv12 = patterned_nv12(output_size.0, output_size.1);
-    for high_quality in [false, true] {
+    for scaling_quality in [
+        ScalingQuality::Nearest,
+        ScalingQuality::Bilinear,
+        ScalingQuality::Bicubic,
+    ] {
         let timings = DecoderStageTimingAccumulators::default();
-        let mut planar_scaler = RetainedScaler::new(&planar, output_size, high_quality);
-        let mut nv12_scaler = RetainedScaler::new(&nv12, output_size, high_quality);
+        let mut planar_scaler = RetainedScaler::new(&planar, output_size, scaling_quality);
+        let mut nv12_scaler = RetainedScaler::new(&nv12, output_size, scaling_quality);
         for (layout, frame, scaler) in [
             ("yuv420p", &planar, &mut planar_scaler),
             ("nv12", &nv12, &mut nv12_scaler),
         ] {
             // Time each layout against its own stable output so this diagnostic
             // can also measure the old implementation that fails the parity test.
-            let expected = scaler.scale(frame, output_size, high_quality, &timings);
+            let expected = scaler.scale(frame, output_size, scaling_quality, &timings);
             for _ in 0..8 {
-                let rgba = scaler.scale(frame, output_size, high_quality, &timings);
+                let rgba = scaler.scale(frame, output_size, scaling_quality, &timings);
                 assert_active_rgba_rows_equal(
                     "full-HD warmup",
                     &rgba,
@@ -448,7 +458,7 @@ fn scaler_layout_full_hd_timing() {
             let mut samples = Vec::with_capacity(120);
             for _ in 0..120 {
                 let before = timings.snapshot().scaler.total_nanos;
-                let rgba = scaler.scale(frame, output_size, high_quality, &timings);
+                let rgba = scaler.scale(frame, output_size, scaling_quality, &timings);
                 let after = timings.snapshot().scaler.total_nanos;
                 let scaler_nanos = after.saturating_sub(before);
                 assert!(scaler_nanos > 0, "{layout} scaler timing");
@@ -468,7 +478,7 @@ fn scaler_layout_full_hd_timing() {
             let p50 = percentile_ms(&mut samples.clone(), 50);
             let p95 = percentile_ms(&mut samples, 95);
             eprintln!(
-                "full-HD {layout} high_quality={high_quality}: p50={p50:.3}ms p95={p95:.3}ms"
+                "full-HD {layout} scaling_quality={scaling_quality:?}: p50={p50:.3}ms p95={p95:.3}ms"
             );
         }
     }
@@ -481,21 +491,26 @@ fn scaler_layout_threaded_probe() {
     let planar = patterned_yuv420p(requested_size.0, requested_size.1);
     let nv12 = patterned_nv12(requested_size.0, requested_size.1);
     let odd_downscaled_size = fitted_size(planar.width(), planar.height(), 959, 539);
-    for high_quality in [false, true] {
-        verify_threaded_layouts(&planar, &nv12, odd_downscaled_size, high_quality);
-        verify_threaded_layouts(&planar, &nv12, requested_size, high_quality);
+    for scaling_quality in [
+        ScalingQuality::Nearest,
+        ScalingQuality::Bilinear,
+        ScalingQuality::Bicubic,
+    ] {
+        verify_threaded_layouts(&planar, &nv12, odd_downscaled_size, scaling_quality);
+        verify_threaded_layouts(&planar, &nv12, requested_size, scaling_quality);
         let timings = DecoderStageTimingAccumulators::default();
-        let mut planar_baseline = LegacyScaler::new(&planar, requested_size, high_quality);
-        let mut nv12_baseline = LegacyScaler::new(&nv12, requested_size, high_quality);
+        let mut planar_baseline = LegacyScaler::new(&planar, requested_size, scaling_quality);
+        let mut nv12_baseline = LegacyScaler::new(&nv12, requested_size, scaling_quality);
         for (layout, frame, baseline) in [
             ("yuv420p", &planar, &mut planar_baseline),
             ("nv12", &nv12, &mut nv12_baseline),
         ] {
-            let expected = baseline.scale(frame, requested_size, high_quality, &timings);
+            let expected = baseline.scale(frame, requested_size, scaling_quality, &timings);
             for threads in [1, 2, 4] {
                 let init_started = Instant::now();
-                let mut threaded = RawSwsContext::new(frame, requested_size, high_quality, threads)
-                    .unwrap_or_else(|error| panic!("{layout} threads={threads}: {error}"));
+                let mut threaded =
+                    RawSwsContext::new(frame, requested_size, scaling_quality, threads)
+                        .unwrap_or_else(|error| panic!("{layout} threads={threads}: {error}"));
                 let init_ms = init_started.elapsed().as_secs_f64() * 1_000.0;
                 for _ in 0..8 {
                     let (rgba, _) = threaded_convert(&mut threaded, frame, requested_size)
@@ -535,7 +550,7 @@ fn scaler_layout_threaded_probe() {
                 let end_to_end_p50 = percentile_ms(&mut end_to_end_samples.clone(), 50);
                 let end_to_end_p95 = percentile_ms(&mut end_to_end_samples, 95);
                 eprintln!(
-                    "threaded full-HD {layout} threads={threads} high_quality={high_quality}: \
+                    "threaded full-HD {layout} threads={threads} scaling_quality={scaling_quality:?}: \
                      init={init_ms:.3}ms; conversion p50={conversion_p50:.3}ms \
                      p95={conversion_p95:.3}ms; end-to-end p50={end_to_end_p50:.3}ms \
                      p95={end_to_end_p95:.3}ms"
@@ -597,8 +612,12 @@ fn threaded_monitor_matches_legacy_pixels_across_formats_sizes_and_metadata_chan
             ((3840, 2160), (1920, 1080)),
         ] {
             let mut frame = patterned_format(format, input_size.0, input_size.1);
-            for high_quality in [false, true] {
-                let mut original = LegacyScaler::new(&frame, output_size, high_quality);
+            for scaling_quality in [
+                ScalingQuality::Nearest,
+                ScalingQuality::Bilinear,
+                ScalingQuality::Bicubic,
+            ] {
+                let mut original = LegacyScaler::new(&frame, output_size, scaling_quality);
                 let mut threaded = ScalingContext::get_with_forced_threads(
                     format,
                     input_size.0,
@@ -606,7 +625,7 @@ fn threaded_monitor_matches_legacy_pixels_across_formats_sizes_and_metadata_chan
                     Pixel::RGBA,
                     output_size.0,
                     output_size.1,
-                    scaling_flags(high_quality),
+                    scaling_flags(scaling_quality),
                     2,
                 )
                 .expect("create production two-thread scaler");
@@ -619,7 +638,7 @@ fn threaded_monitor_matches_legacy_pixels_across_formats_sizes_and_metadata_chan
                 ] {
                     frame.set_color_space(space);
                     frame.set_color_range(range);
-                    let expected = original.scale(&frame, output_size, high_quality, &timings);
+                    let expected = original.scale(&frame, output_size, scaling_quality, &timings);
                     configure_scaler_color(&mut threaded, &frame, format).unwrap();
                     let mut rgba = Video::empty();
                     threaded
@@ -627,7 +646,7 @@ fn threaded_monitor_matches_legacy_pixels_across_formats_sizes_and_metadata_chan
                         .expect("convert production two-thread frame");
                     let actual = copy_rgba_frame(&rgba, output_size.0, output_size.1).unwrap();
                     let label = format!(
-                        "{format:?} {input_size:?}->{output_size:?} HQ={high_quality} {space:?}/{range:?}"
+                        "{format:?} {input_size:?}->{output_size:?} quality={scaling_quality:?} {space:?}/{range:?}"
                     );
                     // A compact failure locates the first differing channel instead
                     // of dumping megabytes of frame data into the test log.
