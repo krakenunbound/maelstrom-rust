@@ -484,6 +484,14 @@ Exit gate:
       active sessions after app drop. Raw distributions, counts, limits, working-set samples,
       and fixture/binary/report hashes were independently checked. Sampled working-set growth
       was 43,008,000 bytes under a diagnostic 1.5 GiB allowance, not a whole-app RAM hard cap.
+      Requalified after accurate threaded conversion on 2026-08-31 at source `b3e9228`:
+      600.047 seconds, 20,184 four-source Full-1080p cycles, 80,736 requests, 77 us scheduler
+      p95, 42 ms coarse frame-ready p95, zero monitor errors, and zero post-drop sessions.
+      Cache peak remains 215,654,400 bytes under 1 GiB and session peak five under eight;
+      sampled working-set growth is 19,812,352 bytes under the diagnostic allowance.
+      Raw samples, counts, and input/binary/report hashes were checked independently.
+      This remains local headless Software evidence; windowed/audio/cross-machine gates
+      and lower-core contention qualification remain open. See `docs/phase1-sustained-soak.md`.
       This closes the configured cache/session limits for the local headless workload, not
       UI-present/cross-hardware/audio qualification or continuous/post-drop actor accounting.
       See `docs/phase1-sustained-soak.md` for exact evidence and limitations.

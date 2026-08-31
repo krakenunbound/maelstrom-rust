@@ -150,7 +150,7 @@ executable SHA-256 was
 app-report SHA-256 was
 `6f4a16497556d145a0bd244e1ff46a8b9aa5fe6227cc7453714d4fdd1b177216`.
 
-## Current-source resource qualification (2026-08-30)
+## Checkpoint resource qualification (2026-08-30)
 
 The unchanged production source at `b1d5acec07e3f6c44b054ccce73aec228ae0dc74`
 passed a fresh 600.042-second run after the shared-history and export fixes.
@@ -197,3 +197,75 @@ Exact release test executable SHA-256:
 `71d29a73c1c21a4979f073c77ccded67bc1b41eaf5c1912b89bc9b29fda2453f`.
 Earlier default-path artifacts were preserved in
 `before-b1d5ace-20260830T151106/` before the runner reused its fixed output paths.
+
+## Accurate threaded conversion resource qualification (2026-08-31)
+
+The unchanged production source at `b3e9228939f4b3edf2c2d98a74cf1be0d5338ba5`
+passed a fresh 600.047-second headless run. It completed 20,184 forward/backward
+cycles across four Full-1920x1080 sources, with 80,736 requests. Default high-quality
+conversion remained enabled. Scheduler submission p50/p95/max was 43/77/358 us;
+coarse all-frames-ready timing was 32/42/58 ms. The maximum decoded-tick deviation
+was 17,667 us within the unchanged 33,334 us bound. These are repeated-seek
+measurements, not physical input latency or a continuous playback cadence.
+
+The exact frame-cache peak remained 215,654,400 bytes, with 207,360,000 bytes
+retained at the final sample, below the 1,073,741,824-byte configured cap. The
+session pool peaked at five of eight and released to zero after App drop. The
+final coordinator sample held four source groups, five live actors (four foreground
+and one background), and zero retiring actors. This is not a post-drop actor or
+actor high-water claim.
+
+All 83,773 completed frames were logically presented through the fallback viewer
+path. There were zero monitor errors and zero rejected stale events under the
+81-event allowance. Hold/late counters were 10,915/10,918, within the workload's
+request-count bounds; they are not proof of lossless real-time display. The observed
+backend was Software. No visible editor or native audio device participated.
+
+The wrapper retained 521 working-set samples: warm baseline 379,654,144 bytes,
+peak 399,466,496 bytes, growth 19,812,352 bytes. Growth remained below the diagnostic
+1,610,612,736-byte cache-plus-headroom allowance. This is a sampled test-process
+working set, not a whole-app RAM hard cap. The exact tracked Cargo and test processes
+exited, and no task-owned compiler/editor/media process remained.
+
+The local adapter `run-threaded-scaler-soak.ps1` preserves the committed runner's
+assertions, duration, process ownership, memory sampling, timeout, and cleanup.
+It checks all 27 prior checkpoint evidence/input hashes and re-probes the existing
+four MPEG-4 fixtures before skipping their regeneration. Only fixed root bindings
+and distinct evidence filenames are substituted, each with an exact single-match
+guard. Its first attempt failed before test launch because the in-memory runner had
+an empty script root; the corrected explicit paths and initial failure log are
+preserved. No assertion or limit was relaxed. Prior evidence and fixtures remain
+unchanged; all 27 identities were checked again after the run.
+
+Independent checks recomputed nearest-rank distributions from both 20,184-sample
+arrays, checked cycle/source/counter/tick contracts and exact resource caps, derived
+working-set summaries from raw samples, and matched fixture, test-binary, and
+app-report hashes. This qualifies the local ten-minute cache/session resource gate
+after accurate threaded conversion, not windowed UX, native audio, cross-hardware
+playback, or lower-core CPU contention.
+
+Ignored evidence under `artifacts/phase1-sustained/`:
+
+- `threaded-scaler-wrapper.json`: SHA-256
+  `40254F7E884FCBDDACED59CB028E5A6CC2A4C6ADF21D48855D1896F58F245E6C`
+- `threaded-scaler-app-report.json`: SHA-256
+  `F6693B3650D79B3E5B68D00A01966A8B7889D65EDE2976124213D33807D1BE08`
+- `threaded-scaler-test.stdout.txt`, `threaded-scaler-test.stderr.txt`,
+  `threaded-scaler-run.log`, `threaded-scaler-adapter-setup-failure.log`,
+  `run-threaded-scaler-soak.ps1`, and `threaded-scaler-verification.json`.
+
+The 22-entry post-run provenance snapshot includes both the committed runner and
+local adapter, plus raw reports, logs, fixtures, source files, and binaries. All
+entries were rehashed successfully. This is not a signed execution attestation.
+Verification-manifest SHA-256:
+`96EAB3F2E8C87ED39FDDA14BB4779A10C22C2DD3B3B8839937A246859FB18F51`.
+
+Exact release test executable SHA-256:
+`FBC83DDA56C407617AD6AAD438DDCA2A12A6B86D273683E36D8809FE96FFA484`.
+The portable editor remains unchanged at SHA-256
+`3A4D88D8672810349A2921C90371ED7E1A679CB0821A66BDA0953ADFF1F574C8`;
+its GUI smoke status remains `not_run`. Four one/four-source Intel/NVIDIA cases
+were prepared without launch in
+`artifacts/phase1-multisource/windowed-6ab6b596-521d-43b1-8b7a-66a61d90f641/`.
+Their configuration/package hashes verify, with status `prepared` and no GUI reports.
+Windowed execution still requires explicit authorization through the exact batch launcher.

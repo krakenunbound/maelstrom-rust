@@ -115,6 +115,9 @@ pinned sources. `PACKAGE-STATUS.json` remains `smoke_status: not_run`.
 No GUI was launched. The prior executable/status are preserved in
 `threaded-scaler-previous-package.zip`. Historical smoke reports remain unchanged.
 
-Next: requalify sustained resource use and windowed playback with accurate threaded
-conversion. The existing pre-change soak/windowed reports are historical evidence,
-not qualification of this package.
+Subsequent resource requalification: the unchanged production code passed a
+600.047-second four-source headless soak with 20,184 cycles, bounded cache/session
+use, and zero post-drop sessions. See `phase1-sustained-soak.md` for raw evidence
+and limits. The implementation manifest above remains its original checkpoint
+snapshot. Windowed playback and lower-core CPU qualification are still pending;
+pre-change windowed reports do not qualify this package.

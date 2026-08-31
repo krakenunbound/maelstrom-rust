@@ -9,6 +9,14 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Requalify local ten-minute cache/session resources after accurate threaded conversion
+  at source commit `b3e9228939f4b3edf2c2d98a74cf1be0d5338ba5`. 600.047 seconds,
+  20,184 four-source Full-1080p cycles, 80,736 requests, 77 us scheduler p95,
+  42 ms coarse frame-ready p95, zero monitor errors, and zero post-drop sessions.
+  Cache peak 215,654,400 bytes under 1 GiB; five peak sessions under eight;
+  sampled working-set growth 19,812,352 bytes under the diagnostic allowance.
+  Raw samples/hashes verified; historical evidence preserved; no GUI launched.
+  Evidence: `docs/phase1-sustained-soak.md`. Package remains unchanged.
 - [x] Reduce accurate full-resolution conversion overhead without changing pixels, filters,
   or resolution. Bounded two-thread conversion cuts local bicubic scaler p50 from
   5.13-5.24 ms to 2.75-2.80 ms. 400 exact legacy comparisons, 152 Windows hardware
@@ -36,10 +44,11 @@ Last updated: 2026-08-31
   `8F0965B4489D34A11`; smoke remains `not_run`; runtime/hash/cleanup checks pass.
   Evidence and performance tradeoff: `docs/hardware-decode-parity.md`.
   Commit: `fb5335df898f69993f3ff5545260f0e47f157b1d`.
-- [ ] Requalify sustained/windowed playback after accurate threaded conversion. The independent
-  four-source worker gate passes, but it does not establish real-time display. Repeat the
-  ten-minute resource soak, then perform authorized windowed qualification through the exact
-  launcher. Qualify lower-core CPU contention before broad performance claims.
+- [ ] Requalify windowed playback after accurate threaded conversion. Local ten-minute
+  resource qualification passes, but does not establish real-time display. Four fresh
+  Intel/NVIDIA one/four-source cases are prepared without launch; explicit permission to run
+  the editor through the exact launcher is pending. Qualify lower-core CPU contention before
+  broad performance claims. The goal remains active; no automatic editor launch is authorized.
 - [ ] Continue profiling RGBA packing, upload, and presentation if full-quality latency remains
   above the required gate. Never hide cost by lowering resolution or changing the selected filter.
 
