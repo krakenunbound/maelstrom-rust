@@ -144,17 +144,17 @@ cross-hardware guarantee, or closure of the remaining tool-resolution/teardown w
 
 ## Portable package checkpoint
 
-Built from clean commit `ac52c2b061134a2b074bb90bbec3ff8a9aef4608` without opening the editor,
-including both cache rediscovery and asynchronous startup validation.
-The executable SHA-256 is `D3FA11E3C8894DDA1A6F477EE153A80149C6DC13D3B58745D36DEF5EB05F194B`,
+Built from clean commit `7c5159198c832461d3ed3ba8f9e8b143bc774174` without opening the editor,
+including cache rediscovery, asynchronous startup, and background activation/reconciliation.
+The executable SHA-256 is `5A64D502EAC2F6194822EE0757236AF76FF4859002D7633D786852B91060375C`,
 matching the release build and package-status record. All 23 files are inventoried; only the
 executable/status differ from the previous package. Thirteen pinned runtime hashes, the authorized
 VC runtime copy, fifteen AMD64/static-import inventories, FFmpeg/FFprobe version calls, and the
 exact launcher's `--verify-runtime` branch pass. Models, libraries and license notices are unchanged.
 
 The previous complete package is recoverable from
-`artifacts/phase1-multisource/package-proxy-worker-ac52c2b/previous-package.zip`
-(SHA-256 `18B3A5455EDCB5254B2D539E301C447356BE4EA4BAD01863AF983534E50E453E`).
+`artifacts/phase1-multisource/package-proxy-async-validation-7c51591/previous-package.zip`
+(SHA-256 `ED3EF3C64D4C90D5A11C9AF2A4FE2CE1AD383350A97488BB420E04E0D76D128E`).
 The adjacent `verification.json` records file/import hashes and the check scope. No binaries or
 private models were pushed. `smoke_status` stays `not_run`: local static checks do not establish
 GUI behavior, dynamic GPU-library loading, clean-host compatibility, or windowed performance.

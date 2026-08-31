@@ -304,7 +304,7 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       projects and audio/export keep original paths. Six new regressions include real generated
       proxy save/reopen/explicit-opt-in; 783 release tests, strict Clippy, fixture contracts and
       updated Phase 0 scenarios pass. The rebuilt package contains this behavior (SHA-256 starts
-      `D3FA11E3C8894DDA`, including the startup correction below); static/runtime checks pass,
+      `5A64D502EAC2F619`, including the subsequent validation corrections below); static/runtime checks pass,
       but GUI qualification remains pending.
       Proxy job startup now validates source/tool files and captures the source fingerprint on its
       worker, returning filesystem failures asynchronously. Two regressions fail before/pass after;

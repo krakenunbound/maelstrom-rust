@@ -15,8 +15,9 @@ Last updated: 2026-08-31
   skipped. Two before-failing regressions now pass; 800 release tests, both real-media
   proxy tests, strict Clippy, formatting, fixtures and Phase 0 scenarios pass.
   Parent-reviewed (independent agent unavailable). See `docs/proxy-media.md`.
-- [ ] Refresh the portable package with background activation/reconciliation, retaining
-  a complete recoverable backup. Do not launch the editor; GUI qualification stays pending.
+- [x] Refresh the portable package from `7c51591` with background activation/reconciliation.
+  Executable SHA-256 starts `5A64D502EAC2F619`; complete previous package backed up and
+  hash-verified. Runtime/static-import checks pass. No editor launch; GUI smoke is `not_run`.
 - [x] Move `ProxyJob::start` source/tool validation and fingerprinting to its existing
   worker. Two before-failing regressions now pass; pre-cancelled state and source-change/
   cancellation contracts remain intact. 786 release tests, both real-media proxy tests,
