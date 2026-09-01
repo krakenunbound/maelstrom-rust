@@ -55,6 +55,31 @@ remain open. No editor launch or physical presentation measurement occurred.
 
 ## Reproduction
 
+The bounded Phase 1 qualification wrapper reuses the two existing hardware VFR
+fixtures; it never creates or overwrites them. It runs the four D3D11VA/DXVA2
+H.264/HEVC ignored tests serially in release mode, requires each backend/codec's
+separate 64x48 and 1920x1080 `8 VFR boundaries, 19 exact CLI-reference seek
+cases` evidence, and serializes concurrent invocations with a local mutex. For a
+valid writable report destination, it independently attempts the capped log and
+an atomic schema-versioned report on pass or operational/test failure; a log-write
+failure is recorded in the report. Invalid or unwritable report destinations
+cannot self-report. It does not launch the editor or any GUI.
+
+```powershell
+pwsh -NoProfile -File .\scripts\Run-Phase1HardwareVfr.ps1
+```
+
+The report and a UTF-8 capped-at-1,048,576-byte log are retained in ignored
+`artifacts/phase1-hardware-vfr/`. Add `-IncludeAdapterInventory` only to record
+an inventory-only list of adapters; it is not proof of physical-GPU coverage.
+The report records source state, local FFmpeg identity, documented fixture hashes
+and observed sizes, the four backend/codec results, and `exact_cases_total: 152` only when
+all four tests meet the output contract. `authoritative` is true only for a pass
+whose non-null start/end commits match and whose tracked source is clean at both
+points; untracked and ignored evidence is deliberately excluded from that source
+state. This is a reproducible harness contract, not a fresh authoritative
+qualification result.
+
 Use the workspace's approved FFmpeg bundle. The generated test patterns require
 no third-party media or model downloads. Run from `H:\Maelstrom Rust`:
 

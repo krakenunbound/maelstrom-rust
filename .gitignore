@@ -10,6 +10,7 @@
 /artifacts/phase0-playback-soak/
 /artifacts/phase0-foundation/
 /artifacts/phase1-multisource/
+/artifacts/phase1-hardware-vfr/
 /artifacts/phase1-latency/
 /artifacts/phase1-sustained/
 /artifacts/phase2-integrated-auto/
