@@ -1977,19 +1977,21 @@ fn gpu_curve_lut_stack(primitive: ViewerLayerPrimitive) -> GpuCurveLutStack {
         .min(MAX_COLOR_CORRECTIONS_PER_LAYER as u32) as usize;
     for (node, correction) in primitive.color_corrections.iter().take(count).enumerate() {
         let start = node * COLOR_CURVE_LUT_SAMPLES;
-        let master = NaturalCurveSpline::from_curve(correction.curves.master);
-        let red = NaturalCurveSpline::from_curve(correction.curves.red);
-        let green = NaturalCurveSpline::from_curve(correction.curves.green);
-        let blue = NaturalCurveSpline::from_curve(correction.curves.blue);
+        let master = NaturalCurveSpline::from_curve(correction.curves.master).ffmpeg_byte_lut();
+        let red = NaturalCurveSpline::from_curve(correction.curves.red).ffmpeg_byte_lut();
+        let green = NaturalCurveSpline::from_curve(correction.curves.green).ffmpeg_byte_lut();
+        let blue = NaturalCurveSpline::from_curve(correction.curves.blue).ffmpeg_byte_lut();
         for (index, destination) in samples[start..start + COLOR_CURVE_LUT_SAMPLES]
             .iter_mut()
             .enumerate()
         {
-            let input = index as f32 / (COLOR_CURVE_LUT_SAMPLES - 1) as f32;
+            // FFmpeg's `curves` first quantizes each component table result, then indexes the
+            // master byte table with that integer. Keep this boundary before a following effect
+            // such as Vignette; composing both splines as floats changes exported pixels.
             *destination = [
-                master.sample(red.sample(input)),
-                master.sample(green.sample(input)),
-                master.sample(blue.sample(input)),
+                f32::from(master[usize::from(red[index])]) / 255.0,
+                f32::from(master[usize::from(green[index])]) / 255.0,
+                f32::from(master[usize::from(blue[index])]) / 255.0,
                 0.0,
             ];
         }
@@ -2000,9 +2002,6 @@ fn gpu_curve_lut_stack(primitive: ViewerLayerPrimitive) -> GpuCurveLutStack {
 #[derive(Clone, Copy)]
 struct NaturalCurveSpline {
     points: [[f32; 2]; MAX_COLOR_CURVE_POINTS],
-    b: [f32; MAX_COLOR_CURVE_POINTS - 1],
-    c: [f32; MAX_COLOR_CURVE_POINTS],
-    d: [f32; MAX_COLOR_CURVE_POINTS - 1],
     count: usize,
 }
 
@@ -2032,65 +2031,82 @@ impl NaturalCurveSpline {
             return None;
         }
 
-        let mut h = [0.0; MAX_COLOR_CURVE_POINTS - 1];
-        let mut alpha = [0.0; MAX_COLOR_CURVE_POINTS];
-        for index in 0..count - 1 {
-            h[index] = points[index + 1][0] - points[index][0];
-        }
-        for index in 1..count - 1 {
-            alpha[index] = 3.0 / h[index] * (points[index + 1][1] - points[index][1])
-                - 3.0 / h[index - 1] * (points[index][1] - points[index - 1][1]);
-        }
-        let mut lower = [0.0; MAX_COLOR_CURVE_POINTS];
-        let mut mu = [0.0; MAX_COLOR_CURVE_POINTS];
-        let mut z = [0.0; MAX_COLOR_CURVE_POINTS];
-        lower[0] = 1.0;
-        for index in 1..count - 1 {
-            lower[index] =
-                2.0 * (points[index + 1][0] - points[index - 1][0]) - h[index - 1] * mu[index - 1];
-            mu[index] = h[index] / lower[index];
-            z[index] = (alpha[index] - h[index - 1] * z[index - 1]) / lower[index];
-        }
-        let mut c = [0.0; MAX_COLOR_CURVE_POINTS];
-        let mut b = [0.0; MAX_COLOR_CURVE_POINTS - 1];
-        let mut d = [0.0; MAX_COLOR_CURVE_POINTS - 1];
-        for index in (0..count - 1).rev() {
-            c[index] = z[index] - mu[index] * c[index + 1];
-            b[index] = (points[index + 1][1] - points[index][1]) / h[index]
-                - h[index] * (c[index + 1] + 2.0 * c[index]) / 3.0;
-            d[index] = (c[index + 1] - c[index]) / (3.0 * h[index]);
-        }
-        if b[..count - 1].iter().any(|value| !value.is_finite())
-            || c[..count].iter().any(|value| !value.is_finite())
-            || d[..count - 1].iter().any(|value| !value.is_finite())
-        {
-            return None;
-        }
-        Some(Self {
-            points,
-            b,
-            c,
-            d,
-            count,
-        })
+        Some(Self { points, count })
     }
 
     fn identity() -> Self {
         Self::try_from_curve(ViewerColorCurve::default()).expect("identity curve is valid")
     }
 
-    fn sample(&self, input: f32) -> f32 {
-        let input = input.clamp(0.0, 1.0);
-        let index = self.points[..self.count]
-            .partition_point(|point| point[0] <= input)
-            .saturating_sub(1)
-            .min(self.count - 2);
-        let distance = input - self.points[index][0];
-        (self.points[index][1]
-            + self.b[index] * distance
-            + self.c[index] * distance * distance
-            + self.d[index] * distance.powi(3))
-        .clamp(0.0, 1.0)
+    /// Matches FFmpeg `vf_curves.c`'s 8-bit natural-spline table: the output is clipped and
+    /// truncated to an integer at every table entry, not retained as a floating sample.
+    fn ffmpeg_byte_lut(&self) -> [u8; COLOR_CURVE_LUT_SAMPLES] {
+        let scale = (COLOR_CURVE_LUT_SAMPLES - 1) as f64;
+        let points = self
+            .points
+            .map(|point| [f64::from(point[0]), f64::from(point[1])]);
+        let mut h = [0.0_f64; MAX_COLOR_CURVE_POINTS - 1];
+        let mut r = [0.0_f64; MAX_COLOR_CURVE_POINTS];
+        let mut matrix = [[0.0_f64; 3]; MAX_COLOR_CURVE_POINTS];
+        for index in 0..self.count - 1 {
+            h[index] = points[index + 1][0] - points[index][0];
+        }
+        for index in 1..self.count - 1 {
+            r[index] = 6.0
+                * ((points[index + 1][1] - points[index][1]) / h[index]
+                    - (points[index][1] - points[index - 1][1]) / h[index - 1]);
+        }
+        matrix[0][1] = 1.0;
+        matrix[self.count - 1][1] = 1.0;
+        for index in 1..self.count - 1 {
+            matrix[index][0] = h[index - 1];
+            matrix[index][1] = 2.0 * (h[index - 1] + h[index]);
+            matrix[index][2] = h[index];
+        }
+        for index in 1..self.count {
+            let denominator = matrix[index][1] - matrix[index][0] * matrix[index - 1][2];
+            let factor = if denominator == 0.0 {
+                1.0
+            } else {
+                1.0 / denominator
+            };
+            matrix[index][2] *= factor;
+            r[index] = (r[index] - matrix[index][0] * r[index - 1]) * factor;
+        }
+        for index in (0..self.count - 1).rev() {
+            r[index] -= matrix[index][2] * r[index + 1];
+        }
+
+        let byte = |value: f64| value.clamp(0.0, scale) as u8;
+        let mut table = [0_u8; COLOR_CURVE_LUT_SAMPLES];
+        let first = (points[0][0] * scale) as usize;
+        for value in table.iter_mut().take(first) {
+            *value = byte(points[0][1] * scale);
+        }
+        for index in 0..self.count - 1 {
+            let start = (points[index][0] * scale) as usize;
+            let end = (points[index + 1][0] * scale) as usize;
+            let a = points[index][1];
+            let b = (points[index + 1][1] - points[index][1]) / h[index]
+                - h[index] * r[index] / 2.0
+                - h[index] * (r[index + 1] - r[index]) / 6.0;
+            let c = r[index] / 2.0;
+            let d = (r[index + 1] - r[index]) / (6.0 * h[index]);
+            for (value, destination) in table
+                .iter_mut()
+                .enumerate()
+                .take(end.min(COLOR_CURVE_LUT_SAMPLES - 1) + 1)
+                .skip(start)
+            {
+                let x = (value - start) as f64 / scale;
+                *destination = byte((a + b * x + c * x * x + d * x * x * x) * scale);
+            }
+        }
+        let last = (points[self.count - 1][0] * scale) as usize;
+        for value in table.iter_mut().skip(last) {
+            *value = byte(points[self.count - 1][1] * scale);
+        }
+        table
     }
 }
 
@@ -3239,6 +3255,26 @@ mod tests {
     }
 
     #[test]
+    fn viewer_shader_matches_ffmpeg_encoded_byte_boundaries_for_curves_and_vignette() {
+        assert!(VIEWER_SHADER.contains("fn quantize_encoded_byte"));
+        assert!(
+            VIEWER_SHADER
+                .contains("floor(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0")
+        );
+        assert!(
+            VIEWER_SHADER
+                .contains("let levels = vec3<u32>(quantize_encoded_byte(encoded) * 255.0);")
+        );
+        assert_eq!(
+            VIEWER_SHADER
+                .matches("encoded = quantize_encoded_byte(encoded);")
+                .count(),
+            1,
+            "vignette must commit its multiplication to the encoded-byte plane"
+        );
+    }
+
+    #[test]
     fn compositor_pool_byte_estimates_include_all_retained_payloads() {
         let one_pixel = PixelSize::new(1, 1);
         let layer_payload = (std::mem::size_of::<GpuColorCorrectionStack>()
@@ -3604,11 +3640,77 @@ mod tests {
         for index in 0..MAX_COLOR_CORRECTIONS_PER_LAYER {
             let value = index as f32 / MAX_COLOR_CORRECTIONS_PER_LAYER as f32;
             assert_eq!(stack.corrections[index].light[0], value);
+            let byte_value = (value * 255.0) as u8;
             assert_eq!(
                 curves.samples[index * COLOR_CURVE_LUT_SAMPLES + 128],
-                [value, 128.0 / 255.0, 128.0 / 255.0, 0.0],
+                [
+                    f32::from(byte_value) / 255.0,
+                    128.0 / 255.0,
+                    128.0 / 255.0,
+                    0.0,
+                ],
             );
         }
+    }
+
+    #[test]
+    fn curve_lut_uses_quantized_component_bytes_before_master_for_each_channel() {
+        let curve = |middle| ViewerColorCurve {
+            points: [
+                [0.0, 0.0],
+                [0.5, middle],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+            ],
+            count: 3,
+        };
+        let correction = ViewerColorCorrection {
+            curves: ViewerRgbCurves {
+                master: curve(0.58),
+                red: curve(0.44),
+                green: curve(0.54),
+                blue: curve(0.62),
+            },
+            ..Default::default()
+        };
+        let primitive = ViewerLayerPrimitive {
+            quad: full_test_quad(1),
+            content_uv: [Uv { u: 0.0, v: 0.0 }; 4],
+            color_corrections: [correction; MAX_COLOR_CORRECTIONS_PER_LAYER],
+            color_correction_count: 1,
+        };
+        let actual = gpu_curve_lut_stack(primitive);
+        let master = NaturalCurveSpline::from_curve(correction.curves.master).ffmpeg_byte_lut();
+        let channels = [
+            NaturalCurveSpline::from_curve(correction.curves.red).ffmpeg_byte_lut(),
+            NaturalCurveSpline::from_curve(correction.curves.green).ffmpeg_byte_lut(),
+            NaturalCurveSpline::from_curve(correction.curves.blue).ffmpeg_byte_lut(),
+        ];
+        for index in 0..COLOR_CURVE_LUT_SAMPLES {
+            let expected: [f32; 3] = std::array::from_fn(|channel| {
+                f32::from(master[usize::from(channels[channel][index])]) / 255.0
+            });
+            assert_eq!(actual.samples[index][..3], expected[..]);
+        }
+
+        let index = 148;
+        assert_eq!(
+            actual.samples[index][0],
+            f32::from(master[usize::from(channels[0][index])]) / 255.0,
+            "the master must receive the red byte-table output, not its unquantized spline value"
+        );
     }
 
     #[test]

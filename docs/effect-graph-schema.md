@@ -51,5 +51,14 @@ same canonical compiled operation order to source-time FFmpeg expressions. Inval
 export preflight normally instead of being skipped or causing a panic. Existing preview and export
 results remain unchanged.
 
+## Preview/export parity gate
+
+The Phase 3 qualification evaluates an animated Brightness/Contrast + RGB-curves + Vignette stack
+through both the real native GPU compositor and the production FFmpeg graph lowering. Both sides
+receive the same neutral encoded-RGBA effect input. A full-frame comparison permits at most four
+8-bit code values of color/rounding error; the local RTX 3090/Vulkan qualification measured zero.
+The neutral source/export boundary independently measured one. See
+`docs/phase3-effect-parity.md` for the fixture, command, corrections, and scope limits.
+
 Arbitrary DAG execution, parameter links, output-size/color-setting cache keys, renderer resource
 caches, and a larger effects catalog remain separate roadmap work.

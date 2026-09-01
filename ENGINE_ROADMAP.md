@@ -778,8 +778,16 @@ Exit gate:
 - [x] Save/reopen and undo/redo restore exact graph and keyframe state. The current document format
       round-trips the full ten-node graph, node order/enabled state, and per-node Hold/EaseOut keys;
       UI history independently restores the exact ten-node graph and the tenth node's keyframe.
-- [ ] Export and preview evaluate the same graph description with matching frame results within
-      defined color/rounding tolerance.
+- [x] Export and preview evaluate the same graph description with matching frame results within
+      defined color/rounding tolerance. The explicit release qualification feeds one neutral
+      encoded-RGBA boundary into the real native GPU compositor and production FFmpeg graph
+      lowering, then compares every channel of a 64x48 frame at tick 500,000. Its two-node stack
+      animates Brightness/Contrast and Vignette around non-identity master/R/G/B curves. On the
+      RTX 3090 Vulkan adapter the effect maximum is 0 against a tolerance of 4; the separately
+      checked neutral source/export boundary is 1. The gate also removed hidden 4:2:0 overlay
+      composition, zero-degree rotation loss, and native/FFmpeg byte-LUT differences. This is the
+      Phase 3 encoded-RGBA effect boundary, not H.264, HDR, linear-light, or full Phase 4 parity.
+      Evidence: `docs/phase3-effect-parity.md`.
 
 ### Phase 4 — Transitions, titles, and color pipeline
 

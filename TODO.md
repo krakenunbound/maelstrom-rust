@@ -405,6 +405,11 @@ Last updated: 2026-08-31
   UI authoring, renderer/WGSL buffers, curve LUTs, and export now agree on ten nodes; the app keeps
   playback active through 120 rapid edits under the 8 ms UI p95 budget and installs only current
   compiled work. Current-format save/reopen and UI undo/redo preserve the exact full graph and keys.
+- [x] Close the Phase 3 encoded-RGBA effect parity gate. A real RTX 3090/Vulkan native render and
+  the production FFmpeg graph lowering evaluate the same animated Brightness/Contrast, master/RGB
+  curves, and Vignette stack with full-frame maximum error 0 (tolerance 4); the neutral boundary is
+  1. Export now avoids zero-degree rotation loss and forces RGB video/matte/title overlays instead
+  of FFmpeg's hidden 4:2:0 default. Evidence: `docs/phase3-effect-parity.md`.
 - [ ] Complete preview/export parity for effects, transitions, titles, and color processing.
 - [ ] Add the remaining roadmap transitions, title tooling, Rec.709 color pipeline, LUT validation,
   and non-blocking scopes.

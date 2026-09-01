@@ -107,10 +107,14 @@ fn srgb_to_linear(encoded: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn quantize_encoded_byte(encoded: vec3<f32>) -> vec3<f32> {
+    return floor(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0;
+}
+
 fn apply_curve_lut(encoded: vec3<f32>, correction_index: u32) -> vec3<f32> {
-    // Export's preceding geq stage produces 8-bit RGB, then FFmpeg's curves filter performs a
-    // direct 256-entry LUT lookup. Rounding here preserves that boundary behavior in preview.
-    let levels = vec3<u32>(round(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0));
+    // Export's preceding geq stage writes an 8-bit RGB plane by truncation, then FFmpeg's curves
+    // filter performs a direct 256-entry LUT lookup. Match that encoded-byte boundary in preview.
+    let levels = vec3<u32>(quantize_encoded_byte(encoded) * 255.0);
     let base = correction_index * 256u;
     return vec3<f32>(
         curve_luts.samples[base + levels.x].x,
@@ -184,6 +188,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             );
             let smooth_factor = t * t * (3.0 - 2.0 * t);
             encoded *= 1.0 - correction.effect.y * smooth_factor;
+            encoded = quantize_encoded_byte(encoded);
         } else {
             let temperature = correction.color.x;
             let tint = correction.color.y;

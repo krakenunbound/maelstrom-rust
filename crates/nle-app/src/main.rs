@@ -15070,6 +15070,426 @@ mod tests {
         Ok(pixel)
     }
 
+    struct Phase3TempDir(PathBuf);
+
+    impl Phase3TempDir {
+        fn join(&self, path: &str) -> PathBuf {
+            self.0.join(path)
+        }
+    }
+
+    impl Drop for Phase3TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real headless GPU and the approved bundled FFmpeg runtime"]
+    fn phase3_native_preview_matches_export_graph_pixels_for_animated_color_stack() {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 48;
+        const SOURCE_TICK: i64 = 500_000;
+        const TOLERANCE: u8 = 4;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let temp = Phase3TempDir(
+            std::env::temp_dir().join(format!("maelstrom-phase3-pixel-parity-{nonce}")),
+        );
+        fs::create_dir_all(&temp.0).expect("create Phase 3 fixture directory");
+        let source = temp.join("source.mkv");
+        let output = temp.join("export.mp4");
+        let ffmpeg = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.deps/ffmpeg-project-8.1/bin")
+            .join(media_tool_file_name("ffmpeg"));
+        assert!(
+            ffmpeg.is_file(),
+            "approved bundled FFmpeg missing: {}",
+            ffmpeg.display()
+        );
+
+        let generated = std::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                concat!(
+                    "nullsrc=size=64x48:rate=24:duration=1,format=gbrp,",
+                    "geq=r='255*X/(W-1)':g='255*Y/(H-1)':",
+                    "b='255*(X+Y)/(W+H-2)',format=bgra"
+                ),
+                "-an",
+                "-c:v",
+                "ffv1",
+                "-level",
+                "3",
+                "-pix_fmt",
+                "bgra",
+            ])
+            .arg(&source)
+            .output()
+            .expect("generate deterministic Phase 3 source");
+        assert!(
+            generated.status.success(),
+            "generate Phase 3 source: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let source_decoded = std::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-ss",
+                "0.5",
+                "-i",
+            ])
+            .arg(&source)
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
+            .output()
+            .expect("decode interior Phase 3 source frame");
+        assert!(
+            source_decoded.status.success(),
+            "decode Phase 3 source: {}",
+            String::from_utf8_lossy(&source_decoded.stderr)
+        );
+        assert_eq!(
+            source_decoded.stdout.len(),
+            (WIDTH * HEIGHT * 4) as usize,
+            "decoded Phase 3 source dimensions"
+        );
+
+        let animated = |start, end| nle_timeline::AnimatedScalar {
+            value: start,
+            keyframes: vec![
+                nle_timeline::ScalarKeyframe {
+                    source_tick: nle_timeline::Tick(0),
+                    value: start,
+                    interpolation: nle_timeline::KeyframeInterpolation::Linear,
+                },
+                nle_timeline::ScalarKeyframe {
+                    source_tick: nle_timeline::Tick(1_000_000),
+                    value: end,
+                    interpolation: nle_timeline::KeyframeInterpolation::Linear,
+                },
+            ],
+        };
+        let mut color = nle_timeline::BrightnessContrastEffect {
+            brightness: animated(-0.06, 0.10),
+            contrast: animated(0.92, 1.08),
+            ..Default::default()
+        };
+        color.curves.master.points = vec![
+            nle_timeline::CurvePoint { x: 0.0, y: 0.0 },
+            nle_timeline::CurvePoint { x: 0.5, y: 0.58 },
+            nle_timeline::CurvePoint { x: 1.0, y: 1.0 },
+        ];
+        color.curves.red.points = vec![
+            nle_timeline::CurvePoint { x: 0.0, y: 0.0 },
+            nle_timeline::CurvePoint { x: 0.5, y: 0.44 },
+            nle_timeline::CurvePoint { x: 1.0, y: 1.0 },
+        ];
+        color.curves.green.points = vec![
+            nle_timeline::CurvePoint { x: 0.0, y: 0.0 },
+            nle_timeline::CurvePoint { x: 0.5, y: 0.54 },
+            nle_timeline::CurvePoint { x: 1.0, y: 1.0 },
+        ];
+        color.curves.blue.points = vec![
+            nle_timeline::CurvePoint { x: 0.0, y: 0.0 },
+            nle_timeline::CurvePoint { x: 0.5, y: 0.62 },
+            nle_timeline::CurvePoint { x: 1.0, y: 1.0 },
+        ];
+        let vignette = nle_timeline::VignetteEffect {
+            amount: animated(0.18, 0.42),
+            midpoint: animated(0.34, 0.58),
+            feather: animated(0.22, 0.46),
+            center_x: animated(-0.10, 0.08),
+            center_y: animated(0.06, -0.08),
+        };
+
+        let mut editor = EditorState::new(Language::English, "Phase 3 pixel parity");
+        editor.add_media_paths([source.clone()]);
+        let track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Video)
+            .expect("editor has a video track")
+            .id;
+        let clip = editor
+            .timeline
+            .insert_clip(
+                track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(1_000_000),
+                nle_timeline::Tick(0),
+            )
+            .expect("insert Phase 3 clip");
+        editor
+            .timeline
+            .set_clip_video_effects(
+                clip,
+                vec![
+                    nle_timeline::VideoEffectNode {
+                        id: nle_timeline::VideoEffectId(1),
+                        enabled: true,
+                        kind: nle_timeline::VideoEffectKind::BrightnessContrast(color),
+                    },
+                    nle_timeline::VideoEffectNode {
+                        id: nle_timeline::VideoEffectId(2),
+                        enabled: true,
+                        kind: nle_timeline::VideoEffectKind::Vignette(vignette),
+                    },
+                ],
+            )
+            .expect("install multi-node animated color graph");
+        editor.set_playhead(nle_timeline::Tick(SOURCE_TICK));
+        let target = editor.playback_target().expect("interior playback target");
+        assert_eq!(target.source_tick, nle_timeline::Tick(SOURCE_TICK));
+        assert_eq!(target.video_effects.len(), 2);
+        let target_clip_id = target.clip_id;
+        let target_opacity = target.opacity;
+        let target_correction_count = target.video_effects.len() as u32;
+        let mut corrections = [ViewerColorCorrection::default(); MAX_COLOR_CORRECTIONS_PER_LAYER];
+        for (destination, effect) in corrections.iter_mut().zip(target.video_effects.active()) {
+            *destination = viewer_color_correction(*effect);
+        }
+
+        let effect_snapshot = editor.snapshot();
+        editor
+            .timeline
+            .set_clip_video_effects(clip, Vec::new())
+            .expect("clear effects for neutral export baseline");
+        let neutral_request = nle_export::ExportRequest {
+            snapshot: editor.snapshot(),
+            settings: ProjectSettings {
+                fps: [24, 1],
+                size: [WIDTH, HEIGHT],
+            },
+            output: output.clone(),
+            ffmpeg: ffmpeg.clone(),
+            encoders: Vec::new(),
+        };
+        let neutral_export_rgba = nle_export::qualification_render_frame_rgba(
+            &neutral_request,
+            nle_timeline::Tick(SOURCE_TICK),
+        )
+        .expect("render the neutral production export graph to encoded RGBA");
+        let neutral_max_error = neutral_export_rgba
+            .iter()
+            .zip(&source_decoded.stdout)
+            .map(|(export, source)| export.abs_diff(*source))
+            .max()
+            .unwrap_or_default();
+        assert!(
+            neutral_max_error <= TOLERANCE,
+            "Phase 3 neutral export boundary exceeds tolerance: max_error={neutral_max_error} tolerance={TOLERANCE}"
+        );
+        let request = nle_export::ExportRequest {
+            snapshot: effect_snapshot,
+            ..neutral_request
+        };
+
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("request real headless GPU adapter");
+        let adapter_info = adapter.get_info();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Phase 3 pixel parity device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("request Phase 3 device");
+        let mut compositor =
+            nle_render::ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        compositor.set_sampling_quality(ViewerSamplingQuality::Nearest);
+        compositor
+            .upload_layer_rgba(&device, &queue, 0, WIDTH, HEIGHT, &neutral_export_rgba)
+            .expect("upload the production export graph's neutral RGBA effect input");
+        let size = nle_compositor::PixelSize::new(WIDTH, HEIGHT);
+        let uv = [
+            nle_compositor::Uv { u: 0.0, v: 0.0 },
+            nle_compositor::Uv { u: 1.0, v: 0.0 },
+            nle_compositor::Uv { u: 1.0, v: 1.0 },
+            nle_compositor::Uv { u: 0.0, v: 1.0 },
+        ];
+        let frame = ViewerFrame {
+            project_size: size,
+            logical_canvas_rect: egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WIDTH as f32, HEIGHT as f32),
+            ),
+            black_mattes_before: [0.0; nle_compositor::MAX_COMPOSITE_LAYERS + 1],
+            white_mattes_before: [0.0; nle_compositor::MAX_COMPOSITE_LAYERS + 1],
+            layers: [
+                Some(ViewerLayerPrimitive {
+                    quad: nle_compositor::CompositeQuad {
+                        clip_id: target_clip_id,
+                        positions: [
+                            nle_compositor::Point { x: 0.0, y: 0.0 },
+                            nle_compositor::Point {
+                                x: WIDTH as f32,
+                                y: 0.0,
+                            },
+                            nle_compositor::Point {
+                                x: WIDTH as f32,
+                                y: HEIGHT as f32,
+                            },
+                            nle_compositor::Point {
+                                x: 0.0,
+                                y: HEIGHT as f32,
+                            },
+                        ],
+                        uvs: uv,
+                        opacity: target_opacity,
+                    },
+                    content_uv: uv,
+                    color_corrections: corrections,
+                    color_correction_count: target_correction_count,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Phase 3 full-frame readback"),
+            size: u64::from(256 * HEIGHT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Phase 3 compositor encoder"),
+        });
+        let output_texture = compositor
+            .qualification_prepare(&device, &queue, &mut encoder, frame, 1, size)
+            .expect("encode Phase 3 native preview");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: output_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = queue.submit([encoder.finish()]);
+        let (sent, received) = mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sent.send(result);
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(10)),
+            })
+            .expect("wait for native preview GPU work");
+        received
+            .recv_timeout(Duration::from_secs(10))
+            .expect("native preview readback callback")
+            .expect("map native preview readback");
+        let mapped = readback.slice(..).get_mapped_range();
+        let mut preview_rgba = vec![0; (WIDTH * HEIGHT * 4) as usize];
+        for y in 0..HEIGHT as usize {
+            let source_row = &mapped[y * 256..y * 256 + (WIDTH * 4) as usize];
+            preview_rgba[y * (WIDTH * 4) as usize..(y + 1) * (WIDTH * 4) as usize]
+                .copy_from_slice(source_row);
+        }
+        drop(mapped);
+        readback.unmap();
+
+        let export_rgba =
+            nle_export::qualification_render_frame_rgba(&request, nle_timeline::Tick(SOURCE_TICK))
+                .expect("render the production export graph to encoded RGBA");
+        assert_eq!(
+            export_rgba.len(),
+            preview_rgba.len(),
+            "export graph RGBA dimensions"
+        );
+        let mut max_error = 0_u8;
+        let mut max_coordinate = (0_u32, 0_u32, 0_usize);
+        let mut max_values = (0_u8, 0_u8, 0_u8);
+        for (index, (preview, export)) in preview_rgba.iter().zip(&export_rgba).enumerate() {
+            let error = preview.abs_diff(*export);
+            if error > max_error {
+                max_error = error;
+                max_values = (*preview, *export, neutral_export_rgba[index]);
+                max_coordinate = (
+                    (index / 4 % WIDTH as usize) as u32,
+                    (index / 4 / WIDTH as usize) as u32,
+                    index % 4,
+                );
+            }
+        }
+        let pixel = |rgba: &[u8], x: u32, y: u32| {
+            let start = ((y * WIDTH + x) * 4) as usize;
+            <[u8; 4]>::try_from(&rgba[start..start + 4]).expect("RGBA pixel")
+        };
+        let center_values = (
+            pixel(&preview_rgba, WIDTH / 2, HEIGHT / 2),
+            pixel(&export_rgba, WIDTH / 2, HEIGHT / 2),
+            pixel(&neutral_export_rgba, WIDTH / 2, HEIGHT / 2),
+        );
+        let corner_values = (
+            pixel(&preview_rgba, 0, 0),
+            pixel(&export_rgba, 0, 0),
+            pixel(&neutral_export_rgba, 0, 0),
+        );
+        eprintln!(
+            "Phase 3 effect parity: adapter={} backend={:?} graph_nodes={} size={}x{} tick={} max_error={} neutral_boundary_max_error={} tolerance={}",
+            adapter_info.name,
+            adapter_info.backend,
+            target_correction_count,
+            WIDTH,
+            HEIGHT,
+            SOURCE_TICK,
+            max_error,
+            neutral_max_error,
+            TOLERANCE,
+        );
+        assert!(
+            max_error <= TOLERANCE,
+            "Phase 3 native-preview/export pixel parity failed on {} ({:?}): max_error={max_error} tolerance={TOLERANCE} neutral_export/source_max_error={neutral_max_error} coordinate={max_coordinate:?} preview/export/effect_input={max_values:?} center_preview/export/effect_input={center_values:?} corner_preview/export/effect_input={corner_values:?}",
+            adapter_info.name,
+            adapter_info.backend,
+        );
+    }
+
     #[test]
     #[ignore = "requires Phase 1 fixtures, an exact DX12 IntegratedGpu, and MAELSTROM_PHASE2_INTEGRATED_AUTO_REPORT"]
     fn supplied_media_two_layers_auto_quality_downshifts_and_composites_on_integrated_gpu() {

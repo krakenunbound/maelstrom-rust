@@ -31,6 +31,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 nle-decode = { path = "../nle-decode", features = ["test-hooks"] }
+nle-export = { path = "../nle-export", features = ["qualification"] }
 nle-render = { path = "../nle-render", features = ["qualification"] }
 
 [target.'cfg(windows)'.dependencies]

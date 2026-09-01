@@ -1269,6 +1269,39 @@ fn build_ffmpeg_job_with_title_assets(
     encoder: H264Encoder,
     title_assets: &[TitleAsset],
 ) -> Result<(Vec<String>, String), String> {
+    build_ffmpeg_job_with_title_assets_and_delivery(
+        request,
+        plan,
+        title_assets,
+        VideoDelivery::H264(encoder),
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum VideoDelivery {
+    H264(H264Encoder),
+    #[cfg(feature = "qualification")]
+    RawRgbaFrame {
+        timeline_tick: Tick,
+    },
+}
+
+impl VideoDelivery {
+    fn final_format(self) -> &'static str {
+        match self {
+            Self::H264(_) => "yuv420p",
+            #[cfg(feature = "qualification")]
+            Self::RawRgbaFrame { .. } => "rgba",
+        }
+    }
+}
+
+fn build_ffmpeg_job_with_title_assets_and_delivery(
+    request: &ExportRequest,
+    plan: &ExportPlan,
+    title_assets: &[TitleAsset],
+    delivery: VideoDelivery,
+) -> Result<(Vec<String>, String), String> {
     if title_assets.len() != plan.titles.len() {
         return Err("title export assets do not match the planned titles".to_owned());
     }
@@ -1367,7 +1400,7 @@ fn build_ffmpeg_job_with_title_assets(
             let (center_x, center_y) = quad_center(video.quad);
             let (overlay_x, overlay_y) = transition_overlay_position(video, center_x, center_y);
             filters.push(format!(
-                "[{current_video}][{layer}]overlay=x='{overlay_x}':y='{overlay_y}':eval=frame:alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
+                "[{current_video}][{layer}]overlay=x='{overlay_x}':y='{overlay_y}':eval=frame:format=rgb:alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
                 tick_seconds(video.timeline_start),
                 tick_seconds(video.timeline_end)
             ));
@@ -1377,7 +1410,7 @@ fn build_ffmpeg_job_with_title_assets(
                 filters.push(dip_matte_filter(width, height, &fps, matte, &layer));
                 let next = format!("vbase{}dip", video_number + 1);
                 filters.push(format!(
-                    "[{current_video}][{layer}]overlay=alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
+                    "[{current_video}][{layer}]overlay=format=rgb:alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
                     tick_seconds(matte.start),
                     tick_seconds(matte.end),
                 ));
@@ -1394,60 +1427,234 @@ fn build_ffmpeg_job_with_title_assets(
         let center_y = height as f32 * title.title.position_y;
         let end = title_end(&title.title)?;
         filters.push(format!(
-            "[{current_video}][{layer}]overlay=x='{center_x:.3}-overlay_w/2':y='{center_y:.3}-overlay_h/2':alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
+            "[{current_video}][{layer}]overlay=x='{center_x:.3}-overlay_w/2':y='{center_y:.3}-overlay_h/2':format=rgb:alpha=straight:eof_action=pass:repeatlast=0:enable='between(t,{},{})'[{next}]",
             tick_seconds(title.title.start),
             tick_seconds(end),
         ));
         current_video = next;
     }
-    filters.push(format!("[{current_video}]format=yuv420p[vout]"));
+    let final_filter = match delivery {
+        VideoDelivery::H264(_) => {
+            format!("[{current_video}]format={}[vout]", delivery.final_format())
+        }
+        #[cfg(feature = "qualification")]
+        VideoDelivery::RawRgbaFrame { timeline_tick } => format!(
+            "[{current_video}]format={},trim=start={},setpts=PTS-STARTPTS[vout]",
+            delivery.final_format(),
+            tick_seconds(timeline_tick),
+        ),
+    };
+    filters.push(final_filter);
 
-    let mut audio_labels = Vec::with_capacity(plan.audio_clips.len());
-    for (number, (audio, input)) in plan.audio_clips.iter().zip(audio_inputs).enumerate() {
-        let label = format!("a{number}");
-        filters.push(audio_filter(input, audio, &label));
-        audio_labels.push(format!("[{label}]"));
+    if matches!(delivery, VideoDelivery::H264(_)) {
+        let mut audio_labels = Vec::with_capacity(plan.audio_clips.len());
+        for (number, (audio, input)) in plan.audio_clips.iter().zip(audio_inputs).enumerate() {
+            let label = format!("a{number}");
+            filters.push(audio_filter(input, audio, &label));
+            audio_labels.push(format!("[{label}]"));
+        }
+        if audio_labels.is_empty() {
+            filters.push(format!(
+                "anullsrc=r=48000:cl=stereo,{}[aout]",
+                audio_output_boundary(plan.duration)
+            ));
+        } else {
+            filters.push(format!(
+                "{}amix=inputs={}:normalize=0,{}[aout]",
+                audio_labels.join(""),
+                audio_labels.len(),
+                audio_output_boundary(plan.duration)
+            ));
+        }
     }
-    if audio_labels.is_empty() {
-        filters.push(format!(
-            "anullsrc=r=48000:cl=stereo,{}[aout]",
-            audio_output_boundary(plan.duration)
-        ));
-    } else {
-        filters.push(format!(
-            "{}amix=inputs={}:normalize=0,{}[aout]",
-            audio_labels.join(""),
-            audio_labels.len(),
-            audio_output_boundary(plan.duration)
-        ));
+    match delivery {
+        VideoDelivery::H264(encoder) => args.extend([
+            "-filter_complex_script".to_owned(),
+            "FILTER_SCRIPT".to_owned(),
+            "-map".to_owned(),
+            "[vout]".to_owned(),
+            "-map".to_owned(),
+            "[aout]".to_owned(),
+            "-c:v".to_owned(),
+            encoder.ffmpeg_name().to_owned(),
+            "-b:v".to_owned(),
+            video_bit_rate(width, height).to_owned(),
+            "-c:a".to_owned(),
+            "aac".to_owned(),
+            "-b:a".to_owned(),
+            "192k".to_owned(),
+            "-movflags".to_owned(),
+            "+faststart".to_owned(),
+            // Bound the muxed output explicitly. Input `-t` options alone do not guarantee EOF when
+            // a filter graph contains generated sources or pass-through overlays.
+            "-t".to_owned(),
+            duration,
+            "-progress".to_owned(),
+            "pipe:1".to_owned(),
+            "-nostats".to_owned(),
+            request.output.to_string_lossy().into_owned(),
+        ]),
+        #[cfg(feature = "qualification")]
+        VideoDelivery::RawRgbaFrame { .. } => args.extend([
+            "-filter_complex_script".to_owned(),
+            "FILTER_SCRIPT".to_owned(),
+            "-map".to_owned(),
+            "[vout]".to_owned(),
+            "-frames:v".to_owned(),
+            "1".to_owned(),
+            "-f".to_owned(),
+            "rawvideo".to_owned(),
+            "-pix_fmt".to_owned(),
+            "rgba".to_owned(),
+            "pipe:1".to_owned(),
+        ]),
     }
-    args.extend([
-        "-filter_complex_script".to_owned(),
-        "FILTER_SCRIPT".to_owned(),
-        "-map".to_owned(),
-        "[vout]".to_owned(),
-        "-map".to_owned(),
-        "[aout]".to_owned(),
-        "-c:v".to_owned(),
-        encoder.ffmpeg_name().to_owned(),
-        "-b:v".to_owned(),
-        video_bit_rate(width, height).to_owned(),
-        "-c:a".to_owned(),
-        "aac".to_owned(),
-        "-b:a".to_owned(),
-        "192k".to_owned(),
-        "-movflags".to_owned(),
-        "+faststart".to_owned(),
-        // Bound the muxed output explicitly. Input `-t` options alone do not guarantee EOF when
-        // a filter graph contains generated sources or pass-through overlays.
-        "-t".to_owned(),
-        duration,
-        "-progress".to_owned(),
-        "pipe:1".to_owned(),
-        "-nostats".to_owned(),
-        request.output.to_string_lossy().into_owned(),
-    ]);
     Ok((args, filters.join(";\n")))
+}
+
+/// Test-only bridge that evaluates the production export graph without a lossy video codec.
+#[cfg(feature = "qualification")]
+#[doc(hidden)]
+pub fn qualification_render_frame_rgba(
+    request: &ExportRequest,
+    timeline_tick: Tick,
+) -> Result<Vec<u8>, String> {
+    if !request.ffmpeg.is_absolute() {
+        return Err("qualification FFmpeg path must be absolute".to_owned());
+    }
+    let plan = ExportPlan::from_request(request)?;
+    validate_qualification_tick(timeline_tick, plan.duration)?;
+    let expected_bytes = qualification_frame_bytes(request.settings.size)?;
+    let title_assets = materialize_title_assets(request, &plan, &AtomicBool::new(false))?;
+    let result = (|| {
+        let (args, filter) = build_ffmpeg_job_with_title_assets_and_delivery(
+            request,
+            &plan,
+            &title_assets,
+            VideoDelivery::RawRgbaFrame { timeline_tick },
+        )?;
+        let filter_path = write_qualification_filter(&request.output, &filter)?;
+        let result = run_qualification_frame(&request.ffmpeg, &args, &filter_path, expected_bytes);
+        let _ = fs::remove_file(&filter_path);
+        result
+    })();
+    cleanup_title_assets(&title_assets);
+    result
+}
+
+#[cfg(feature = "qualification")]
+fn validate_qualification_tick(timeline_tick: Tick, duration: Tick) -> Result<(), String> {
+    if timeline_tick.0 < 0 || timeline_tick.0 >= duration.0 {
+        Err(format!(
+            "qualification timeline tick {} is outside export duration {}",
+            timeline_tick.0, duration.0
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "qualification")]
+fn qualification_frame_bytes(size: [u32; 2]) -> Result<usize, String> {
+    let bytes = u64::from(size[0])
+        .checked_mul(u64::from(size[1]))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "qualification frame dimensions overflow RGBA byte length".to_owned())?;
+    usize::try_from(bytes).map_err(|_| {
+        "qualification frame dimensions exceed addressable RGBA byte length".to_owned()
+    })
+}
+
+#[cfg(feature = "qualification")]
+fn write_qualification_filter(output: &Path, filter: &str) -> Result<PathBuf, String> {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    for attempt in 0..32_u8 {
+        let path = parent.join(format!(
+            ".maelstrom-qualification-{}-{}-{attempt}.filter",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => match std::io::Write::write_all(&mut file, filter.as_bytes()) {
+                Ok(()) => return Ok(path),
+                Err(error) => {
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("could not write qualification filter: {error}"));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("could not create qualification filter: {error}")),
+        }
+    }
+    Err("could not allocate a unique qualification filter script".to_owned())
+}
+
+#[cfg(feature = "qualification")]
+fn run_qualification_frame(
+    ffmpeg: &Path,
+    args: &[String],
+    filter_path: &Path,
+    expected_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let filter = filter_path.to_string_lossy();
+    let mut child = Command::new(ffmpeg)
+        .args(args.iter().map(|arg| {
+            if arg == "FILTER_SCRIPT" {
+                filter.as_ref()
+            } else {
+                arg
+            }
+        }))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not launch {}: {error}", ffmpeg.display()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "missing qualification frame pipe".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "missing FFmpeg error pipe".to_owned())?;
+    let stdout_join =
+        thread::spawn(move || read_limited_stdout(stdout, expected_bytes.saturating_add(1)));
+    let stderr_join = thread::spawn(move || read_stderr_tail(stderr));
+    let status = child.wait().map_err(|error| error.to_string())?;
+    let (frame, overflow) = stdout_join.join().unwrap_or_default();
+    let stderr = stderr_join.join().unwrap_or_default();
+    if !status.success() {
+        return Err(last_error_lines(&String::from_utf8_lossy(&stderr)));
+    }
+    if overflow || frame.len() != expected_bytes {
+        return Err(format!(
+            "qualification FFmpeg emitted {} RGBA bytes; expected {expected_bytes}",
+            frame.len()
+        ));
+    }
+    Ok(frame)
+}
+
+#[cfg(feature = "qualification")]
+fn read_limited_stdout(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
+    let mut output = Vec::with_capacity(limit.min(1024 * 1024));
+    let mut overflow = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let available = limit.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..count.min(available)]);
+        overflow |= count > available;
+    }
+    (output, overflow)
 }
 
 fn title_filter(input: usize, title: &TitleOverlay, fps: &str, label: &str) -> String {
@@ -1552,6 +1759,13 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: &str, label: &str) -> 
         video.clip.duration,
     );
     let angle = transform.rotation_degrees.to_radians();
+    let rotation = if angle == 0.0 {
+        String::new()
+    } else {
+        format!(
+            ",premultiply=inplace=1,rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),unpremultiply=inplace=1"
+        )
+    };
     // Freeze exactly the first decoded image frame, then bound the generated stream again in
     // the graph. This makes local `T`, fades, and overlay lifetime match the planned clip.
     let still_prefix = if video.is_still {
@@ -1575,7 +1789,7 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: &str, label: &str) -> 
     // alpha for the existing pointwise color stack. Rotation gets the same guarded round trip;
     // FFmpeg's overlay consumes the final straight-alpha layer.
     format!(
-        "[{input}:v]{input_timing},format=rgba,premultiply=inplace=1,crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},unpremultiply=inplace=1{color},colorchannelmixer=aa={:.6}{fades}{transition},premultiply=inplace=1,rotate={angle:.9}:c=none:ow=rotw({angle:.9}):oh=roth({angle:.9}),unpremultiply=inplace=1,setpts=PTS+{}/TB[{label}]",
+        "[{input}:v]{input_timing},format=rgba,premultiply=inplace=1,crop=w={crop_width:.3}:h={crop_height:.3}:x={:.3}:y={:.3},scale={scaled_width}:{scaled_height}{}{},unpremultiply=inplace=1{color},colorchannelmixer=aa={:.6}{fades}{transition}{rotation},setpts=PTS+{}/TB[{label}]",
         video.source_size.width as f32 * transform.crop_left,
         video.source_size.height as f32 * transform.crop_top,
         if transform.flip_h { ",hflip" } else { "" },
@@ -2411,6 +2625,37 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "qualification")]
+    #[test]
+    fn qualification_delivery_uses_rgba_without_h264_or_audio_mapping() {
+        let mut editor = EditorState::new(Language::English, "Qualification format");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let request = request(&editor);
+        let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
+        let (args, graph) = build_ffmpeg_job_with_title_assets_and_delivery(
+            &request,
+            &plan,
+            &[],
+            VideoDelivery::RawRgbaFrame {
+                timeline_tick: Tick(500_000),
+            },
+        )
+        .unwrap();
+        assert!(graph.contains("format=rgba,trim=start=0.500000,setpts=PTS-STARTPTS"));
+        assert!(!graph.contains("[aout]"));
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "rgba"]));
+        assert!(!args.iter().any(|arg| arg == "-c:v"));
+    }
+
+    #[cfg(feature = "qualification")]
+    #[test]
+    fn qualification_tick_must_be_within_export_duration() {
+        assert!(validate_qualification_tick(Tick(0), Tick(1)).is_ok());
+        assert!(validate_qualification_tick(Tick(-1), Tick(1)).is_err());
+        assert!(validate_qualification_tick(Tick(1), Tick(1)).is_err());
+    }
+
     #[test]
     fn export_graph_keeps_exact_frame_rate_for_every_visual_source() {
         let mut editor = EditorState::new(Language::English, "Fractional export");
@@ -3105,6 +3350,7 @@ mod tests {
             .unwrap()
             .clips[0];
         clip.fade_in.duration = Tick(100_000);
+        clip.transform.rotation_degrees = 10.0;
         clip.video_effects
             .push(brightness_contrast_node(true, scalar(0.1), scalar(1.0)))
             .unwrap();
@@ -3134,11 +3380,11 @@ mod tests {
         let request = request(&editor);
         let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
         let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
-        assert!(
-            graph.contains(
-                "rotate=0.000000000:c=none:ow=rotw(0.000000000):oh=roth(0.000000000),unpremultiply=inplace=1,setpts=PTS+3.000000/TB"
-            )
-        );
+        assert!(graph.contains("setpts=PTS+3.000000/TB"));
+        assert!(!graph.contains("rotate=0.000000000"));
+        assert!(graph.contains(
+            "overlay=x='960.000-overlay_w/2':y='540.000-overlay_h/2':eval=frame:format=rgb"
+        ));
         assert!(graph.contains("between(t,3.000000,18.000000)"));
     }
 
@@ -3397,7 +3643,10 @@ mod tests {
             graph.contains("color=c=black:s=1920x1080:r=30/1"),
             "{graph}"
         );
-        assert!(graph.contains("[vbase1][vdip0]overlay"), "{graph}");
+        assert!(
+            graph.contains("[vbase1][vdip0]overlay=format=rgb:alpha=straight"),
+            "{graph}"
+        );
         assert!(
             graph.contains("2*0.500000*(T/0.500000)+(1-2*0.500000)*pow((T/0.500000)\\,2)"),
             "{graph}"
@@ -4186,7 +4435,7 @@ mod tests {
         assert!(graph.contains("setpts=PTS+2.000000/TB[title0]"), "{graph}");
         assert!(
             graph.contains(
-                "[vbase0][title0]overlay=x='480.000-overlay_w/2':y='810.000-overlay_h/2':alpha=straight:"
+                "[vbase0][title0]overlay=x='480.000-overlay_w/2':y='810.000-overlay_h/2':format=rgb:alpha=straight:"
             ),
             "{graph}"
         );
