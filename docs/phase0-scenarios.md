@@ -6,9 +6,11 @@ matrix. It does not launch the Maelstrom GUI executable.
 The runner requires an explicit absolute FFmpeg 8.1 bundle path. It generates
 and validates the tracked fixture contract, then passes the generated two-second
 MP4 through `MAELSTROM_PHASE0_MEDIA` and the exact absolute reordered TS path through
-`MAELSTROM_REORDERED_VFR_TEST_MEDIA`. Before the seven-scenario matrix, focused Cargo tests gate
-waveform timestamp-origin normalization, software decode's local frame ticks, and app preview
-floor/hold addressing for that reordered fixture. The JSON report is
+`MAELSTROM_REORDERED_VFR_TEST_MEDIA`. It also routes the generated shifted/reordered MPEG-4 MP4
+through `MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA`. Before the seven-scenario matrix, focused
+Cargo tests gate waveform timestamp-origin normalization, software decode against independent CLI
+pixels, and app preview floor/hold addressing across the reordered TS, shifted/reordered MP4, and
+shifted 10-bit MOV fixtures. The JSON report is
 written atomically to the ignored `artifacts/phase0-scenarios/` directory.
 
 ```powershell

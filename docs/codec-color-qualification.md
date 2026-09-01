@@ -59,8 +59,29 @@ Each result must retain its requested target/request identity and Software backe
 The supplied contract requires eight declared frames, and the timestamp scan is
 limited to 32 packets.
 
+## Shifted and reordered MPEG-4 follow-up — 2026-08-31
+
+The generated fixture `vfr-reordered-shifted-mpeg4.mp4` closes a gap left between the
+earlier fixtures: it combines irregular presentation gaps, MPEG-4 B-frame packet reordering,
+an MP4 container, and a nonzero three-second stream origin in one redistributable recipe.
+FFprobe pins MPEG-4 Advanced Simple Profile/yuv420p, the I/B/B/P/B/B/P/P picture sequence,
+nonmonotonic packet PTS with PTS/DTS differences, and the normalized local boundaries
+`0, 33333, 100000, 133333, 200000, 266667, 366667, 400000` microseconds.
+
+The release decode regression checks all eight boundaries forward and backward, the final frame,
+and two fresh middle/late seeks against a separate sequential FFmpeg CLI RGBA reference: 19 exact
+full-frame comparisons on the Software backend. Waveform analysis independently checks the three-
+second source origin and normalized local index. The app runs normal analysis-result handling and
+checks every boundary plus the preceding hold interval in both directions without inventing a CFR
+duration for the final frame. `Run-Phase0Scenarios.ps1` generates, validates, routes, and cleans the
+fixture environment alongside the existing MPEG-2 TS and 10-bit MOV cases.
+
+This improves codec/container/reorder coverage without a hardware encoder or third-party media. It
+does not establish MPEG-4 hardware decoding, long-GOP camera behavior, AV1, 4K throughput, physical
+presentation latency, or broad cross-machine qualification.
+
 The deterministic MOV recipes, hashes, profile, pixel format, keyframe positions,
-picture types, and presentation-PTS fingerprint are now in the seven-fixture
+picture types, and presentation-PTS fingerprint are now in the eight-fixture
 manifest. Both normalize to local boundaries
 `0, 41667, 125000, 166667, 250000, 333333, 458333, 500000` microseconds.
 The app regression runs normal background-analysis result handling and checks
@@ -80,7 +101,7 @@ No third-party content or additional media runtime was downloaded.
 
 ## Verified checkpoint — 2026-08-30
 
-The release workspace passes 743 tests (16 opt-in tests ignored), with the supplied
+The historical release workspace checkpoint passes 743 tests (16 opt-in tests ignored), with the supplied
 HEVC, H.264, reordered MPEG-2, ProRes, and DNxHR fixture variables enabled. Strict
 all-target release Clippy, formatting, all seven fixture contracts, the expanded
 Phase 0 runner and its seven scenarios, and independent review pass.

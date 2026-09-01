@@ -29,6 +29,11 @@ MPEG-2 with two B-frames; its contract pins decoded presentation PTS, packet-ord
 types, and requires observable packet reordering. Both are generated, not downloaded, and carry
 no third-party video or audio content. The validator scans the exact timing contract; it does not
 infer VFR from `r_frame_rate`.
+`vfr-reordered-shifted-mpeg4.mp4` combines the same eight-frame selection at 320×180/30 fps with
+a three-second presentation origin and MPEG-4 B-frames. Its MP4 contract pins Advanced Simple
+Profile/yuv420p, decoded presentation PTS from 3.000000 to 3.400000 seconds, packet-order PTS,
+picture types, and observable reordering. It is the compact source-time fixture for code that must
+distinguish presentation origin from local clip time.
 The two shifted 10-bit MOV fixtures add ProRes Standard and DNxHR HQX coverage,
 eight all-intra frames with the same irregular 24 fps selection and a seven-second
 presentation origin. Their manifest pins 10-bit 4:2:2 pixels and exact timestamps.

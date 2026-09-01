@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Add a deterministic shifted/reordered MPEG-4 VFR MP4 to the Phase 0 fixture contract. The
+  eight-frame file combines a three-second source origin, irregular gaps, and I/B/B/P/B/B/P/P
+  packet reordering. Its generated output matches the pinned hash/size; manifest/waveform/decode/app checks
+  pass, including 19 exact Software/CLI pixel seeks and bidirectional preview floor/hold mapping.
+  The complete seven-scenario Phase 0 runner passes without launching the editor. See
+  `docs/media-fixtures.md`, `docs/codec-color-qualification.md`, and `docs/phase0-scenarios.md`.
 - [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 8 now
   distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
   from physical scanout, which remains explicitly false. Package and cross-adapter validators reject
@@ -378,7 +384,9 @@ Last updated: 2026-08-31
   Qualified locally through exact cache/session peaks; whole-app RAM and actor accounting are separate.
 - [ ] Expand VFR qualification across additional codecs, reorder patterns, containers, and decoder
   backends.
-  Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 now have exact local Software
+  Generated shifted/reordered MPEG-4 MP4 now adds one deterministic case combining irregular VFR,
+  a three-second stream origin, B-frame packet reordering, and exact waveform/decode/app local-time
+  checks. Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 also have exact local Software
   timing/pixel evidence. ProRes/DNxHR now also pass 20 export-graph source-identity
   cases with a test MPEG-4 encoder. AV1, broader camera sources, hardware/color
   parity and production-encoder conformance remain open.

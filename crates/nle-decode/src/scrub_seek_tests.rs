@@ -1028,6 +1028,22 @@ fn scrub_seek_real_codec_vfr_generated_dnxhr_matches_independent_cli_reference()
 }
 
 #[test]
+fn scrub_seek_real_codec_vfr_generated_shifted_reordered_mpeg4_matches_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    let Some(path) = std::env::var_os("MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA") else {
+        return;
+    };
+    assert_real_codec_vfr_seek_matches_cli_reference(
+        "generated shifted/reordered MPEG-4 VFR",
+        PathBuf::from(path),
+        &["mpeg4", "Advanced Simple Profile", "yuv420p"],
+        7_000,
+    );
+}
+
+#[test]
 fn scrub_seek_real_codec_vfr_hevc_main10_matches_independent_cli_reference() {
     if !ffmpeg_available_for_scrub_seek_test() {
         return;
@@ -1039,7 +1055,7 @@ fn scrub_seek_real_codec_vfr_hevc_main10_matches_independent_cli_reference() {
         "supplied HEVC Main 10 VFR",
         PathBuf::from(path),
         &["hevc", "Main 10", "yuv420p10le"],
-        7_000,
+        8_000,
     );
 }
 

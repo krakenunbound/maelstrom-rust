@@ -74,6 +74,17 @@ Invoke-FixtureFfmpeg @(
     '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-muxdelay', '0'
 ) $reorderedVfrPath
 
+# This MP4 deliberately combines a nonzero presentation origin with irregular
+# selected 30 fps frames and B-frame packet reordering. It exercises consumers
+# that must retain source-time PTS rather than normalize them to a local origin.
+$shiftedReorderedVfrPath = Join-Path $outputPath 'vfr-reordered-shifted-mpeg4.mp4'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
+    '-vf', "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)',setpts=PTS+3/TB",
+    '-frames:v', '8', '-fps_mode', 'vfr', '-an', '-c:v', 'mpeg4', '-q:v', '8', '-g', '8', '-bf', '2',
+    '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-movflags', '+faststart'
+) $shiftedReorderedVfrPath
+
 # Intra-frame professional formats with 10-bit 4:2:2 pixels and a nonzero MOV
 # presentation origin. Their local frame timing must still begin at zero.
 foreach ($codec in @('prores', 'dnxhr')) {

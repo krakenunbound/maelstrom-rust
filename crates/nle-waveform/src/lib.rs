@@ -1714,6 +1714,41 @@ mod tests {
     }
 
     #[test]
+    fn supplied_shifted_reordered_vfr_fixture_publishes_local_presentation_timestamps() {
+        let Some(path) = std::env::var_os("MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let metadata = probe_media_metadata(&path).expect("probe shifted reordered VFR fixture");
+        assert_eq!(metadata.video_codec.as_deref(), Some("mpeg4"));
+        assert!(metadata.audio_codec.is_none());
+        assert!(
+            metadata
+                .streams
+                .iter()
+                .all(|stream| stream.kind.as_deref() != Some("audio"))
+        );
+        let video = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind.as_deref() == Some("video"))
+            .expect("shifted fixture video stream");
+        assert!((video.start_seconds.expect("video stream origin") - 3.0).abs() < 0.000_001);
+
+        let timing = analyze_frame_timing(&path).expect("scan shifted reordered VFR fixture");
+        assert!(matches!(timing, FrameTiming::Variable(_)));
+        let FrameTiming::Variable(index) = timing else {
+            unreachable!("shifted fixture must be variable frame timing");
+        };
+        assert_eq!(
+            index.pts(),
+            &[
+                0, 33_333, 100_000, 133_333, 200_000, 266_667, 366_667, 400_000
+            ]
+        );
+    }
+
+    #[test]
     fn duplicate_or_incomplete_decoded_frame_timestamps_are_unknown() {
         assert_eq!(
             classify_frame_timing(vec![0, 0, 33_333]),

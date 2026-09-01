@@ -398,7 +398,10 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       package backed up, runtime hashes/static imports and launcher check-only
       mode pass. GUI/windowed package qualification remains pending.
       See `docs/exact-export-frame-rate.md`. This remains open pending broad real-media/
-      cross-backend proof across more codecs, reorder patterns, and containers.
+      cross-backend proof across more codecs, reorder patterns, and containers. A generated
+      MPEG-4 Advanced Simple Profile MP4 now combines irregular VFR, B-frame packet reordering,
+      and a three-second source origin; exact CLI-reference decode plus waveform/app local-time
+      checks pass without proprietary media or a hardware encoder.
 - [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX
       fixture exposed BT.709 frames being interpreted as BT.601 (4,644 differing RGBA bytes in a
       64x48 frame, maximum channel error 41). The corrected software path passes exact independent
