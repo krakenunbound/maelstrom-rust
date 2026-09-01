@@ -12,6 +12,7 @@
 /artifacts/phase1-multisource/
 /artifacts/phase1-latency/
 /artifacts/phase1-sustained/
+/artifacts/phase2-integrated-auto/
 /artifacts/package-worker-policy-c603358/
 
 # Local AI weights and model packages are never public source. Keep only the

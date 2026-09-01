@@ -959,6 +959,42 @@ impl ViewerCompositorRenderer {
         self.presentation.clear();
     }
 
+    /// Test-only headless bridge for app-level GPU qualifications. The caller
+    /// owns submission and readback; production presentation remains private.
+    #[cfg(feature = "qualification")]
+    #[doc(hidden)]
+    pub fn qualification_prepare<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: ViewerFrame,
+        frame_generation: u64,
+        canvas_size: PixelSize,
+    ) -> Option<&'a wgpu::Texture> {
+        self.prepare(
+            device,
+            queue,
+            encoder,
+            Some(frame),
+            frame_generation,
+            canvas_size,
+        )
+        .then(|| {
+            &self
+                .outputs
+                .as_ref()
+                .expect("qualification output prepared")[self.front_output]
+                ._texture
+        })
+    }
+
+    #[cfg(feature = "qualification")]
+    #[doc(hidden)]
+    pub fn qualification_composed_upload_serials(&self) -> [Option<u64>; MAX_COMPOSITE_LAYERS] {
+        self.presentation.composed_upload_serials
+    }
+
     fn prepare(
         &mut self,
         device: &wgpu::Device,

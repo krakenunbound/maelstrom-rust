@@ -14432,6 +14432,358 @@ mod tests {
             .expect("atomically write Phase 1 multisource report");
     }
 
+    fn phase2_integrated_auto_report_path() -> Result<PathBuf, String> {
+        let path = phase0_required_absolute_path("MAELSTROM_PHASE2_INTEGRATED_AUTO_REPORT")?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err("MAELSTROM_PHASE2_INTEGRATED_AUTO_REPORT must end in .json".to_owned());
+        }
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err("MAELSTROM_PHASE2_INTEGRATED_AUTO_REPORT parent must exist".to_owned());
+        }
+        Ok(path)
+    }
+
+    fn phase2_wait_for_current_frames(
+        app: &mut App,
+        inject_pressure_on_layer: Option<usize>,
+    ) -> [nle_decode::DecodedFrame; 2] {
+        let mut frames = [None, None];
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while frames.iter().any(Option::is_none) && Instant::now() < deadline {
+            for (layer, slot) in frames.iter_mut().enumerate() {
+                if slot.is_some() {
+                    continue;
+                }
+                loop {
+                    match app.monitor_decoders[layer].try_recv() {
+                        Ok(Some(nle_decode::DecodeEvent::Frame(frame))) => {
+                            if inject_pressure_on_layer == Some(layer) {
+                                app.monitor_request_started_at[layer] = Some((
+                                    frame.request_id,
+                                    Instant::now() - Duration::from_secs(1),
+                                ));
+                            }
+                            let mut adaptive_quality_changed = false;
+                            let accepted = app.apply_monitor_decode_event(
+                                layer,
+                                nle_decode::DecodeEvent::Frame(frame.clone()),
+                                &mut adaptive_quality_changed,
+                            );
+                            if accepted && !app.monitor_requests_in_flight[layer] {
+                                *slot = Some(frame);
+                                break;
+                            }
+                        }
+                        Ok(Some(nle_decode::DecodeEvent::Error(error))) => {
+                            panic!("Phase 2 layer {layer} decoder error: {error:?}")
+                        }
+                        Ok(None) => break,
+                        Err(error) => panic!("Phase 2 layer {layer} decoder closed: {error:?}"),
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        frames.map(|frame| {
+            frame.unwrap_or_else(|| {
+                panic!(
+                    "Phase 2 current real decoded frame before deadline; requests={:?}, generations={:?}, ids={:?}, in_flight={:?}, deferred={:?}, diagnostics={:?}",
+                    app.monitor_last_requests,
+                    app.monitor_generations,
+                    app.monitor_latest_request_ids,
+                    app.monitor_requests_in_flight,
+                    app.monitor_request_deferred,
+                    app.runtime_diagnostics(),
+                )
+            })
+        })
+    }
+
+    fn phase2_readback_pixel(
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        submission: wgpu::SubmissionIndex,
+    ) -> Result<[u8; 4], String> {
+        let (sent, received) = mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sent.send(result);
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .map_err(|error| format!("Phase 2 GPU completion: {error}"))?;
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("Phase 2 readback callback: {error}"))?
+            .map_err(|error| format!("Phase 2 readback mapping: {error}"))?;
+        let bytes = buffer.slice(..).get_mapped_range();
+        let pixel = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        drop(bytes);
+        buffer.unmap();
+        Ok(pixel)
+    }
+
+    #[test]
+    #[ignore = "requires Phase 1 fixtures, an exact DX12 IntegratedGpu, and MAELSTROM_PHASE2_INTEGRATED_AUTO_REPORT"]
+    fn supplied_media_two_layers_auto_quality_downshifts_and_composites_on_integrated_gpu() {
+        const LAYERS: usize = 2;
+        const SOURCE_TICK: i64 = 1_500_000;
+        // Bicubic texture sampling and the YUV-to-RGBA decode path can differ by a few
+        // encoded-sRGB code values at a source-pixel boundary; keep this below one 8-bit stop.
+        const READBACK_TOLERANCE: u8 = 24;
+        let all_sources = phase1_multisource_sources().expect("validate Phase 1 source fixtures");
+        let sources = all_sources.into_iter().take(LAYERS).collect::<Vec<_>>();
+        assert_eq!(
+            sources.len(),
+            LAYERS,
+            "Phase 2 requires exactly two sources"
+        );
+        let report_path = phase2_integrated_auto_report_path()
+            .expect("validate MAELSTROM_PHASE2_INTEGRATED_AUTO_REPORT");
+
+        let mut app = phase1_multisource_app(&sources, LAYERS);
+        app.editor.set_playhead(nle_timeline::Tick(SOURCE_TICK));
+        // Playback uses the same moving-preview resolution the editor uses while scrubbing.
+        app.editor.playing = true;
+        assert!(app.editor.set_preview_quality(PreviewQuality::Auto));
+        app.sync_monitor_decode();
+        let initial = [
+            app.monitor_last_requests[0].expect("initial Auto request layer 0"),
+            app.monitor_last_requests[1].expect("initial Auto request layer 1"),
+        ];
+        let initial_request_ids = app.monitor_latest_request_ids;
+        assert!(initial.iter().all(|request| {
+            request.selected_quality == PreviewQuality::Auto
+                && request.resolved_quality == PreviewQuality::Full
+        }));
+        let _ = phase2_wait_for_current_frames(&mut app, None);
+
+        // The production observation path receives four deliberately old start timestamps.
+        // These are controller-pressure samples, not a claim about organic decode latency.
+        for sample in 0..4 {
+            app.editor.set_playhead(nle_timeline::Tick(
+                SOURCE_TICK + (sample as i64 + 1) * 100_000,
+            ));
+            app.sync_monitor_decode();
+            let _ = phase2_wait_for_current_frames(&mut app, Some(0));
+        }
+        assert_eq!(app.editor.preview_quality(), PreviewQuality::Auto);
+        assert_eq!(app.editor.resolved_preview_quality(), PreviewQuality::Half);
+
+        // Force a fresh production request after the observed downshift. Without a new target,
+        // a fast cache completion from the final pressure sample can already satisfy the same
+        // Half key before this assertion is reached.
+        app.editor
+            .set_playhead(nle_timeline::Tick(SOURCE_TICK + 600_000));
+        app.sync_monitor_decode();
+        let half_requests = [
+            app.monitor_last_requests[0].expect("Half Auto request layer 0"),
+            app.monitor_last_requests[1].expect("Half Auto request layer 1"),
+        ];
+        let half_request_ids = app.monitor_latest_request_ids;
+        for layer in 0..LAYERS {
+            assert_eq!(half_requests[layer].selected_quality, PreviewQuality::Auto);
+            assert_eq!(half_requests[layer].resolved_quality, PreviewQuality::Half);
+            assert_eq!(half_requests[layer].width * 2, initial[layer].width);
+            assert_eq!(half_requests[layer].height * 2, initial[layer].height);
+            assert!(half_requests[layer].project_epoch > initial[layer].project_epoch);
+            assert!(half_request_ids[layer] > initial_request_ids[layer]);
+        }
+        let half_frames = phase2_wait_for_current_frames(&mut app, None);
+        for (layer, frame) in half_frames.iter().enumerate() {
+            assert_eq!(frame.media_id, layer as u32 + 1);
+            assert_eq!(
+                (frame.width, frame.height),
+                (half_requests[layer].width, half_requests[layer].height)
+            );
+        }
+
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::DX12;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12))
+            .into_iter()
+            .find(|adapter| adapter.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
+            .expect("Phase 2 requires an exact DX12 IntegratedGpu adapter; refusing fallback");
+        let adapter_info = adapter.get_info();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Phase 2 integrated Auto compositor device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("request exact IntegratedGpu compositor device");
+        let mut compositor =
+            nle_render::ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        for (layer, frame) in half_frames.iter().enumerate() {
+            compositor
+                .upload_layer_rgba(
+                    &device,
+                    &queue,
+                    layer,
+                    frame.width,
+                    frame.height,
+                    &frame.rgba,
+                )
+                .unwrap_or_else(|error| panic!("upload Phase 2 layer {layer}: {error}"));
+        }
+        let output_size =
+            nle_compositor::PixelSize::new(half_frames[0].width, half_frames[0].height);
+        let full_uv = [
+            nle_compositor::Uv { u: 0.0, v: 0.0 },
+            nle_compositor::Uv { u: 1.0, v: 0.0 },
+            nle_compositor::Uv { u: 1.0, v: 1.0 },
+            nle_compositor::Uv { u: 0.0, v: 1.0 },
+        ];
+        let primitive = |clip_id, left, right| nle_render::ViewerLayerPrimitive {
+            quad: nle_compositor::CompositeQuad {
+                clip_id: nle_timeline::ClipId(clip_id),
+                positions: [
+                    nle_compositor::Point { x: left, y: 0.0 },
+                    nle_compositor::Point { x: right, y: 0.0 },
+                    nle_compositor::Point {
+                        x: right,
+                        y: output_size.height as f32,
+                    },
+                    nle_compositor::Point {
+                        x: left,
+                        y: output_size.height as f32,
+                    },
+                ],
+                uvs: full_uv,
+                opacity: 1.0,
+            },
+            content_uv: full_uv,
+            color_corrections: [nle_render::ViewerColorCorrection::default();
+                MAX_COLOR_CORRECTIONS_PER_LAYER],
+            color_correction_count: 0,
+        };
+        let split = output_size.width as f32 / 2.0;
+        let frame = nle_render::ViewerFrame {
+            project_size: output_size,
+            logical_canvas_rect: egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(output_size.width as f32, output_size.height as f32),
+            ),
+            black_mattes_before: [0.0; nle_compositor::MAX_COMPOSITE_LAYERS + 1],
+            white_mattes_before: [0.0; nle_compositor::MAX_COMPOSITE_LAYERS + 1],
+            layers: [
+                Some(primitive(1, 0.0, split)),
+                Some(primitive(2, split, output_size.width as f32)),
+                None,
+                None,
+            ],
+        };
+        let left_probe = (output_size.width / 4, output_size.height / 2);
+        let right_probe = (output_size.width * 3 / 4, output_size.height / 2);
+        let left_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Phase 2 left source readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let right_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Phase 2 right source readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Phase 2 integrated Auto compositor encoder"),
+        });
+        {
+            let output = compositor
+                .qualification_prepare(&device, &queue, &mut encoder, frame, 1, output_size)
+                .expect("Phase 2 compositor must encode its first composition");
+            for ((x, y), buffer) in [(left_probe, &left_readback), (right_probe, &right_readback)] {
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: output,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(1),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        let submission = queue.submit([encoder.finish()]);
+        let actual = [
+            phase2_readback_pixel(&device, &left_readback, submission.clone())
+                .expect("left source readback"),
+            phase2_readback_pixel(&device, &right_readback, submission)
+                .expect("right source readback"),
+        ];
+        let expected = half_frames.map(|decoded| {
+            let x = decoded.width as usize / 2;
+            let y = decoded.height as usize / 2;
+            let index = (y * decoded.width as usize + x) * 4;
+            [
+                decoded.rgba[index],
+                decoded.rgba[index + 1],
+                decoded.rgba[index + 2],
+                decoded.rgba[index + 3],
+            ]
+        });
+        let probe_passed = actual.iter().zip(expected).all(|(actual, expected)| {
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.abs_diff(expected) <= READBACK_TOLERANCE)
+        });
+        assert!(
+            probe_passed,
+            "Phase 2 transformed source probes failed: actual={actual:?}, expected={expected:?}"
+        );
+        let evidence = compositor.presentation_evidence();
+        let composed_upload_serials = compositor.qualification_composed_upload_serials();
+        assert!(evidence.upload_serials[0] > 0 && evidence.upload_serials[1] > 0);
+        assert!(composed_upload_serials[0].is_some() && composed_upload_serials[1].is_some());
+
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "status": "passed",
+            "scope": "headless_app_auto_scheduler_and_integrated_compositor",
+            "app_auto_preview_observed": true,
+            "integrated_gpu_compositor_observed": true,
+            "window_surface_observed": false,
+            "physical_scanout_observed": false,
+            "controlled_timing_pressure_injected": true,
+            "timing_pressure_note": "Four one-second synthetic turnaround samples were injected immediately before production apply_monitor_decode_event; this proves Auto hysteresis, not organic decode latency.",
+            "adapter": { "name": adapter_info.name, "vendor": adapter_info.vendor, "device": adapter_info.device, "device_type": format!("{:?}", adapter_info.device_type), "backend": format!("{:?}", adapter_info.backend), "driver": adapter_info.driver, "driver_info": adapter_info.driver_info },
+            "sources": sources,
+            "initial_requests": initial.map(|request| serde_json::json!({"generation": request.project_epoch, "media_id": request.media_id, "source_tick": request.source_tick, "request_id": initial_request_ids[(request.media_id - 1) as usize], "dimensions": [request.width, request.height], "selected_quality": format!("{:?}", request.selected_quality), "resolved_quality": format!("{:?}", request.resolved_quality)})),
+            "half_requests": half_requests.map(|request| serde_json::json!({"generation": request.project_epoch, "media_id": request.media_id, "source_tick": request.source_tick, "request_id": half_request_ids[(request.media_id - 1) as usize], "dimensions": [request.width, request.height], "selected_quality": format!("{:?}", request.selected_quality), "resolved_quality": format!("{:?}", request.resolved_quality)})),
+            "decoded_backends": app.observed_decoder_backends,
+            "probes": [
+                {"layer": 0, "coordinate": [left_probe.0, left_probe.1], "actual_rgba": actual[0], "expected_rgba": expected[0], "tolerance": READBACK_TOLERANCE, "passed": true},
+                {"layer": 1, "coordinate": [right_probe.0, right_probe.1], "actual_rgba": actual[1], "expected_rgba": expected[1], "tolerance": READBACK_TOLERANCE, "passed": true}
+            ],
+            "upload_serials": evidence.upload_serials,
+            "composed_upload_serials": composed_upload_serials
+        });
+        phase1_multisource_write_report(&report_path, &report)
+            .expect("atomically write Phase 2 report");
+    }
+
     #[test]
     #[ignore = "requires four explicit dynamic 1920x1080 MPEG-4 fixtures and MAELSTROM_PHASE1_LATENCY_REPORT"]
     fn supplied_media_latency_comparison_uses_isolated_full_quality_trials() {

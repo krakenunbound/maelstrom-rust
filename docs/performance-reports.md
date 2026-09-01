@@ -177,6 +177,44 @@ The schema-3 file is retained success evidence only; adapter discovery, device c
 execution failures can terminate before publication and remain visible in the Cargo diagnostic
 output. Machine-readable failed-run evidence is still an open qualification-harness improvement.
 
+## Phase 2 integrated Auto-preview qualification
+
+The schema-1 integrated-Auto gate joins the real app monitor scheduler to the retained compositor
+without opening the editor. It consumes the first two independently generated Phase 1 hue fixtures,
+verifies both inputs remain 1920x1080, selects Auto in `EditorState`, and accepts current real
+decoder events for both layers at Full 640x360. Four deliberately old request-start timestamps are
+then supplied immediately before the production completion-application path. This controlled input
+exercises the real four-sample Auto hysteresis but is explicitly not an organic decode-latency
+measurement.
+
+After Auto resolves to Half, the test advances the target and requires both layers to receive newer
+generation and request IDs, decode fresh 320x180 frames, and retain the correct independent media
+identities. It then selects an exact DX12 `IntegratedGpu` adapter with no fallback, uploads those
+two decoded frames to `ViewerCompositorRenderer`, places them in non-overlapping transformed halves,
+and checks a source-specific readback in each half. Upload and composed-upload serials must match.
+The qualification-only renderer bridge is enabled only for the `nle-app` test dependency and is not
+present in normal production builds.
+
+Run the gate through the full repository script path:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Run-Phase2IntegratedAuto.ps1'
+```
+
+The runner regenerates and validates the shared fixtures, holds their named mutex throughout the
+decode/compositor run, and fails closed on source path/size/resolution, schema types, adapter class,
+request identities, quality/dimensions, decoder backend, probe coordinates/RGBA/tolerance, and
+upload/composition serials. Its ignored report is
+`artifacts/phase2-integrated-auto/phase2-integrated-auto.schema1.json`.
+
+The retained 2026-08-31 run selected Intel UHD Graphics 770 through DX12. Auto advanced both real
+layers from Full 640x360 to Half 320x180; both transformed source probes passed with the fixed
+24-channel tolerance. The report records
+`scope: "headless_app_auto_scheduler_and_integrated_compositor"`,
+`window_surface_observed: false`, and `physical_scanout_observed: false`. It therefore closes the
+Phase 2 app-Auto/integrated-compositor gate, not native viewer presentation, DWM composition,
+physical scanout, or end-to-end display latency.
+
 ## Phase 0 cross-adapter full surface qualification
 
 The opt-in full-surface runner complements the headless compositor proof. It launches the exact

@@ -697,10 +697,17 @@ Exit gate:
       deterministic RGBA readback on RTX 3090. The final run measured 0.0904 ms CPU encode p95 and
       0.2765 ms GPU pass p95 against the 33.333 ms frame budget. This is offscreen compositor evidence, not app
       presentation, DWM or physical scanout. See `docs/performance-reports.md`.
-- [ ] At least two layers operate on the integrated reference profile using Auto preview quality.
-      The same qualification passed the two-layer compositor prerequisite on Intel UHD 770 at
-      0.1997 ms CPU / 6.9053 ms GPU p95, but explicitly did not exercise app Auto selection or
-      presentation; this gate remains open.
+- [x] At least two layers operate on the integrated reference profile using Auto preview quality.
+      The 2026-08-31 schema-1 headless app qualification starts two independent real 1920x1080
+      sources with user-selected Auto resolved to Full 640x360, accepts current decoder events for
+      both layers, then injects four explicitly disclosed one-second turnaround samples through the
+      production event-application path. The real adaptive controller resolves Half, both layers
+      advance generation/request identity and return fresh 320x180 frames, and those frames upload
+      to the exact DX12 Intel UHD 770 `IntegratedGpu`. Two non-overlapping transformed readbacks
+      prove both sources participate with current upload/composition serials. The timing injection
+      proves hysteresis behavior, not organic decode latency; the separate schema-3 run remains the
+      full-1080p performance prerequisite. This is not native viewer-window presentation, DWM, or
+      physical scanout. See `docs/performance-reports.md`.
 - [x] Disabling a layer or changing a transform appears on the next available preview generation.
       The schema-3 cross-adapter gate runs four post-measurement state transitions on the same
       retained production renderer. Changing only the top transform recomposes the next generation

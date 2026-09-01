@@ -9,6 +9,15 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Close the Phase 2 integrated Auto-preview gate without lowering the user's selected quality.
+  A schema-1 headless app test uses two independent real 1920x1080 sources, observes Auto Full
+  640x360, applies four disclosed controller-pressure samples through the production completion
+  path, then proves both layers resubmit with newer identities and return real Auto Half 320x180
+  frames. The exact DX12 Intel UHD 770 compositor uploads both frames and passes two independent
+  transformed readbacks with matching upload/composition serials. The test-only renderer bridge is
+  absent from production builds. This proves app Auto scheduling plus integrated GPU composition,
+  not organic decode pressure, native-window presentation, DWM, or physical scanout. See
+  `docs/performance-reports.md`.
 - [x] Prove next-generation layer-state changes across both reference GPUs. The schema-3 headless
   1080p compositor gate retains its timed Bicubic workload, then changes only the top transform,
   disables that layer, removes its retained source texture, and re-uploads it as a late arrival.
@@ -17,14 +26,16 @@ Last updated: 2026-08-31
   lower-layer output while the source is missing, and full restoration when it arrives. The
   renewed four-source real-media stress simultaneously passed 32 disable/re-enable/backward-scrub
   cycles with one blocked request superseded, 39 stale events rejected, zero monitor errors, and
-  bounded teardown. App Auto, window presentation, DWM and scanout remain separate. See
+  bounded teardown. App Auto is now separately qualified headlessly; window presentation, DWM and
+  scanout remain separate. See
   `docs/performance-reports.md` and `docs/phase1-generation-stress.md`.
 - [x] Qualify the retained compositor at full 1920x1080 on both reference adapters. The schema-3
   headless DX12 gate pre-uploads its sources, excludes five warmups, then measures 30 changed
   generations using Bicubic sampling and verifies the center pixel. Intel UHD 770 passed two
   transformed layers at 0.1997 ms CPU / 6.9053 ms GPU p95; RTX 3090 passed four transformed layers
   at 0.0904 ms CPU / 0.2765 ms GPU p95. This closes the discrete four-layer compositor gate and
-  only the integrated two-layer compositor prerequisite: app Auto quality, presentation, DWM and
+  the integrated two-layer full-1080p performance prerequisite. App Auto scheduling and integrated
+  composition are now separately qualified at Full 640x360 to Half 320x180; presentation, DWM and
   physical scanout remain unproven. See `docs/performance-reports.md`.
 - [x] Renew the clean-HEAD Phase 0 timeline-foundation evidence at `4f4fd5e`. Ten 50,000-clip
   history trials passed at 0.2565/1.2552 ms press/edit-release p95; wide/detail/playhead CPU p95 was
@@ -374,7 +385,10 @@ Last updated: 2026-08-31
 - [x] Add nearest, bilinear, and bicubic preview sampling where supported.
 - [x] Prove four transformed 1080p layers on the discrete reference profile with the schema-3
   headless compositor qualification. Presentation and physical scanout are separate gates.
-- [ ] Prove at least two layers with Auto quality on the integrated reference profile.
+- [x] Prove at least two layers with Auto quality on the integrated reference profile. The
+  schema-1 headless app gate binds two real 1920x1080 sources to production Auto hysteresis,
+  fresh Full-to-Half resubmissions, and two exact Intel UHD 770 compositor probes. It does not
+  claim organic decoder pressure or window/scanout presentation.
 - [x] Prove missing or late layers never stall ready layers or input. Schema-3 GPU scenarios cover
   missing/late texture output; renewed real-media missing-upper and supersession stress cover the
   independent monitor scheduler. This remains headless evidence, not physical presentation.

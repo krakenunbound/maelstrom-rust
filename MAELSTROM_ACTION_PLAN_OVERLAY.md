@@ -206,10 +206,12 @@ Gate: four 1080p sources requested at once; timeline latency unchanged; slow sou
 
 ### Then — Phase 2 holes
 
-Open: integrated-GPU two-layer app Auto/presentation proof plus broader compositor
-memory/performance qualification. The schema-3 headless gate now closes the discrete four-layer
-1080p compositor proof and passes the integrated two-layer compositor prerequisite, without
-claiming app Auto, DWM, or physical scanout.
+The integrated-GPU two-layer app Auto gate is now closed headlessly: two independent real 1080p
+sources traverse production Full-to-Half Auto hysteresis and fresh decode identities before exact
+Intel compositor readback. The controlled pressure is disclosed and is not organic latency.
+Native viewer-window presentation, DWM, physical scanout, and broader compositor memory/performance
+qualification remain open. The schema-3 headless gate separately closes the discrete four-layer
+1080p proof and integrated full-1080p performance prerequisite.
 Premultiplied alpha, independent preview sampling, and the composite-time HUD are implemented; see
 `docs/premultiplied-alpha.md`, `docs/preview-sampling.md`, and the authoritative roadmap evidence.
 
