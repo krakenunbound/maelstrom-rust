@@ -408,7 +408,14 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       cross-backend proof across more codecs, reorder patterns, and containers. A generated
       MPEG-4 Advanced Simple Profile MP4 now combines irregular VFR, B-frame packet reordering,
       and a three-second source origin; exact CLI-reference decode plus waveform/app local-time
-      checks pass without proprietary media or a hardware encoder.
+      checks pass without proprietary media or a hardware encoder. A clean-commit schema-1
+      qualification at `a84838e4a708babcd9346b7ac969aab42969f866` now makes the existing
+      Windows hardware matrix reproducible: the complete 42-file pinned FFmpeg bundle passed four
+      D3D11VA/DXVA2 H.264/HEVC Main 10 tests at 64x48 and 1920x1080, totaling 152 exact
+      timestamp-and-pixel comparisons with no software fallback. D3D11VA and DXVA2 are backend API
+      paths on the default adapter; this does not prove both inventoried physical GPUs, GUI
+      presentation, scanout, export hardware parity, or broader machines. The retained schema-1
+      report SHA-256 is `D97439E5AC4821F7B11E05D52BEE5EEEE6B45886F76B1364E876DEF89452737B`.
 - [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX
       fixture exposed BT.709 frames being interpreted as BT.601 (4,644 differing RGBA bytes in a
       64x48 frame, maximum channel error 41). The corrected software path passes exact independent

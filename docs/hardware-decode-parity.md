@@ -80,6 +80,24 @@ points; untracked and ignored evidence is deliberately excluded from that source
 state. This is a reproducible harness contract, not a fresh authoritative
 qualification result.
 
+## Authoritative runner checkpoint — 2026-08-31
+
+The schema-1 runner passed from clean commit
+`a84838e4a708babcd9346b7ac969aab42969f866`. It verified all 42 files in the
+project-built FFmpeg checksum inventory and passed all four backend/codec tests:
+D3D11VA and DXVA2 against H.264 High and HEVC Main 10, each at 64x48 and native
+1920x1080. The result contains 152 exact timestamp-and-pixel comparisons, with
+hardware transfer required and software fallback rejected by the tests.
+
+The retained local report SHA-256 is
+`D97439E5AC4821F7B11E05D52BEE5EEEE6B45886F76B1364E876DEF89452737B`; its
+2,684-byte log SHA-256 is
+`C64EAF6042AFF8DF4F164C079974B70D08AB5E570812BEE33D68410C3EB3EFF9`.
+The optional inventory listed Intel UHD Graphics 770 and NVIDIA GeForce RTX 3090,
+but the backend APIs use the system default adapter. That list is not evidence
+that both physical GPUs decoded the clips. No editor, GUI surface, export path, or
+physical scanout was exercised.
+
 Use the workspace's approved FFmpeg bundle. The generated test patterns require
 no third-party media or model downloads. Run from `H:\Maelstrom Rust`:
 

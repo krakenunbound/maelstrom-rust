@@ -9,6 +9,11 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Make Windows hardware-VFR qualification reproducible without launching the editor. The
+  schema-1 runner at clean commit `a84838e` verifies the complete 42-file pinned FFmpeg bundle,
+  then passes all four D3D11VA/DXVA2 H.264/HEVC Main 10 cases at 64x48 and 1920x1080: 152 exact
+  timestamp-and-pixel comparisons with no fallback. Its adapter list is inventory only, not proof
+  that both physical GPUs decoded the clips. See `docs/hardware-decode-parity.md`.
 - [x] Persist the user's per-media proxy enable choice without persisting derived media. Project
   schema 9 stores one defaulted boolean; v1–v8 migrate disabled, while export and duplicate preserve
   intent. Reopen keeps original routing until current cache validation succeeds, and explicit
