@@ -11,11 +11,13 @@ All entries and status badges are available in English and Japanese.
 - Proxy generation runs on one cancellable background worker and never blocks the UI thread.
 - Only monitor video decoding may use a proxy. Audio playback and Quick Export always use the
   original source path.
-- Proxy files and enable state are not serialized into `.nleproj`; reopening a project never
-  depends on a derived file.
+- Proxy files, cache paths, fingerprints, and runtime readiness are never serialized into
+  `.nleproj`; reopening a project never depends on a derived file. Project-document version 9
+  stores only the user's per-media enable preference.
 - When timeline video is analyzed after placement or project reopen, the existing analysis worker
-  rediscovers a matching completed proxy in the local cache. It appears as **Proxy ready**, with
-  original media still selected. Use the existing Proxy Media menu to explicitly enable it.
+  rediscovers a matching completed proxy in the local cache. A project with no saved preference
+  shows **Proxy ready** and retains original media. A saved enable preference starts background
+  validation and retains original media until the current artifact passes every guard.
 - Discovery adds no new worker or FFmpeg invocation. It uses the existing two-analysis-worker bound,
   never inspects files on the UI/monitor-submit thread, and does not create, prune or regenerate cache
   entries. Unused Media Pool items keep the existing deferred-analysis behavior until placement.
@@ -47,9 +49,29 @@ normalization.
 Derived files live under `%LOCALAPPDATA%\Maelstrom\Proxy Media` (or the platform temporary folder
 when local app data is unavailable). The cache is explicitly limited to 64 proxy files and 8 GiB;
 oldest files are removed first. The first slice intentionally allows one generation at a time and
-one fixed profile. Local cache discovery survives reopening without storing a dependency in the
-project; enabled state deliberately does not persist. Portable/external proxy attachments,
-generation queues, and more profiles remain later work.
+one fixed profile. Local cache discovery survives reopening without storing a derived dependency in
+the project; only user intent persists. Portable/external proxy attachments, generation queues, and
+more profiles remain later work.
+
+## Durable enable preference — 2026-08-31
+
+Project-document version 9 adds a defaulted `proxy_enabled` boolean to each durable media reference.
+Versions 1–8 remain readable and migrate with every preference disabled. Older builds reject version
+9 at the existing version preflight rather than partially parsing an unknown field. Exporting or
+duplicating a project preserves the preference, while proxy artifacts remain local derived cache.
+
+The application owns a separate desired-ID set. Explicit enable saves intent immediately; disable
+or delete clears it. Project switching clears the session copy, and reopening restores it from the
+new document before media analysis. Cache discovery installs a disabled runtime record and queues
+validation only when desired. The monitor and audio/export routes continue using original media
+until the current artifact, source fingerprint, media path, project ticket, and validation result
+all agree. Missing, stale, relinked, corrupt, deleted, or late proxy results cannot activate a route;
+temporary failure does not erase the user's saved choice.
+
+Schema round trips, v8 migration, current/future-version handling, autosave, project reopen,
+checking-before-activation, explicit-disable precedence, relink guards, and project-switch reset are
+covered headlessly. This changes persistence and routing intent only; it adds no proxy path, codec,
+profile, dependency, or GUI-thread filesystem work.
 
 ## Cache discovery verification — 2026-08-31
 

@@ -3744,6 +3744,8 @@ struct App {
     proxy_delete_job: Option<nle_proxy::ProxyDeleteJob>,
     proxy_delete_media_id: Option<u32>,
     proxy_records: HashMap<u32, ProxyRecord>,
+    /// Durable user intent. Runtime records remain disabled until their cache artifact validates.
+    desired_proxy_media: HashSet<u32>,
     /// Any explicit proxy action wins over a late cache-discovery reply in this project session.
     proxy_discovery_suppressed: HashSet<u32>,
     proxy_cache_root: PathBuf,
@@ -4142,6 +4144,7 @@ impl App {
             proxy_delete_job: None,
             proxy_delete_media_id: None,
             proxy_records: HashMap::new(),
+            desired_proxy_media: HashSet::new(),
             proxy_discovery_suppressed: HashSet::new(),
             proxy_cache_root: proxy_cache_root(),
             editor,
@@ -5102,6 +5105,12 @@ impl App {
             fps: document.fps,
             size: document.size,
         };
+        let desired_proxy_media = document
+            .media
+            .iter()
+            .filter(|media| media.proxy_enabled)
+            .map(|media| media.id)
+            .collect::<HashSet<_>>();
         self.show_editor_screen(
             project_name,
             language,
@@ -5109,6 +5118,7 @@ impl App {
             settings,
             false,
         );
+        self.desired_proxy_media = desired_proxy_media;
         let used_media = self
             .editor
             .timeline
@@ -5138,11 +5148,30 @@ impl App {
         })
     }
 
+    /// Hub actions can follow Return to Hub before the background writer reaches disk.
+    /// Capture the current editor state now; other projects continue to load their saved document.
+    fn current_project_document_for_action(
+        &self,
+        project_id: u32,
+        project_path: &Path,
+    ) -> Option<ProjectDocument> {
+        (self.current_project_id == Some(project_id)).then(|| {
+            nle_project_io::document_for_path_with_proxy_preferences(
+                project_path,
+                self.editor.project_name.clone(),
+                self.editor.snapshot(),
+                self.current_project_settings,
+                self.desired_proxy_media.iter().copied(),
+            )
+        })
+    }
+
     fn request_project_export(&mut self, project_id: u32) {
         let Some(source) = self.project_path_for_id(project_id) else {
             self.hub.status = Some("Project path is unavailable".to_owned());
             return;
         };
+        let current_document = self.current_project_document_for_action(project_id, &source);
         self.hub.status = Some("Choose where to export the project…".to_owned());
         let tx = self.project_dialog_tx.clone();
         let notify = Arc::clone(&self.project_dialog_notify);
@@ -5163,17 +5192,29 @@ impl App {
                     .save_file()
                 {
                     (|| {
-                        let source_document = load_project_document(&source)?
-                            .ok_or_else(|| "Project document does not exist".to_owned())?;
+                        let source_document = current_document.map_or_else(
+                            || {
+                                load_project_document(&source)?
+                                    .ok_or_else(|| "Project document does not exist".to_owned())
+                            },
+                            Ok,
+                        )?;
                         let settings = ProjectSettings {
                             fps: source_document.fps,
                             size: source_document.size,
                         };
-                        let exported = nle_project_io::document_for_path(
+                        let proxy_enabled_media = source_document
+                            .media
+                            .iter()
+                            .filter(|media| media.proxy_enabled)
+                            .map(|media| media.id)
+                            .collect::<Vec<_>>();
+                        let exported = nle_project_io::document_for_path_with_proxy_preferences(
                             &destination,
                             source_document.project_name,
                             source_document.snapshot,
                             settings,
+                            proxy_enabled_media,
                         );
                         nle_project_io::write_document(&destination, &exported)
                             .map_err(|error| error.to_string())?;
@@ -5195,6 +5236,7 @@ impl App {
             self.hub.status = Some("Project path is unavailable".to_owned());
             return;
         };
+        let current_document = self.current_project_document_for_action(project_id, &source);
         let new_id = self
             .hub
             .projects
@@ -5212,18 +5254,30 @@ impl App {
             .name("maelstrom-project-copy".into())
             .spawn(move || {
                 let document = (|| {
-                    let source_document = load_project_document(&source)?
-                        .ok_or_else(|| "Project document does not exist".to_owned())?;
+                    let source_document = current_document.map_or_else(
+                        || {
+                            load_project_document(&source)?
+                                .ok_or_else(|| "Project document does not exist".to_owned())
+                        },
+                        Ok,
+                    )?;
                     let settings = ProjectSettings {
                         fps: source_document.fps,
                         size: source_document.size,
                     };
                     let copy_name = format!("{} Copy", source_document.project_name);
-                    let copy = nle_project_io::document_for_path(
+                    let proxy_enabled_media = source_document
+                        .media
+                        .iter()
+                        .filter(|media| media.proxy_enabled)
+                        .map(|media| media.id)
+                        .collect::<Vec<_>>();
+                    let copy = nle_project_io::document_for_path_with_proxy_preferences(
                         &destination,
                         copy_name,
                         source_document.snapshot,
                         settings,
+                        proxy_enabled_media,
                     );
                     nle_project_io::write_document(&destination, &copy)
                         .map_err(|error| error.to_string())?;
@@ -5982,6 +6036,9 @@ impl App {
             self.fail_proxy_validation(media_id);
         } else if pending.activate {
             self.proxy_records.get_mut(&media_id).unwrap().enabled = true;
+            if self.desired_proxy_media.insert(media_id) {
+                self.queue_project_autosave_immediately();
+            }
             self.editor
                 .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: true });
             self.hub.status = Some(proxy_text(
@@ -5997,6 +6054,14 @@ impl App {
         self.proxy_discovery_suppressed.insert(media_id);
         if self.proxy_delete_media_id == Some(media_id) {
             return;
+        }
+        let preference_changed = if enabled {
+            self.desired_proxy_media.insert(media_id)
+        } else {
+            self.desired_proxy_media.remove(&media_id)
+        };
+        if preference_changed {
+            self.queue_project_autosave_immediately();
         }
         self.proxy_validation_pending.remove(&media_id);
         if !enabled {
@@ -6033,6 +6098,9 @@ impl App {
 
     fn delete_proxy_media(&mut self, media_id: u32) {
         self.proxy_discovery_suppressed.insert(media_id);
+        if self.desired_proxy_media.remove(&media_id) {
+            self.queue_project_autosave_immediately();
+        }
         if self.proxy_job.is_some() {
             self.cancel_proxy_generation(media_id);
             self.hub.status = Some(proxy_text(
@@ -6149,6 +6217,7 @@ impl App {
         }
         self.proxy_delete_media_id = None;
         self.proxy_records.clear();
+        self.desired_proxy_media.clear();
         self.proxy_discovery_suppressed.clear();
     }
 
@@ -6179,8 +6248,12 @@ impl App {
                 recheck_requested: false,
             },
         );
-        self.editor
-            .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: false });
+        if self.desired_proxy_media.contains(&media_id) {
+            self.queue_proxy_validation(media_id, true);
+        } else {
+            self.editor
+                .set_proxy_media_status(media_id, ProxyMediaStatus::Ready { enabled: false });
+        }
     }
 
     /// Queue read-only checks after cache mutation, outside monitor submission. Entries with an
@@ -6332,11 +6405,12 @@ impl App {
         });
         self.project_writer.save_latest(SaveRequest {
             project_path: project_path.clone(),
-            document: nle_project_io::document_for_path(
+            document: nle_project_io::document_for_path_with_proxy_preferences(
                 &project_path,
                 self.editor.project_name.clone(),
                 snapshot.clone(),
                 self.current_project_settings,
+                self.desired_proxy_media.iter().copied(),
             ),
             thumbnail,
         });
@@ -9244,10 +9318,182 @@ mod tests {
         );
         assert_eq!(app.editor.durable_generation(), generation);
         assert_eq!(app.monitor_cache_epoch, epoch);
+        assert!(app.desired_proxy_media.is_empty());
         assert_eq!(
             serde_json::to_string(&app.editor.snapshot()).unwrap(),
             snapshot
         );
+    }
+
+    #[test]
+    fn cached_proxy_restore_honors_durable_preference_after_validation() {
+        let (mut app, original) = app_with_unchecked_proxy();
+        app.proxy_records.clear();
+        app.editor.set_proxy_media_status(1, ProxyMediaStatus::None);
+        app.desired_proxy_media.insert(1);
+
+        app.restore_cached_proxy(1, original.clone(), cached_proxy_fixture(&original));
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        let token = app.proxy_validation_pending[&1].request.token;
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token,
+            usable: true,
+        });
+        assert!(app.proxy_records[&1].enabled);
+        assert_eq!(
+            app.editor.proxy_media_status(1),
+            ProxyMediaStatus::Ready { enabled: true }
+        );
+    }
+
+    #[test]
+    fn saved_proxy_preference_reopens_as_checking_until_cache_validation_succeeds() {
+        let project_path = test_catalog_path("proxy-preference-reopen").with_extension("nleproj");
+        fs::create_dir_all(project_path.parent().expect("project parent"))
+            .expect("create proxy preference project directory");
+        let original = PathBuf::from("C:/media/reopen-proxy.mp4");
+        let mut source = EditorState::new(Language::English, "Proxy preference");
+        source.add_media_paths([original.clone()]);
+        let saved = nle_project_io::document_for_path_with_proxy_preferences(
+            &project_path,
+            "Proxy preference",
+            source.snapshot(),
+            ProjectSettings::default(),
+            [1],
+        );
+        nle_project_io::write_document(&project_path, &saved).expect("save proxy preference");
+        let reopened = load_project_document(&project_path)
+            .expect("load proxy preference")
+            .expect("project document");
+
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        app.complete_project_open(
+            Some(1),
+            project_path.clone(),
+            Language::English,
+            None,
+            reopened,
+        );
+        assert!(app.desired_proxy_media.contains(&1));
+        app.restore_cached_proxy(1, original.clone(), cached_proxy_fixture(&original));
+        assert_eq!(app.editor.proxy_media_status(1), ProxyMediaStatus::Checking);
+        assert_eq!(
+            resolved_monitor_media_path(&app.proxy_records, 1, &original),
+            original
+        );
+        let token = app.proxy_validation_pending[&1].request.token;
+        app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
+            token,
+            usable: true,
+        });
+        assert!(app.proxy_records[&1].enabled);
+
+        app.flush_project_autosave();
+        drop(app);
+        fs::remove_dir_all(project_path.parent().expect("project parent"))
+            .expect("remove proxy preference project directory");
+    }
+
+    #[test]
+    fn explicit_proxy_enable_autosaves_durable_preference_before_validation() {
+        let catalog = test_catalog_path("proxy-preference-autosave");
+        let project_path = project_document_path(&catalog, 1);
+        let mut app = App::new_with_catalog(false, Some(catalog.clone()));
+        app.handle_hub_action(HubAction::NewProject {
+            name: "Proxy preference".to_owned(),
+            template: nle_ui_core::TemplateId::FullHd1080p,
+            language: Language::English,
+        });
+        app.editor
+            .add_media_paths([PathBuf::from("missing-preference-source.mp4")]);
+        app.set_proxy_media_enabled(1, true);
+        assert!(app.desired_proxy_media.contains(&1));
+        app.flush_project_autosave();
+        let saved = load_project_document(&project_path)
+            .expect("load autosaved preference")
+            .expect("autosaved project document");
+        assert!(
+            saved
+                .media
+                .iter()
+                .any(|media| media.id == 1 && media.proxy_enabled)
+        );
+
+        drop(app);
+        fs::remove_dir_all(catalog.parent().expect("catalog parent"))
+            .expect("remove proxy preference catalog");
+    }
+
+    #[test]
+    fn hub_duplicate_and_export_source_use_unwritten_proxy_preferences() {
+        for (initially_enabled, requested_enabled) in [(false, true), (true, false)] {
+            let catalog = test_catalog_path(if initially_enabled {
+                "hub-proxy-disable"
+            } else {
+                "hub-proxy-enable"
+            });
+            let project_path = project_document_path(&catalog, 1);
+            let mut app = App::new_with_catalog(false, Some(catalog.clone()));
+            app.handle_hub_action(HubAction::NewProject {
+                name: "Hub proxy preference".to_owned(),
+                template: nle_ui_core::TemplateId::FullHd1080p,
+                language: Language::English,
+            });
+            app.editor
+                .add_media_paths([PathBuf::from("hub-proxy-source.mp4")]);
+            if initially_enabled {
+                app.set_proxy_media_enabled(1, true);
+            }
+            app.flush_project_autosave();
+            app.project_save_blocked = true;
+            app.set_proxy_media_enabled(1, requested_enabled);
+            assert_eq!(
+                load_project_document(&project_path)
+                    .expect("load stale project")
+                    .expect("stale project document")
+                    .media[0]
+                    .proxy_enabled,
+                initially_enabled
+            );
+
+            app.handle_editor_action(EditorAction::ReturnToHub);
+            assert_eq!(app.screen, Screen::ProjectHub);
+            let source = app
+                .current_project_document_for_action(1, &project_path)
+                .expect("current hub project document");
+            assert_eq!(source.media[0].proxy_enabled, requested_enabled);
+            for destination in [
+                project_path.with_file_name("exported.nleproj"),
+                project_path.with_file_name("duplicate.nleproj"),
+            ] {
+                let settings = ProjectSettings {
+                    fps: source.fps,
+                    size: source.size,
+                };
+                let proxy_enabled_media = source
+                    .media
+                    .iter()
+                    .filter(|media| media.proxy_enabled)
+                    .map(|media| media.id)
+                    .collect::<Vec<_>>();
+                let copied = nle_project_io::document_for_path_with_proxy_preferences(
+                    &destination,
+                    source.project_name.clone(),
+                    source.snapshot.clone(),
+                    settings,
+                    proxy_enabled_media,
+                );
+                assert_eq!(copied.media[0].proxy_enabled, requested_enabled);
+            }
+
+            drop(app);
+            fs::remove_dir_all(catalog.parent().expect("catalog parent"))
+                .expect("remove hub proxy preference catalog");
+        }
     }
 
     fn wait_for_proxy_validation(app: &mut App) {
@@ -9382,6 +9628,7 @@ mod tests {
         app.set_proxy_media_enabled(1, true);
         let old_token = app.proxy_validation_pending[&1].request.token;
         app.set_proxy_media_enabled(1, false);
+        assert!(!app.desired_proxy_media.contains(&1));
         for usable in [true, false] {
             app.apply_proxy_validation_result(nle_proxy::ProxyValidationResult {
                 token: old_token,
@@ -9409,6 +9656,20 @@ mod tests {
             usable: true,
         });
         assert!(app.proxy_records[&1].enabled);
+    }
+
+    #[test]
+    fn project_switch_clears_durable_proxy_preferences() {
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        app.desired_proxy_media.insert(42);
+        app.show_editor_screen(
+            "Replacement project".to_owned(),
+            Language::English,
+            None,
+            ProjectSettings::default(),
+            false,
+        );
+        assert!(app.desired_proxy_media.is_empty());
     }
 
     #[test]
@@ -9676,7 +9937,7 @@ mod tests {
     }
 
     #[test]
-    fn supplied_video_reopens_with_cached_proxy_available_but_disabled() {
+    fn supplied_video_reopens_with_cached_proxy_and_persists_validated_preference() {
         let Some(source) = std::env::var_os("MAELSTROM_PHASE0_MEDIA").map(PathBuf::from) else {
             return;
         };
@@ -9737,16 +9998,16 @@ mod tests {
                     .contains("proxy-cache")
             );
         }
-        let mut reopened = App::new_without_startup_or_audio_for_monitor_contract();
-        reopened.catalog_path = Some(catalog.clone());
-        reopened.proxy_cache_root = cache;
-        reopened.request_project_load(None, project_path, None, Language::English);
-        wait_for_project_open(&mut reopened);
+        let mut first_reopen = App::new_without_startup_or_audio_for_monitor_contract();
+        first_reopen.catalog_path = Some(catalog.clone());
+        first_reopen.proxy_cache_root = cache.clone();
+        first_reopen.request_project_load(None, project_path.clone(), None, Language::English);
+        wait_for_project_open(&mut first_reopen);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !reopened.media_analysis_in_flight.is_empty()
-            || !reopened.media_analysis_pending.is_empty()
+        while !first_reopen.media_analysis_in_flight.is_empty()
+            || !first_reopen.media_analysis_pending.is_empty()
         {
-            reopened.poll_media_analysis();
+            first_reopen.poll_media_analysis();
             assert!(
                 Instant::now() < deadline,
                 "reopened media analysis timed out"
@@ -9754,12 +10015,12 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(
-            reopened.editor.proxy_media_status(1),
+            first_reopen.editor.proxy_media_status(1),
             ProxyMediaStatus::Ready { enabled: false }
         );
-        assert_eq!(reopened.proxy_records[&1].artifact, artifact);
+        assert_eq!(first_reopen.proxy_records[&1].artifact, artifact);
         assert!(
-            reopened.proxy_job.is_none(),
+            first_reopen.proxy_job.is_none(),
             "reopen must not regenerate the proxy"
         );
         assert_eq!(
@@ -9767,35 +10028,101 @@ mod tests {
             proxy_modified
         );
         assert_eq!(
-            resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
+            resolved_monitor_media_path(&first_reopen.proxy_records, 1, &source),
             source
         );
         assert!(
-            reopened
+            first_reopen
                 .editor
                 .audio_playback_targets()
                 .iter()
                 .all(|target| target.path == source)
         );
-        reopened.set_proxy_media_enabled(1, true);
+        first_reopen.set_proxy_media_enabled(1, true);
         assert_eq!(
-            reopened.editor.proxy_media_status(1),
+            first_reopen.editor.proxy_media_status(1),
             ProxyMediaStatus::Checking
         );
         assert_eq!(
-            resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
+            resolved_monitor_media_path(&first_reopen.proxy_records, 1, &source),
             source
         );
-        wait_for_proxy_validation(&mut reopened);
+        wait_for_proxy_validation(&mut first_reopen);
         assert_eq!(
-            resolved_monitor_media_path(&reopened.proxy_records, 1, &source),
+            resolved_monitor_media_path(&first_reopen.proxy_records, 1, &source),
             artifact.path
         );
-        assert_eq!(reopened.editor.snapshot().media[0].path, source);
-        println!(
-            "cached proxy reopen: worker discovery, original default, explicit opt-in, durable source unchanged"
+        assert_eq!(first_reopen.editor.snapshot().media[0].path, source);
+        first_reopen.flush_project_autosave();
+        let document = load_project_document(&project_path).unwrap().unwrap();
+        assert!(
+            document
+                .media
+                .iter()
+                .any(|media| media.id == 1 && media.proxy_enabled)
         );
-        drop(reopened);
+        assert!(
+            !fs::read_to_string(&project_path)
+                .unwrap()
+                .contains("proxy-cache")
+        );
+        drop(first_reopen);
+
+        let mut second_reopen = App::new_without_startup_or_audio_for_monitor_contract();
+        second_reopen.catalog_path = Some(catalog.clone());
+        second_reopen.proxy_cache_root = cache;
+        second_reopen.request_project_load(None, project_path.clone(), None, Language::English);
+        wait_for_project_open(&mut second_reopen);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !second_reopen.media_analysis_in_flight.is_empty()
+            || !second_reopen.media_analysis_pending.is_empty()
+        {
+            second_reopen.poll_media_analysis();
+            assert!(
+                Instant::now() < deadline,
+                "second reopened media analysis timed out"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            second_reopen.editor.proxy_media_status(1),
+            ProxyMediaStatus::Checking
+        );
+        assert_eq!(second_reopen.proxy_records[&1].artifact, artifact);
+        assert!(
+            second_reopen.proxy_job.is_none(),
+            "second reopen must not regenerate the proxy"
+        );
+        assert_eq!(
+            fs::metadata(&artifact.path).unwrap().modified().unwrap(),
+            proxy_modified
+        );
+        assert_eq!(
+            resolved_monitor_media_path(&second_reopen.proxy_records, 1, &source),
+            source
+        );
+        wait_for_proxy_validation(&mut second_reopen);
+        assert_eq!(
+            resolved_monitor_media_path(&second_reopen.proxy_records, 1, &source),
+            artifact.path
+        );
+        assert_eq!(second_reopen.editor.snapshot().media[0].path, source);
+        assert!(
+            second_reopen
+                .editor
+                .audio_playback_targets()
+                .iter()
+                .all(|target| target.path == source)
+        );
+        assert!(
+            !fs::read_to_string(&project_path)
+                .unwrap()
+                .contains("proxy-cache")
+        );
+        println!(
+            "cached proxy reopen: default disabled, explicit opt-in persisted, validated cache reuse, durable source unchanged"
+        );
+        drop(second_reopen);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -120,7 +120,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Shifted/reordered MPEG-4 decode regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_vfr_fixtures_route_preview_to_local_boundaries -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted VFR app regression failed with exit code $LASTEXITCODE." }
-    & $cargoExecutable test -p nle-app --release tests::supplied_video_reopens_with_cached_proxy_available_but_disabled -- --exact --test-threads=1
+    & $cargoExecutable test -p nle-app --release tests::supplied_video_reopens_with_cached_proxy_and_persists_validated_preference -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Cached proxy project-reopen regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-export --release vfr_export_tests -- --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted VFR export source-identity regressions failed with exit code $LASTEXITCODE." }

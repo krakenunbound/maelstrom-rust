@@ -353,9 +353,13 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       four-path regression and subprocess flood/silence/full-queue tests now pass. Final evidence is
       804 release tests, both real-media proxy tests, strict Clippy, fixture contracts and Phase 0
       scenarios. Shared tool-path resolution and OS-file-call shutdown bounds remain open.
-      Unused Media Pool items retain deferred analysis. This still
-      supports one generation job and one 720p profile; portable/external attachment, persistent
-      enable choices, generation queues and multiple profiles remain later product work.
+      Project-document version 9 now persists only each media item's proxy-enable preference;
+      versions 1–8 migrate with the preference disabled. Reopen, export and duplicate preserve
+      intent without serializing cache paths or artifacts. A matching cache entry remains on the
+      original route until current worker validation succeeds; disable/delete, relink, project
+      switch and late-result guards retain precedence. Unused Media Pool items retain deferred
+      analysis. This still supports one generation job and one 720p profile; portable/external
+      attachment, generation queues and multiple profiles remain later product work.
       See `docs/proxy-media.md`.
 - [ ] Preserve exact source-time mapping for VFR, rational project rates, trims, slips, and reverse
       seeks. Exact reduced FFprobe `avg_frame_rate` ratios now flow through media analysis, playback

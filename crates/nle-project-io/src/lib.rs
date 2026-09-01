@@ -3,6 +3,7 @@
 //! This crate owns filesystem I/O so the UI and timeline remain storage-free.
 
 use std::{
+    collections::HashSet,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -11,7 +12,7 @@ use std::{
 use nle_ui_core::{EditorProjectSnapshot, EditorState, Language, MediaId};
 use serde::{Deserialize, Serialize};
 
-pub const PROJECT_DOCUMENT_VERSION: u32 = 8;
+pub const PROJECT_DOCUMENT_VERSION: u32 = 9;
 pub const PROJECT_TIMEBASE: u32 = 1_000_000;
 
 #[derive(Deserialize)]
@@ -41,6 +42,8 @@ pub struct MediaReference {
     pub id: MediaId,
     pub absolute: PathBuf,
     pub relative: Option<PathBuf>,
+    #[serde(default)]
+    pub proxy_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -121,7 +124,24 @@ pub fn document_for_path(
     snapshot: EditorProjectSnapshot,
     settings: ProjectSettings,
 ) -> ProjectDocument {
+    document_for_path_with_proxy_preferences(
+        project_path,
+        project_name,
+        snapshot,
+        settings,
+        std::iter::empty(),
+    )
+}
+
+pub fn document_for_path_with_proxy_preferences(
+    project_path: &Path,
+    project_name: impl Into<String>,
+    snapshot: EditorProjectSnapshot,
+    settings: ProjectSettings,
+    proxy_enabled_media: impl IntoIterator<Item = MediaId>,
+) -> ProjectDocument {
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let proxy_enabled_media = proxy_enabled_media.into_iter().collect::<HashSet<_>>();
     let media = snapshot
         .media
         .iter()
@@ -140,6 +160,7 @@ pub fn document_for_path(
                 id: item.id,
                 absolute,
                 relative,
+                proxy_enabled: proxy_enabled_media.contains(&item.id),
             }
         })
         .collect();
@@ -164,7 +185,10 @@ pub fn write_document(path: &Path, document: &ProjectDocument) -> Result<(), Pro
 pub fn read_document(path: &Path) -> Result<Option<ProjectDocument>, ProjectIoError> {
     let mut found = false;
     let mut last_error = None;
-    for candidate in [path.to_path_buf(), backup_path(path)] {
+    for (candidate_index, candidate) in [path.to_path_buf(), backup_path(path)]
+        .into_iter()
+        .enumerate()
+    {
         match fs::read(&candidate) {
             Ok(bytes) => {
                 found = true;
@@ -180,6 +204,9 @@ pub fn read_document(path: &Path) -> Result<Option<ProjectDocument>, ProjectIoEr
                         Ok(document)
                     }) {
                     Ok(document) => return Ok(Some(document)),
+                    Err(error @ ProjectIoError::UnsupportedVersion(_)) if candidate_index == 0 => {
+                        return Err(error);
+                    }
                     Err(error) => last_error = Some(error),
                 }
             }
@@ -206,11 +233,12 @@ fn preflight_document_version(bytes: &[u8]) -> Result<(), ProjectIoError> {
 
 /// Versions 1–3 share this build's original durable fields; version 4 adds title overlays,
 /// version 5 adds video transitions, version 6 adds their kind, version 7 adds audio transitions,
-/// and version 8 writes clip video effects as explicit schema-v1 graphs. Legacy effect arrays are
-/// accepted and converted during deserialization, so updating the header is lossless.
+/// version 8 writes clip video effects as explicit schema-v1 graphs, and version 9 adds per-media
+/// proxy preferences. Legacy effect arrays are accepted and converted during deserialization, so
+/// updating the header is lossless.
 fn migrate_document(mut document: ProjectDocument) -> Result<ProjectDocument, ProjectIoError> {
     match document.version {
-        1..=7 => document.version = PROJECT_DOCUMENT_VERSION,
+        1..=8 => document.version = PROJECT_DOCUMENT_VERSION,
         PROJECT_DOCUMENT_VERSION => {}
         version => return Err(ProjectIoError::UnsupportedVersion(version)),
     }
@@ -383,13 +411,13 @@ mod tests {
     }
 
     #[test]
-    fn current_documents_are_written_at_version_eight() {
-        let root = test_root("version-eight");
-        let path = root.join("VersionEight.nleproj");
-        let editor = EditorState::new(Language::English, "Version eight");
+    fn current_documents_are_written_at_version_nine() {
+        let root = test_root("version-nine");
+        let path = root.join("VersionNine.nleproj");
+        let editor = EditorState::new(Language::English, "Version nine");
         let document = document_for_path(
             &path,
-            "Version eight",
+            "Version nine",
             editor.snapshot(),
             ProjectSettings::default(),
         );
@@ -397,6 +425,78 @@ mod tests {
         write_document(&path, &document).unwrap();
         let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(written["version"], PROJECT_DOCUMENT_VERSION);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_nine_round_trips_per_media_proxy_preferences() {
+        let root = test_root("proxy-preferences-v9");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("ProxyPreferences.nleproj");
+        let mut editor = EditorState::new(Language::English, "Proxy preferences");
+        editor.add_media_paths([PathBuf::from("enabled.mp4"), PathBuf::from("disabled.mp4")]);
+
+        let document = document_for_path_with_proxy_preferences(
+            &path,
+            "Proxy preferences",
+            editor.snapshot(),
+            ProjectSettings::default(),
+            [1],
+        );
+        assert_eq!(
+            document
+                .media
+                .iter()
+                .map(|reference| reference.proxy_enabled)
+                .collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        write_document(&path, &document).unwrap();
+
+        let restored = read_document(&path).unwrap().unwrap();
+        assert_eq!(restored.version, PROJECT_DOCUMENT_VERSION);
+        assert_eq!(restored.media, document.media);
+
+        let default_document = document_for_path(
+            &path,
+            "Proxy preferences",
+            editor.snapshot(),
+            ProjectSettings::default(),
+        );
+        assert!(
+            default_document
+                .media
+                .iter()
+                .all(|reference| !reference.proxy_enabled)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_eight_without_proxy_preferences_defaults_to_disabled_and_migrates_to_nine() {
+        let root = test_root("proxy-preferences-v8");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("LegacyProxyPreferences.nleproj");
+        let mut editor = EditorState::new(Language::English, "Legacy proxy preferences");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        let mut legacy = document_for_path(
+            &path,
+            "Legacy proxy preferences",
+            editor.snapshot(),
+            ProjectSettings::default(),
+        );
+        legacy.version = 8;
+        let mut legacy_value = serde_json::to_value(&legacy).unwrap();
+        legacy_value["media"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("proxy_enabled");
+        fs::write(&path, serde_json::to_vec_pretty(&legacy_value).unwrap()).unwrap();
+
+        let loaded = read_document(&path).unwrap().unwrap();
+        assert_eq!(loaded.version, PROJECT_DOCUMENT_VERSION);
+        assert!(!loaded.media[0].proxy_enabled);
+        assert_eq!(migrate_document(loaded.clone()).unwrap(), loaded);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -599,11 +699,12 @@ mod tests {
     }
 
     #[test]
-    fn version_one_through_seven_documents_load_and_migrate_idempotently_to_version_eight() {
+    fn version_one_through_eight_documents_load_and_migrate_idempotently_to_version_nine() {
         let root = test_root("legacy-version");
         fs::create_dir_all(&root).unwrap();
-        let editor = EditorState::new(Language::English, "Legacy version");
-        for version in 1..=7 {
+        let mut editor = EditorState::new(Language::English, "Legacy version");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        for version in 1..=8 {
             let path = root.join(format!("Version{version}.nleproj"));
             let mut legacy = document_for_path(
                 &path,
@@ -613,6 +714,9 @@ mod tests {
             );
             legacy.version = version;
             let mut legacy_value = serde_json::to_value(&legacy).unwrap();
+            for media in legacy_value["media"].as_array_mut().unwrap() {
+                media.as_object_mut().unwrap().remove("proxy_enabled");
+            }
             let timeline = legacy_value["snapshot"]["timeline"]
                 .as_object_mut()
                 .unwrap();
@@ -625,6 +729,13 @@ mod tests {
 
             let loaded = read_document(&path).unwrap().unwrap();
             assert_eq!(loaded.version, PROJECT_DOCUMENT_VERSION);
+            assert!(!loaded.media.is_empty());
+            assert!(
+                loaded
+                    .media
+                    .iter()
+                    .all(|reference| !reference.proxy_enabled)
+            );
             assert!(loaded.snapshot.timeline.transitions.is_empty());
             if version <= 3 {
                 assert!(loaded.snapshot.timeline.titles.is_empty());
@@ -636,7 +747,7 @@ mod tests {
             ));
         }
         let current = document_for_path(
-            &root.join("Version8.nleproj"),
+            &root.join("Version9.nleproj"),
             "Current version",
             editor.snapshot(),
             ProjectSettings::default(),
@@ -646,10 +757,17 @@ mod tests {
     }
 
     #[test]
-    fn future_document_version_is_rejected_before_unknown_interpolation_is_parsed() {
+    fn future_primary_version_is_rejected_without_falling_back_to_current_backup() {
         let root = test_root("future-version");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("Future.nleproj");
+        let current = document_for_path(
+            &backup_path(&path),
+            "Current backup",
+            EditorState::new(Language::English, "Current backup").snapshot(),
+            ProjectSettings::default(),
+        );
+        write_document(&backup_path(&path), &current).unwrap();
         fs::write(
             &path,
             serde_json::to_vec_pretty(&serde_json::json!({

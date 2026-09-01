@@ -9,6 +9,11 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Persist the user's per-media proxy enable choice without persisting derived media. Project
+  schema 9 stores one defaulted boolean; v1–v8 migrate disabled, while export and duplicate preserve
+  intent. Reopen keeps original routing until current cache validation succeeds, and explicit
+  disable/delete, relink, project switch, or late results cannot reactivate it. See
+  `docs/proxy-media.md`.
 - [x] Extend shifted-VFR preview/export source-identity parity to the reordered MPEG-4 MP4. Ten
   head/trim/slip/tail/final-frame cases at 30 and 30000/1001 fps add 44 exact identities, bringing
   the three-fixture production-graph gate to 30 cases and 132 exported frames. No production graph
