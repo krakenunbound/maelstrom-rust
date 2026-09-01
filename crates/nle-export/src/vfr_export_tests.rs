@@ -8,6 +8,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 struct TempFiles(Vec<PathBuf>);
 
+struct ShiftedVfrFixture {
+    variable: &'static str,
+    codec: &'static str,
+    origin: i64,
+    pix_fmt: &'static str,
+    local_pts: &'static [i64],
+    source_duration: i64,
+    exclusive_tail: (i64, u64),
+    final_frame_source_in: i64,
+}
+
 impl Drop for TempFiles {
     fn drop(&mut self) {
         for path in &self.0 {
@@ -47,8 +58,8 @@ fn decode_rgb(ffmpeg: &Path, source: &Path, raw: &Path, stderr: &Path) -> Vec<Ve
         .collect()
 }
 
-fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
-    let Some(source) = std::env::var_os(variable).map(PathBuf::from) else {
+fn shifted_vfr_export_matches_preview(fixture: &ShiftedVfrFixture) {
+    let Some(source) = std::env::var_os(fixture.variable).map(PathBuf::from) else {
         return;
     };
     let _guard = crate::tests::real_ffmpeg_test_guard();
@@ -70,7 +81,10 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
         .unwrap()
         .as_nanos();
     let paths = ["properties", "pts", "rgb", "filter", "mp4", "stderr"].map(|ext| {
-        std::env::temp_dir().join(format!("maelstrom-vfr-export-{codec}-{nonce}.{ext}"))
+        std::env::temp_dir().join(format!(
+            "maelstrom-vfr-export-{}-{nonce}.{ext}",
+            fixture.codec
+        ))
     });
     let _cleanup = TempFiles(paths.to_vec());
     let [properties, timestamps, raw, filter, output, stderr] = &paths;
@@ -93,11 +107,15 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
     );
     let metadata = fs::read_to_string(properties).unwrap();
     for required in [
-        format!("codec_name={codec}"),
+        format!("codec_name={}", fixture.codec),
         "width=320".into(),
         "height=180".into(),
-        "pix_fmt=yuv422p10le".into(),
-        "start_time=7.000000".into(),
+        format!("pix_fmt={}", fixture.pix_fmt),
+        format!(
+            "start_time={}.{:06}",
+            fixture.origin / 1_000_000,
+            fixture.origin % 1_000_000
+        ),
     ] {
         assert!(
             metadata.lines().any(|line| line == required),
@@ -124,14 +142,9 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
     let pts: Vec<i64> = fs::read_to_string(timestamps)
         .unwrap()
         .lines()
-        .map(|line| (line.parse::<f64>().unwrap() * 1_000_000.0).round() as i64 - 7_000_000)
+        .map(|line| (line.parse::<f64>().unwrap() * 1_000_000.0).round() as i64 - fixture.origin)
         .collect();
-    assert_eq!(
-        pts,
-        [
-            0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000
-        ]
-    );
+    assert_eq!(pts, fixture.local_pts);
     let references = decode_rgb(&ffmpeg, &source, raw, stderr);
     assert_eq!(references.len(), pts.len());
 
@@ -143,16 +156,21 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
             ("head", 0, 0, 6),
             ("trim", 100_000, 0, 6),
             ("slip", 100_000, 45_000, 6),
-            ("exclusive-tail", 400_000, 0, 3),
-            ("final-frame", 500_000, 0, 1),
+            (
+                "exclusive-tail",
+                fixture.exclusive_tail.0,
+                0,
+                fixture.exclusive_tail.1,
+            ),
+            ("final-frame", fixture.final_frame_source_in, 0, 1),
         ] {
             let mut editor = EditorState::new_with_frame_rate(
                 Language::English,
-                "Shifted ten-bit VFR export",
+                "Shifted VFR export",
                 ProjectFrameRate::new(fps[0], fps[1]).unwrap(),
             );
             editor.add_media_paths([source.clone()]);
-            editor.media[0].duration = Some(Tick(541_667));
+            editor.media[0].duration = Some(Tick(fixture.source_duration));
             editor.set_media_frame_time_index(
                 1,
                 Some(SourceFrameTimeIndex::new(pts.iter().copied().map(Tick).collect()).unwrap()),
@@ -188,7 +206,8 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
                     assert_eq!(
                         target.decode_tick,
                         Tick(pts[index]),
-                        "{codec}/{case}/{fps:?} preview frame {frame}"
+                        "{}/{case}/{fps:?} preview frame {frame}",
+                        fixture.codec
                     );
                     index
                 })
@@ -243,7 +262,8 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
                 // microsecond. This is timestamp rounding tolerance, not a frame-identity tolerance.
                 assert!(
                     (*pts - frame_tick(frame as u64)).abs() <= 1,
-                    "{codec}/{case}/{fps:?}: output frame {frame} has timestamp {pts}"
+                    "{}/{case}/{fps:?}: output frame {frame} has timestamp {pts}",
+                    fixture.codec
                 );
             }
             let actual: Vec<usize> = frames
@@ -274,10 +294,12 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
                 .collect();
             assert_eq!(
                 actual, expected,
-                "{codec}/{case}/{fps:?} exported source identities"
+                "{}/{case}/{fps:?} exported source identities",
+                fixture.codec
             );
             println!(
-                "shifted VFR export: codec={codec}, case={case}, fps={fps:?}, identities={actual:?}"
+                "shifted VFR export: codec={}, case={case}, fps={fps:?}, identities={actual:?}",
+                fixture.codec
             );
         }
     }
@@ -285,10 +307,48 @@ fn shifted_vfr_export_matches_preview(variable: &str, codec: &str) {
 
 #[test]
 fn supplied_prores_vfr_export_matches_preview_source_identity() {
-    shifted_vfr_export_matches_preview("MAELSTROM_PRORES_VFR_TEST_MEDIA", "prores");
+    shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
+        variable: "MAELSTROM_PRORES_VFR_TEST_MEDIA",
+        codec: "prores",
+        origin: 7_000_000,
+        pix_fmt: "yuv422p10le",
+        local_pts: &[
+            0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
+        ],
+        source_duration: 541_667,
+        exclusive_tail: (400_000, 3),
+        final_frame_source_in: 500_000,
+    });
 }
 
 #[test]
 fn supplied_dnxhr_vfr_export_matches_preview_source_identity() {
-    shifted_vfr_export_matches_preview("MAELSTROM_DNXHR_VFR_TEST_MEDIA", "dnxhd");
+    shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
+        variable: "MAELSTROM_DNXHR_VFR_TEST_MEDIA",
+        codec: "dnxhd",
+        origin: 7_000_000,
+        pix_fmt: "yuv422p10le",
+        local_pts: &[
+            0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
+        ],
+        source_duration: 541_667,
+        exclusive_tail: (400_000, 3),
+        final_frame_source_in: 500_000,
+    });
+}
+
+#[test]
+fn supplied_shifted_reordered_mpeg4_vfr_export_matches_preview_source_identity() {
+    shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
+        variable: "MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA",
+        codec: "mpeg4",
+        origin: 3_000_000,
+        pix_fmt: "yuv420p",
+        local_pts: &[
+            0, 33_333, 100_000, 133_333, 200_000, 266_667, 366_667, 400_000,
+        ],
+        source_duration: 433_333,
+        exclusive_tail: (266_667, 3),
+        final_frame_source_in: 400_000,
+    });
 }

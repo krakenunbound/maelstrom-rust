@@ -388,8 +388,11 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       timestamps within one microsecond of decimal rounding. A nearest-frame mutation
       fails both new regressions; the production policy is unchanged. These use the real
       export graph with a test MPEG-4 encoder, not proof of H.264/hardware/color parity.
-      775 release tests, Clippy, fixture validation and the updated Phase 0 runner pass.
-      See `docs/shifted-vfr-export-parity.md`. Export now also preserves original
+      That historical two-MOV checkpoint passed 775 release tests, Clippy, fixture validation
+      and the updated Phase 0 runner. See `docs/shifted-vfr-export-parity.md`.
+      The shifted/reordered MPEG-4 MP4 now passes the same ten cases with its three-second
+      origin and irregular B-frame presentation order, bringing the gate to 30 cases and
+      132 exported frames without a production graph change. Export now also preserves original
       rational rates in background, video, still, title and matte clocks instead
       of rounding to six decimals. Two regressions fail before/pass after; seven
       live FFmpeg clock cases, 777 release tests, strict Clippy, fixture contracts

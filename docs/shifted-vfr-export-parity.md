@@ -1,10 +1,23 @@
-# Shifted ten-bit VFR export source identity
+# Shifted VFR export source identity
 
 The existing export graph passes 20 new local source-time cases for the generated
 ProRes Standard and DNxHR HQX MOV fixtures. No production defect was found in these
 cases, and no production timing, decoder, quality, or runtime setting was changed.
 This checkpoint adds regression coverage and integrates it into the existing
 Phase 0 scenario runner; it does not claim complete export or color parity.
+
+## Shifted/reordered MPEG-4 follow-up — 2026-08-31
+
+The generated `vfr-reordered-shifted-mpeg4.mp4` fixture extends the same production-graph gate
+with a three-second origin, yuv420p MPEG-4 Advanced Simple Profile, irregular local timestamps
+`0, 33333, 100000, 133333, 200000, 266667, 366667, 400000`, and I/B/B/P/B/B/P/P packet reordering.
+It adds ten head/trim/slip/tail/final-frame cases across 30/1 and 30000/1001 project rates. All 44
+exported MP4-case frames match the source identity selected by preview, and output timestamps retain
+the rational project grid. Combined with the two MOV fixtures, the gate now covers 30 cases and 132
+exported frames. No production graph change was required.
+
+This closes one preview/export timing gap; it does not prove export color fidelity, hardware
+encoding, long-GOP camera media, or cross-machine performance.
 
 Subsequent production correction: [exact rational export clocks](exact-export-frame-rate.md)
 removes six-decimal frame-rate rounding. These source-identity checks still pass;

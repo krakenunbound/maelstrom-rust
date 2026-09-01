@@ -9,6 +9,10 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Extend shifted-VFR preview/export source-identity parity to the reordered MPEG-4 MP4. Ten
+  head/trim/slip/tail/final-frame cases at 30 and 30000/1001 fps add 44 exact identities, bringing
+  the three-fixture production-graph gate to 30 cases and 132 exported frames. No production graph
+  change was required. See `docs/shifted-vfr-export-parity.md`.
 - [x] Add a deterministic shifted/reordered MPEG-4 VFR MP4 to the Phase 0 fixture contract. The
   eight-frame file combines a three-second source origin, irregular gaps, and I/B/B/P/B/B/P/P
   packet reordering. Its generated output matches the pinned hash/size; manifest/waveform/decode/app checks
@@ -387,9 +391,9 @@ Last updated: 2026-08-31
   Generated shifted/reordered MPEG-4 MP4 now adds one deterministic case combining irregular VFR,
   a three-second stream origin, B-frame packet reordering, and exact waveform/decode/app local-time
   checks. Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 also have exact local Software
-  timing/pixel evidence. ProRes/DNxHR now also pass 20 export-graph source-identity
-  cases with a test MPEG-4 encoder. AV1, broader camera sources, hardware/color
-  parity and production-encoder conformance remain open.
+  timing/pixel evidence. ProRes/DNxHR and shifted/reordered MPEG-4 now also pass 30
+  export-graph source-identity cases with a test MPEG-4 encoder. AV1, broader camera sources,
+  hardware/color parity and production-encoder conformance remain open.
 
 ## Phase 2 implementation queue
 

@@ -1,7 +1,7 @@
 # Ten-bit codec timing and preview color conversion
 
 Follow-up: [shifted VFR export source identity](shifted-vfr-export-parity.md) adds
-20 ProRes/DNxHR export-graph timing cases; it does not qualify export color fidelity.
+30 ProRes/DNxHR/MPEG-4 export-graph timing cases; it does not qualify export color fidelity.
 
 Follow-up: [hardware/native-resolution parity](hardware-decode-parity.md) adds
 explicit Windows hardware proof and fixes a separate planar/NV12 conversion
@@ -73,8 +73,10 @@ and two fresh middle/late seeks against a separate sequential FFmpeg CLI RGBA re
 full-frame comparisons on the Software backend. Waveform analysis independently checks the three-
 second source origin and normalized local index. The app runs normal analysis-result handling and
 checks every boundary plus the preceding hold interval in both directions without inventing a CFR
-duration for the final frame. `Run-Phase0Scenarios.ps1` generates, validates, routes, and cleans the
-fixture environment alongside the existing MPEG-2 TS and 10-bit MOV cases.
+duration for the final frame. Ten export cases additionally exercise head, trim, slip,
+exclusive-tail, and final-frame source identity at 30 and 30000/1001 project rates through the
+production graph. `Run-Phase0Scenarios.ps1` generates, validates, routes, and cleans the fixture
+environment alongside the existing MPEG-2 TS and 10-bit MOV cases.
 
 This improves codec/container/reorder coverage without a hardware encoder or third-party media. It
 does not establish MPEG-4 hardware decoding, long-GOP camera behavior, AV1, 4K throughput, physical
