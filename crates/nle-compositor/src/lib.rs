@@ -486,7 +486,7 @@ mod tests {
             gain_left_db: 0.0,
             gain_right_db: 0.0,
             effects: Vec::new(),
-            video_effects: Vec::new(),
+            video_effects: Vec::new().into(),
             transform: ClipTransform::default(),
             fade_in: positive,
             fade_out: positive,

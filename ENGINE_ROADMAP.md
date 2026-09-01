@@ -732,10 +732,14 @@ Exit gate:
 
 Add a small deterministic graph before adding a large effects catalog.
 
-- [ ] Define stable effect/node IDs, typed ports, typed parameters, and schema-versioned
-      serialization.
+- [x] Define stable effect/node IDs, typed ports, typed parameters, and schema-versioned
+      serialization. Schema v1 preserves clip-local effect IDs, adds stable typed port and
+      parameter signatures plus explicit canonical connections, and migrates legacy ordered arrays
+      into project-document version 8 without changing preview/export evaluation order.
 - [ ] Separate immutable graph description from compiled runtime graph and derived caches.
-- [ ] Validate cycles, missing nodes, incompatible ports, and unsupported versions without crashing.
+- [x] Validate cycles, missing nodes, incompatible ports, and unsupported versions without crashing.
+      Timeline restoration now rejects every malformed graph class with clip-specific evidence;
+      unknown graph fields and invalid graphs are also refused before serialization.
 - [ ] Compile graph changes on a worker; atomically swap the latest valid compiled graph.
 - [x] Add bounded source-time brightness/contrast keyframes with linear, smooth, ease-in,
       ease-out, and hold interpolation shared by preview and export.

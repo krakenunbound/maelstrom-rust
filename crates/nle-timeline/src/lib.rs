@@ -6,7 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Index},
     sync::Arc,
 };
 
@@ -131,6 +131,11 @@ impl Default for TitleOverlay {
 /// Stable identity for a video effect node inside a clip.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct VideoEffectId(pub u32);
+
+/// Persisted graph schema for clip-local video processing. The initial schema
+/// intentionally supports one serial chain only; later graph versions can add
+/// branching without changing the clip field again.
+pub const EFFECT_GRAPH_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct MediaId(pub u32);
@@ -376,6 +381,7 @@ pub enum KeyframeInterpolation {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScalarKeyframe {
     /// Absolute source tick, preserving animation through trim, slip, and razor.
     pub source_tick: Tick,
@@ -385,6 +391,7 @@ pub struct ScalarKeyframe {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnimatedScalar {
     pub value: f32,
     #[serde(default)]
@@ -432,12 +439,14 @@ impl AnimatedScalar {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePoint {
     pub x: f32,
     pub y: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColorCurve {
     pub points: Vec<CurvePoint>,
 }
@@ -462,6 +471,7 @@ impl ColorCurve {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RgbCurves {
     #[serde(default)]
     pub master: ColorCurve,
@@ -483,6 +493,7 @@ impl RgbCurves {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrightnessContrastEffect {
     #[serde(default = "default_brightness")]
     pub brightness: AnimatedScalar,
@@ -557,6 +568,7 @@ impl Default for BrightnessContrastEffect {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VignetteEffect {
     #[serde(default = "default_vignette_amount")]
     pub amount: AnimatedScalar,
@@ -619,6 +631,642 @@ pub struct VideoEffectNode {
     pub enabled: bool,
     #[serde(flatten)]
     pub kind: VideoEffectKind,
+}
+
+/// Stable port identity within an effect kind. Values are persisted, so never
+/// repurpose an existing number.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct VideoEffectPortId(pub u16);
+
+impl VideoEffectPortId {
+    pub const VIDEO_INPUT: Self = Self(1);
+    pub const VIDEO_OUTPUT: Self = Self(2);
+    pub const BRIGHTNESS: Self = Self(101);
+    pub const CONTRAST: Self = Self(102);
+    pub const TEMPERATURE: Self = Self(103);
+    pub const TINT: Self = Self(104);
+    pub const SATURATION: Self = Self(105);
+    pub const EXPOSURE: Self = Self(106);
+    pub const HIGHLIGHTS: Self = Self(107);
+    pub const SHADOWS: Self = Self(108);
+    pub const WHITES: Self = Self(109);
+    pub const BLACKS: Self = Self(110);
+    pub const CURVES_MASTER: Self = Self(111);
+    pub const CURVES_RED: Self = Self(112);
+    pub const CURVES_GREEN: Self = Self(113);
+    pub const CURVES_BLUE: Self = Self(114);
+    pub const VIGNETTE_AMOUNT: Self = Self(201);
+    pub const VIGNETTE_MIDPOINT: Self = Self(202);
+    pub const VIGNETTE_FEATHER: Self = Self(203);
+    pub const VIGNETTE_CENTER_X: Self = Self(204);
+    pub const VIGNETTE_CENTER_Y: Self = Self(205);
+}
+
+/// Stable parameter identity. Parameter values remain owned by
+/// [`VideoEffectKind`], never duplicated by the graph.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct VideoEffectParameterId(pub u16);
+
+impl VideoEffectParameterId {
+    pub const BRIGHTNESS: Self = Self(101);
+    pub const CONTRAST: Self = Self(102);
+    pub const TEMPERATURE: Self = Self(103);
+    pub const TINT: Self = Self(104);
+    pub const SATURATION: Self = Self(105);
+    pub const EXPOSURE: Self = Self(106);
+    pub const HIGHLIGHTS: Self = Self(107);
+    pub const SHADOWS: Self = Self(108);
+    pub const WHITES: Self = Self(109);
+    pub const BLACKS: Self = Self(110);
+    pub const CURVES_MASTER: Self = Self(111);
+    pub const CURVES_RED: Self = Self(112);
+    pub const CURVES_GREEN: Self = Self(113);
+    pub const CURVES_BLUE: Self = Self(114);
+    pub const VIGNETTE_AMOUNT: Self = Self(201);
+    pub const VIGNETTE_MIDPOINT: Self = Self(202);
+    pub const VIGNETTE_FEATHER: Self = Self(203);
+    pub const VIGNETTE_CENTER_X: Self = Self(204);
+    pub const VIGNETTE_CENTER_Y: Self = Self(205);
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEffectPortDirection {
+    Input,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEffectValueType {
+    VideoFrame,
+    Scalar,
+    RgbCurve,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VideoEffectPortSignature {
+    pub id: VideoEffectPortId,
+    pub direction: VideoEffectPortDirection,
+    pub value_type: VideoEffectValueType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VideoEffectParameterSignature {
+    pub id: VideoEffectParameterId,
+    pub value_type: VideoEffectValueType,
+}
+
+const BRIGHTNESS_CONTRAST_PARAMETERS: [VideoEffectParameterSignature; 14] = [
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::BRIGHTNESS,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::CONTRAST,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::TEMPERATURE,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::TINT,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::SATURATION,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::EXPOSURE,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::HIGHLIGHTS,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::SHADOWS,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::WHITES,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::BLACKS,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::CURVES_MASTER,
+        value_type: VideoEffectValueType::RgbCurve,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::CURVES_RED,
+        value_type: VideoEffectValueType::RgbCurve,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::CURVES_GREEN,
+        value_type: VideoEffectValueType::RgbCurve,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::CURVES_BLUE,
+        value_type: VideoEffectValueType::RgbCurve,
+    },
+];
+
+const VIGNETTE_PARAMETERS: [VideoEffectParameterSignature; 5] = [
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::VIGNETTE_AMOUNT,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::VIGNETTE_MIDPOINT,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::VIGNETTE_FEATHER,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::VIGNETTE_CENTER_X,
+        value_type: VideoEffectValueType::Scalar,
+    },
+    VideoEffectParameterSignature {
+        id: VideoEffectParameterId::VIGNETTE_CENTER_Y,
+        value_type: VideoEffectValueType::Scalar,
+    },
+];
+
+impl VideoEffectKind {
+    pub fn parameter_signatures(&self) -> &'static [VideoEffectParameterSignature] {
+        match self {
+            Self::BrightnessContrast(_) => &BRIGHTNESS_CONTRAST_PARAMETERS,
+            Self::Vignette(_) => &VIGNETTE_PARAMETERS,
+        }
+    }
+
+    pub fn port_signature(&self, port: VideoEffectPortId) -> Option<VideoEffectPortSignature> {
+        let signature = match port {
+            VideoEffectPortId::VIDEO_INPUT => VideoEffectPortSignature {
+                id: port,
+                direction: VideoEffectPortDirection::Input,
+                value_type: VideoEffectValueType::VideoFrame,
+            },
+            VideoEffectPortId::VIDEO_OUTPUT => VideoEffectPortSignature {
+                id: port,
+                direction: VideoEffectPortDirection::Output,
+                value_type: VideoEffectValueType::VideoFrame,
+            },
+            _ => {
+                let parameter = self
+                    .parameter_signatures()
+                    .iter()
+                    .find(|parameter| parameter.id.0 == port.0)?;
+                VideoEffectPortSignature {
+                    id: port,
+                    direction: VideoEffectPortDirection::Input,
+                    value_type: parameter.value_type,
+                }
+            }
+        };
+        Some(signature)
+    }
+
+    pub fn port_signatures(&self) -> impl Iterator<Item = VideoEffectPortSignature> + '_ {
+        [
+            self.port_signature(VideoEffectPortId::VIDEO_INPUT)
+                .expect("fixed video input"),
+            self.port_signature(VideoEffectPortId::VIDEO_OUTPUT)
+                .expect("fixed video output"),
+        ]
+        .into_iter()
+        .chain(
+            self.parameter_signatures()
+                .iter()
+                .map(|parameter| VideoEffectPortSignature {
+                    id: VideoEffectPortId(parameter.id.0),
+                    direction: VideoEffectPortDirection::Input,
+                    value_type: parameter.value_type,
+                }),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoEffectConnectionEndpoint {
+    pub node: VideoEffectId,
+    pub port: VideoEffectPortId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoEffectConnection {
+    pub from: VideoEffectConnectionEndpoint,
+    pub to: VideoEffectConnectionEndpoint,
+}
+
+/// Validation evidence retained by timeline restoration errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VideoEffectGraphError {
+    UnsupportedSchemaVersion {
+        found: u32,
+    },
+    TooManyNodes {
+        found: usize,
+    },
+    ZeroNodeId,
+    DuplicateNodeId {
+        node: VideoEffectId,
+    },
+    InvalidNodeParameters {
+        node: VideoEffectId,
+    },
+    MissingEdgeNode {
+        connection: usize,
+        node: VideoEffectId,
+    },
+    UnavailablePort {
+        node: VideoEffectId,
+        port: VideoEffectPortId,
+    },
+    WrongPortDirection {
+        connection: usize,
+    },
+    IncompatiblePortTypes {
+        connection: usize,
+    },
+    DuplicateEdge {
+        connection: usize,
+    },
+    Cycle,
+    NonLinearTopology,
+    NonCanonicalNodeOrder,
+    NodeIndexOutOfBounds {
+        index: usize,
+    },
+}
+
+impl fmt::Display for VideoEffectGraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid video effect graph: {self:?}")
+    }
+}
+
+impl std::error::Error for VideoEffectGraphError {}
+
+/// A durable clip-local effect graph. v1 stores explicit edges even though its
+/// executable contract remains a single linear chain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoEffectGraph {
+    schema_version: u32,
+    nodes: Vec<VideoEffectNode>,
+    connections: Vec<VideoEffectConnection>,
+}
+
+impl Default for VideoEffectGraph {
+    fn default() -> Self {
+        Self::from(Vec::new())
+    }
+}
+
+impl From<Vec<VideoEffectNode>> for VideoEffectGraph {
+    fn from(nodes: Vec<VideoEffectNode>) -> Self {
+        let mut graph = Self {
+            schema_version: EFFECT_GRAPH_SCHEMA_VERSION,
+            nodes,
+            connections: Vec::new(),
+        };
+        graph.rebuild_linear_connections();
+        graph
+    }
+}
+
+impl VideoEffectGraph {
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+    pub fn connections(&self) -> &[VideoEffectConnection] {
+        &self.connections
+    }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+    pub fn first(&self) -> Option<&VideoEffectNode> {
+        self.nodes.first()
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, VideoEffectNode> {
+        self.nodes.iter()
+    }
+    /// Mutates one node transactionally. Invalid IDs, parameters, or topology
+    /// leave the original graph unchanged.
+    pub fn edit(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut VideoEffectNode),
+    ) -> Result<(), VideoEffectGraphError> {
+        self.mutate_nodes(|nodes| {
+            let node = nodes
+                .get_mut(index)
+                .ok_or(VideoEffectGraphError::NodeIndexOutOfBounds { index })?;
+            edit(node);
+            Ok(())
+        })
+    }
+
+    /// Mutates all nodes transactionally.
+    pub fn edit_each(
+        &mut self,
+        edit: impl FnMut(&mut VideoEffectNode),
+    ) -> Result<(), VideoEffectGraphError> {
+        self.mutate_nodes(|nodes| {
+            nodes.iter_mut().for_each(edit);
+            Ok(())
+        })
+    }
+    pub fn push(&mut self, node: VideoEffectNode) -> Result<(), VideoEffectGraphError> {
+        self.mutate_nodes(|nodes| {
+            nodes.push(node);
+            Ok(())
+        })
+    }
+    pub fn insert(
+        &mut self,
+        index: usize,
+        node: VideoEffectNode,
+    ) -> Result<(), VideoEffectGraphError> {
+        self.mutate_nodes(|nodes| {
+            if index > nodes.len() {
+                return Err(VideoEffectGraphError::NodeIndexOutOfBounds { index });
+            }
+            nodes.insert(index, node);
+            Ok(())
+        })
+    }
+    pub fn remove(&mut self, index: usize) -> Result<VideoEffectNode, VideoEffectGraphError> {
+        self.mutate_nodes(|nodes| {
+            if index >= nodes.len() {
+                return Err(VideoEffectGraphError::NodeIndexOutOfBounds { index });
+            }
+            Ok(nodes.remove(index))
+        })
+    }
+    pub fn swap(&mut self, left: usize, right: usize) -> Result<(), VideoEffectGraphError> {
+        self.mutate_nodes(|nodes| {
+            if left >= nodes.len() {
+                return Err(VideoEffectGraphError::NodeIndexOutOfBounds { index: left });
+            }
+            if right >= nodes.len() {
+                return Err(VideoEffectGraphError::NodeIndexOutOfBounds { index: right });
+            }
+            nodes.swap(left, right);
+            Ok(())
+        })
+    }
+
+    fn mutate_nodes<R>(
+        &mut self,
+        mutate: impl FnOnce(&mut Vec<VideoEffectNode>) -> Result<R, VideoEffectGraphError>,
+    ) -> Result<R, VideoEffectGraphError> {
+        let mut candidate = self.clone();
+        let result = mutate(&mut candidate.nodes)?;
+        candidate.rebuild_linear_connections();
+        candidate.normalize_and_validate()?;
+        *self = candidate;
+        Ok(result)
+    }
+
+    fn rebuild_linear_connections(&mut self) {
+        self.schema_version = EFFECT_GRAPH_SCHEMA_VERSION;
+        self.connections.clear();
+        self.connections
+            .extend(self.nodes.windows(2).map(|nodes| VideoEffectConnection {
+                from: VideoEffectConnectionEndpoint {
+                    node: nodes[0].id,
+                    port: VideoEffectPortId::VIDEO_OUTPUT,
+                },
+                to: VideoEffectConnectionEndpoint {
+                    node: nodes[1].id,
+                    port: VideoEffectPortId::VIDEO_INPUT,
+                },
+            }));
+    }
+
+    fn normalize_and_validate(&mut self) -> Result<(), VideoEffectGraphError> {
+        if self.schema_version != EFFECT_GRAPH_SCHEMA_VERSION {
+            return Err(VideoEffectGraphError::UnsupportedSchemaVersion {
+                found: self.schema_version,
+            });
+        }
+        if self.nodes.len() > MAX_VIDEO_EFFECTS_PER_CLIP {
+            return Err(VideoEffectGraphError::TooManyNodes {
+                found: self.nodes.len(),
+            });
+        }
+        let mut ids = HashSet::new();
+        for node in &mut self.nodes {
+            if node.id.0 == 0 {
+                return Err(VideoEffectGraphError::ZeroNodeId);
+            }
+            if !ids.insert(node.id) {
+                return Err(VideoEffectGraphError::DuplicateNodeId { node: node.id });
+            }
+            let one = std::slice::from_mut(node);
+            if !normalize_video_effects(one) {
+                return Err(VideoEffectGraphError::InvalidNodeParameters { node: node.id });
+            }
+        }
+        let mut edges = HashSet::new();
+        let mut incoming = HashMap::<VideoEffectId, usize>::new();
+        let mut outgoing = HashMap::<VideoEffectId, usize>::new();
+        for (connection_index, connection) in self.connections.iter().enumerate() {
+            let Some(from) = self
+                .nodes
+                .iter()
+                .find(|node| node.id == connection.from.node)
+            else {
+                return Err(VideoEffectGraphError::MissingEdgeNode {
+                    connection: connection_index,
+                    node: connection.from.node,
+                });
+            };
+            let Some(to) = self.nodes.iter().find(|node| node.id == connection.to.node) else {
+                return Err(VideoEffectGraphError::MissingEdgeNode {
+                    connection: connection_index,
+                    node: connection.to.node,
+                });
+            };
+            let Some(from_port) = from.kind.port_signature(connection.from.port) else {
+                return Err(VideoEffectGraphError::UnavailablePort {
+                    node: from.id,
+                    port: connection.from.port,
+                });
+            };
+            let Some(to_port) = to.kind.port_signature(connection.to.port) else {
+                return Err(VideoEffectGraphError::UnavailablePort {
+                    node: to.id,
+                    port: connection.to.port,
+                });
+            };
+            if from_port.direction != VideoEffectPortDirection::Output
+                || to_port.direction != VideoEffectPortDirection::Input
+            {
+                return Err(VideoEffectGraphError::WrongPortDirection {
+                    connection: connection_index,
+                });
+            }
+            if from_port.value_type != to_port.value_type {
+                return Err(VideoEffectGraphError::IncompatiblePortTypes {
+                    connection: connection_index,
+                });
+            }
+            if !edges.insert((connection.from, connection.to)) {
+                return Err(VideoEffectGraphError::DuplicateEdge {
+                    connection: connection_index,
+                });
+            }
+            *outgoing.entry(connection.from.node).or_default() += 1;
+            *incoming.entry(connection.to.node).or_default() += 1;
+        }
+        let mut remaining_incoming = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, incoming.get(&node.id).copied().unwrap_or_default()))
+            .collect::<HashMap<_, _>>();
+        let mut ready = remaining_incoming
+            .iter()
+            .filter_map(|(node, count)| (*count == 0).then_some(*node))
+            .collect::<Vec<_>>();
+        let mut visited = 0;
+        while let Some(node) = ready.pop() {
+            visited += 1;
+            for connection in self
+                .connections
+                .iter()
+                .filter(|connection| connection.from.node == node)
+            {
+                let count = remaining_incoming
+                    .get_mut(&connection.to.node)
+                    .expect("validated edge node");
+                *count -= 1;
+                if *count == 0 {
+                    ready.push(connection.to.node);
+                }
+            }
+        }
+        if visited != self.nodes.len() {
+            return Err(VideoEffectGraphError::Cycle);
+        }
+        if self.nodes.is_empty() {
+            return if self.connections.is_empty() {
+                Ok(())
+            } else {
+                Err(VideoEffectGraphError::NonLinearTopology)
+            };
+        }
+        let start_count = self
+            .nodes
+            .iter()
+            .filter(|node| !incoming.contains_key(&node.id))
+            .count();
+        let end_count = self
+            .nodes
+            .iter()
+            .filter(|node| !outgoing.contains_key(&node.id))
+            .count();
+        if self.connections.len() != self.nodes.len().saturating_sub(1)
+            || incoming.values().any(|count| *count > 1)
+            || outgoing.values().any(|count| *count > 1)
+            || start_count != 1
+            || end_count != 1
+        {
+            return Err(VideoEffectGraphError::NonLinearTopology);
+        }
+        for (index, pair) in self.nodes.windows(2).enumerate() {
+            let expected = VideoEffectConnection {
+                from: VideoEffectConnectionEndpoint {
+                    node: pair[0].id,
+                    port: VideoEffectPortId::VIDEO_OUTPUT,
+                },
+                to: VideoEffectConnectionEndpoint {
+                    node: pair[1].id,
+                    port: VideoEffectPortId::VIDEO_INPUT,
+                },
+            };
+            if self.connections.get(index) != Some(&expected) {
+                return Err(VideoEffectGraphError::NonCanonicalNodeOrder);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Index<usize> for VideoEffectGraph {
+    type Output = VideoEffectNode;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.nodes[index]
+    }
+}
+
+impl<'a> IntoIterator for &'a VideoEffectGraph {
+    type Item = &'a VideoEffectNode;
+    type IntoIter = std::slice::Iter<'a, VideoEffectNode>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.nodes.iter()
+    }
+}
+
+impl Serialize for VideoEffectGraph {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error as _, SerializeStruct};
+        let mut validated = self.clone();
+        validated
+            .normalize_and_validate()
+            .map_err(S::Error::custom)?;
+        let mut state = serializer.serialize_struct("VideoEffectGraph", 3)?;
+        state.serialize_field("schema_version", &EFFECT_GRAPH_SCHEMA_VERSION)?;
+        state.serialize_field("nodes", &validated.nodes)?;
+        state.serialize_field("connections", &validated.connections)?;
+        state.end()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum VideoEffectGraphWire {
+    Legacy(Vec<VideoEffectNode>),
+    V1(VideoEffectGraphV1Wire),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoEffectGraphV1Wire {
+    schema_version: u32,
+    nodes: Vec<VideoEffectNode>,
+    connections: Vec<VideoEffectConnection>,
+}
+
+impl<'de> Deserialize<'de> for VideoEffectGraph {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match VideoEffectGraphWire::deserialize(deserializer)? {
+            VideoEffectGraphWire::Legacy(nodes) => Ok(Self::from(nodes)),
+            VideoEffectGraphWire::V1(VideoEffectGraphV1Wire {
+                schema_version,
+                nodes,
+                connections,
+            }) => Ok(Self {
+                schema_version,
+                nodes,
+                connections,
+            }),
+        }
+    }
 }
 
 fn default_effect_enabled() -> bool {
@@ -917,9 +1565,10 @@ pub struct ClipData {
     pub gain_right_db: f32,
     #[serde(default)]
     pub effects: Vec<AudioEffect>,
-    /// Ordered, clip-owned video effects. Legacy projects restore with none.
+    /// Clip-owned effect graph. Legacy effect arrays deserialize as canonical
+    /// v1 chains; newly written snapshots always retain explicit connections.
     #[serde(default)]
-    pub video_effects: Vec<VideoEffectNode>,
+    pub video_effects: VideoEffectGraph,
     /// Viewer transform. Defaults are identity so legacy projects restore unchanged.
     #[serde(default)]
     pub transform: ClipTransform,
@@ -1379,6 +2028,7 @@ fn color_scalar_mut(
 ) -> Option<&mut AnimatedScalar> {
     let node = clip
         .video_effects
+        .nodes
         .iter_mut()
         .find(|node| node.id == effect_id)?;
     match (&mut node.kind, parameter) {
@@ -2136,30 +2786,74 @@ pub enum TimelineSnapshotError {
     DuplicateClipId(ClipId),
     InvalidTransitionId(TransitionId),
     DuplicateTransitionId(TransitionId),
-    InvalidTransition { transition: TransitionId },
+    InvalidTransition {
+        transition: TransitionId,
+    },
     InvalidAudioTransitionId(AudioTransitionId),
     DuplicateAudioTransitionId(AudioTransitionId),
-    InvalidAudioTransition { transition: AudioTransitionId },
+    InvalidAudioTransition {
+        transition: AudioTransitionId,
+    },
     InvalidLinkId(LinkId),
-    TrackMismatch { clip: ClipId, track: TrackId },
-    NegativeStart { clip: ClipId },
-    InvalidDuration { clip: ClipId },
-    NegativeSourceIn { clip: ClipId },
-    TickOverflow { clip: ClipId },
-    UnsortedOrOverlapping { track: TrackId, clip: ClipId },
-    NonFiniteGain { clip: ClipId },
-    NonFiniteChannelGain { clip: ClipId },
-    NonFiniteTrackGain { track: TrackId },
-    NonFiniteTrackPan { track: TrackId },
-    InvalidClipEffect { clip: ClipId },
-    InvalidVideoEffect { clip: ClipId },
-    InvalidTrackEffect { track: TrackId },
-    NonFiniteFadeCurve { clip: ClipId },
-    NonFiniteTransform { clip: ClipId },
+    TrackMismatch {
+        clip: ClipId,
+        track: TrackId,
+    },
+    NegativeStart {
+        clip: ClipId,
+    },
+    InvalidDuration {
+        clip: ClipId,
+    },
+    NegativeSourceIn {
+        clip: ClipId,
+    },
+    TickOverflow {
+        clip: ClipId,
+    },
+    UnsortedOrOverlapping {
+        track: TrackId,
+        clip: ClipId,
+    },
+    NonFiniteGain {
+        clip: ClipId,
+    },
+    NonFiniteChannelGain {
+        clip: ClipId,
+    },
+    NonFiniteTrackGain {
+        track: TrackId,
+    },
+    NonFiniteTrackPan {
+        track: TrackId,
+    },
+    InvalidClipEffect {
+        clip: ClipId,
+    },
+    InvalidVideoEffect {
+        clip: ClipId,
+    },
+    InvalidVideoEffectGraph {
+        clip: ClipId,
+        error: VideoEffectGraphError,
+    },
+    InvalidTrackEffect {
+        track: TrackId,
+    },
+    NonFiniteFadeCurve {
+        clip: ClipId,
+    },
+    NonFiniteTransform {
+        clip: ClipId,
+    },
     InvalidTitleId(TitleId),
     DuplicateTitleId(TitleId),
-    InvalidTitle { title: TitleId },
-    TitleTickOverflow { title: TitleId },
+    InvalidTitle {
+        title: TitleId,
+    },
+    TitleTickOverflow {
+        title: TitleId,
+    },
     IdExhausted,
 }
 
@@ -2389,8 +3083,11 @@ impl Timeline {
                     return Err(TimelineSnapshotError::InvalidClipEffect { clip: clip.id });
                 }
                 let mut video_effects = clip.video_effects.clone();
-                if !normalize_video_effects(&mut video_effects) {
-                    return Err(TimelineSnapshotError::InvalidVideoEffect { clip: clip.id });
+                if let Err(error) = video_effects.normalize_and_validate() {
+                    return Err(TimelineSnapshotError::InvalidVideoEffectGraph {
+                        clip: clip.id,
+                        error,
+                    });
                 }
                 if !clip.fade_in.curve.is_finite() || !clip.fade_out.curve.is_finite() {
                     return Err(TimelineSnapshotError::NonFiniteFadeCurve { clip: clip.id });
@@ -3508,12 +4205,13 @@ impl Timeline {
     }
 
     /// Replaces the clip's video-effect stack after validating durable data.
-    pub fn set_clip_video_effects(
+    pub fn set_clip_video_effects<E: Into<VideoEffectGraph>>(
         &mut self,
         clip_id: ClipId,
-        mut effects: Vec<VideoEffectNode>,
+        effects: E,
     ) -> Result<(), TimelineError> {
-        if !normalize_video_effects(&mut effects) {
+        let mut effects = effects.into();
+        if effects.normalize_and_validate().is_err() {
             return Err(TimelineError::InvalidVideoEffect);
         }
         let (track_kind, clip) = self.clip_mut(clip_id)?;
@@ -4687,7 +5385,7 @@ impl Timeline {
             gain_left_db: 0.0,
             gain_right_db: 0.0,
             effects: Vec::new(),
-            video_effects: Vec::new(),
+            video_effects: Vec::new().into(),
             transform: ClipTransform::default(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
@@ -6365,7 +7063,7 @@ mod tests {
             gain_left_db: 0.0,
             gain_right_db: 0.0,
             effects: Vec::new(),
-            video_effects: Vec::new(),
+            video_effects: Vec::new().into(),
             transform: ClipTransform::default(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
@@ -6788,7 +7486,7 @@ mod tests {
             gain_left_db: 0.0,
             gain_right_db: 0.0,
             effects: Vec::new(),
-            video_effects: Vec::new(),
+            video_effects: Vec::new().into(),
             transform: ClipTransform::default(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
@@ -7404,6 +8102,426 @@ mod tests {
         }
     }
 
+    fn graph_connection(
+        from: u32,
+        from_port: VideoEffectPortId,
+        to: u32,
+        to_port: VideoEffectPortId,
+    ) -> VideoEffectConnection {
+        VideoEffectConnection {
+            from: VideoEffectConnectionEndpoint {
+                node: VideoEffectId(from),
+                port: from_port,
+            },
+            to: VideoEffectConnectionEndpoint {
+                node: VideoEffectId(to),
+                port: to_port,
+            },
+        }
+    }
+
+    fn graph_with(
+        nodes: Vec<VideoEffectNode>,
+        connections: Vec<VideoEffectConnection>,
+    ) -> VideoEffectGraph {
+        VideoEffectGraph {
+            schema_version: EFFECT_GRAPH_SCHEMA_VERSION,
+            nodes,
+            connections,
+        }
+    }
+
+    #[test]
+    fn video_effect_graph_migrates_legacy_arrays_and_writes_v1() {
+        let legacy = serde_json::json!([color_effect(1), vignette_effect(2, true)]);
+        let graph: VideoEffectGraph = serde_json::from_value(legacy).unwrap();
+        assert_eq!(graph.schema_version(), EFFECT_GRAPH_SCHEMA_VERSION);
+        assert_eq!(graph.len(), 2);
+        assert_eq!(
+            graph.connections(),
+            &[graph_connection(
+                1,
+                VideoEffectPortId::VIDEO_OUTPUT,
+                2,
+                VideoEffectPortId::VIDEO_INPUT
+            )]
+        );
+
+        let written = serde_json::to_value(&graph).unwrap();
+        assert_eq!(written["schema_version"], EFFECT_GRAPH_SCHEMA_VERSION);
+        assert!(written["nodes"].is_array());
+        assert!(written["connections"].is_array());
+    }
+
+    #[test]
+    fn video_effect_graph_v1_json_round_trips() {
+        let graph = VideoEffectGraph::from(vec![color_effect(1), vignette_effect(2, false)]);
+        let encoded = serde_json::to_string(&graph).unwrap();
+        let restored: VideoEffectGraph = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored, graph);
+        assert!(restored.clone().normalize_and_validate().is_ok());
+    }
+
+    #[test]
+    fn video_effect_graph_v1_rejects_unknown_fields() {
+        let graph = VideoEffectGraph::from(vec![color_effect(1), vignette_effect(2, true)]);
+        let mut cases = Vec::new();
+
+        let mut top_level = serde_json::to_value(&graph).unwrap();
+        top_level["future_field"] = serde_json::json!(true);
+        cases.push(top_level);
+
+        let mut node = serde_json::to_value(&graph).unwrap();
+        node["nodes"][0]["future_field"] = serde_json::json!(true);
+        cases.push(node);
+
+        let mut parameter = serde_json::to_value(&graph).unwrap();
+        parameter["nodes"][0]["brightness"]["future_field"] = serde_json::json!(true);
+        cases.push(parameter);
+
+        let mut connection = serde_json::to_value(&graph).unwrap();
+        connection["connections"][0]["future_field"] = serde_json::json!(true);
+        cases.push(connection);
+
+        let mut endpoint = serde_json::to_value(&graph).unwrap();
+        endpoint["connections"][0]["from"]["future_field"] = serde_json::json!(true);
+        cases.push(endpoint);
+
+        for value in cases {
+            assert!(serde_json::from_value::<VideoEffectGraph>(value).is_err());
+        }
+
+        let mut missing_connections = serde_json::to_value(VideoEffectGraph::default()).unwrap();
+        missing_connections
+            .as_object_mut()
+            .unwrap()
+            .remove("connections");
+        assert!(serde_json::from_value::<VideoEffectGraph>(missing_connections).is_err());
+    }
+
+    #[test]
+    fn video_effect_graph_mutations_are_transactional() {
+        let mut graph = VideoEffectGraph::from(vec![color_effect(1), vignette_effect(2, true)]);
+        let original = graph.clone();
+        assert_eq!(
+            graph.edit(1, |node| node.id = VideoEffectId(1)),
+            Err(VideoEffectGraphError::DuplicateNodeId {
+                node: VideoEffectId(1)
+            })
+        );
+        assert_eq!(graph, original);
+
+        assert_eq!(
+            graph.edit(0, |node| {
+                let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                    panic!()
+                };
+                effect.brightness.value = f32::NAN;
+            }),
+            Err(VideoEffectGraphError::InvalidNodeParameters {
+                node: VideoEffectId(1)
+            })
+        );
+        assert_eq!(graph, original);
+
+        assert_eq!(
+            graph.edit_each(|node| node.id = VideoEffectId(1)),
+            Err(VideoEffectGraphError::DuplicateNodeId {
+                node: VideoEffectId(1)
+            })
+        );
+        assert_eq!(graph, original);
+
+        assert_eq!(
+            graph.push(color_effect(1)),
+            Err(VideoEffectGraphError::DuplicateNodeId {
+                node: VideoEffectId(1)
+            })
+        );
+        assert_eq!(graph, original);
+
+        assert_eq!(
+            graph.insert(9, color_effect(3)),
+            Err(VideoEffectGraphError::NodeIndexOutOfBounds { index: 9 })
+        );
+        assert_eq!(graph, original);
+
+        let mut full = VideoEffectGraph::from(
+            (1..=MAX_VIDEO_EFFECTS_PER_CLIP as u32)
+                .map(color_effect)
+                .collect::<Vec<_>>(),
+        );
+        let full_original = full.clone();
+        assert_eq!(
+            full.push(color_effect(MAX_VIDEO_EFFECTS_PER_CLIP as u32 + 1)),
+            Err(VideoEffectGraphError::TooManyNodes {
+                found: MAX_VIDEO_EFFECTS_PER_CLIP + 1
+            })
+        );
+        assert_eq!(full, full_original);
+    }
+
+    #[test]
+    fn video_effect_graph_parameter_and_port_signatures_are_complete() {
+        let color = color_effect(1);
+        let color_parameters = color.kind.parameter_signatures();
+        assert_eq!(color_parameters.len(), 14);
+        assert_eq!(
+            color_parameters
+                .iter()
+                .filter(|parameter| parameter.value_type == VideoEffectValueType::Scalar)
+                .count(),
+            10
+        );
+        assert_eq!(
+            color_parameters
+                .iter()
+                .filter(|parameter| parameter.value_type == VideoEffectValueType::RgbCurve)
+                .count(),
+            4
+        );
+        assert_eq!(color.kind.port_signatures().count(), 16);
+
+        let vignette = vignette_effect(2, true);
+        assert_eq!(vignette.kind.parameter_signatures().len(), 5);
+        assert!(
+            vignette
+                .kind
+                .parameter_signatures()
+                .iter()
+                .all(|parameter| parameter.value_type == VideoEffectValueType::Scalar)
+        );
+        assert_eq!(vignette.kind.port_signatures().count(), 7);
+    }
+
+    #[test]
+    fn video_effect_graph_canonical_chain_drives_existing_evaluation_order() {
+        let mut first = color_effect(1);
+        let mut second = color_effect(2);
+        let VideoEffectKind::BrightnessContrast(first_effect) = &mut first.kind else {
+            panic!()
+        };
+        first_effect.brightness.value = -0.25;
+        let VideoEffectKind::BrightnessContrast(second_effect) = &mut second.kind else {
+            panic!()
+        };
+        second_effect.brightness.value = 0.5;
+        let graph = VideoEffectGraph::from(vec![first, second]);
+        assert!(graph.clone().normalize_and_validate().is_ok());
+        let mut clip = test_clip(1, 0, 100);
+        clip.video_effects = graph;
+        assert_eq!(
+            clip.evaluate_video_effects(Tick(0))
+                .active()
+                .iter()
+                .map(|operation| brightness_contrast(operation).brightness)
+                .collect::<Vec<_>>(),
+            [-0.25, 0.5]
+        );
+    }
+
+    #[test]
+    fn video_effect_graph_rejects_each_invalid_graph_class() {
+        let node_a = color_effect(1);
+        let node_b = color_effect(2);
+        let node_c = color_effect(3);
+        let too_many: Vec<_> = (1..=(MAX_VIDEO_EFFECTS_PER_CLIP as u32 + 1))
+            .map(color_effect)
+            .collect();
+        let canonical = graph_connection(
+            1,
+            VideoEffectPortId::VIDEO_OUTPUT,
+            2,
+            VideoEffectPortId::VIDEO_INPUT,
+        );
+        let cases = vec![
+            (
+                VideoEffectGraph {
+                    schema_version: 2,
+                    nodes: vec![],
+                    connections: vec![],
+                },
+                VideoEffectGraphError::UnsupportedSchemaVersion { found: 2 },
+            ),
+            (
+                graph_with(too_many, vec![]),
+                VideoEffectGraphError::TooManyNodes {
+                    found: MAX_VIDEO_EFFECTS_PER_CLIP + 1,
+                },
+            ),
+            (
+                graph_with(vec![color_effect(0)], vec![]),
+                VideoEffectGraphError::ZeroNodeId,
+            ),
+            (
+                graph_with(vec![color_effect(1), color_effect(1)], vec![]),
+                VideoEffectGraphError::DuplicateNodeId {
+                    node: VideoEffectId(1),
+                },
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone()],
+                    vec![graph_connection(
+                        1,
+                        VideoEffectPortId::VIDEO_OUTPUT,
+                        9,
+                        VideoEffectPortId::VIDEO_INPUT,
+                    )],
+                ),
+                VideoEffectGraphError::MissingEdgeNode {
+                    connection: 0,
+                    node: VideoEffectId(9),
+                },
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone()],
+                    vec![graph_connection(
+                        1,
+                        VideoEffectPortId(999),
+                        2,
+                        VideoEffectPortId::VIDEO_INPUT,
+                    )],
+                ),
+                VideoEffectGraphError::UnavailablePort {
+                    node: VideoEffectId(1),
+                    port: VideoEffectPortId(999),
+                },
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone()],
+                    vec![graph_connection(
+                        1,
+                        VideoEffectPortId::VIDEO_INPUT,
+                        2,
+                        VideoEffectPortId::VIDEO_INPUT,
+                    )],
+                ),
+                VideoEffectGraphError::WrongPortDirection { connection: 0 },
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone()],
+                    vec![graph_connection(
+                        1,
+                        VideoEffectPortId::VIDEO_OUTPUT,
+                        2,
+                        VideoEffectPortId::BRIGHTNESS,
+                    )],
+                ),
+                VideoEffectGraphError::IncompatiblePortTypes { connection: 0 },
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone()],
+                    vec![canonical.clone(), canonical.clone()],
+                ),
+                VideoEffectGraphError::DuplicateEdge { connection: 1 },
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone()],
+                    vec![
+                        canonical.clone(),
+                        graph_connection(
+                            2,
+                            VideoEffectPortId::VIDEO_OUTPUT,
+                            1,
+                            VideoEffectPortId::VIDEO_INPUT,
+                        ),
+                    ],
+                ),
+                VideoEffectGraphError::Cycle,
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone(), node_c.clone()],
+                    vec![
+                        graph_connection(
+                            2,
+                            VideoEffectPortId::VIDEO_OUTPUT,
+                            3,
+                            VideoEffectPortId::VIDEO_INPUT,
+                        ),
+                        graph_connection(
+                            3,
+                            VideoEffectPortId::VIDEO_OUTPUT,
+                            2,
+                            VideoEffectPortId::VIDEO_INPUT,
+                        ),
+                    ],
+                ),
+                VideoEffectGraphError::Cycle,
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone(), node_c],
+                    vec![
+                        canonical.clone(),
+                        graph_connection(
+                            1,
+                            VideoEffectPortId::VIDEO_OUTPUT,
+                            3,
+                            VideoEffectPortId::VIDEO_INPUT,
+                        ),
+                    ],
+                ),
+                VideoEffectGraphError::NonLinearTopology,
+            ),
+            (
+                graph_with(
+                    vec![node_a.clone(), node_b.clone()],
+                    vec![graph_connection(
+                        2,
+                        VideoEffectPortId::VIDEO_OUTPUT,
+                        1,
+                        VideoEffectPortId::VIDEO_INPUT,
+                    )],
+                ),
+                VideoEffectGraphError::NonCanonicalNodeOrder,
+            ),
+        ];
+        for (mut graph, expected) in cases {
+            assert_eq!(graph.normalize_and_validate(), Err(expected));
+        }
+
+        let mut invalid_parameter = color_effect(1);
+        let VideoEffectKind::BrightnessContrast(effect) = &mut invalid_parameter.kind else {
+            panic!()
+        };
+        effect.brightness.value = f32::NAN;
+        assert_eq!(
+            graph_with(vec![invalid_parameter], vec![]).normalize_and_validate(),
+            Err(VideoEffectGraphError::InvalidNodeParameters {
+                node: VideoEffectId(1)
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_snapshot_retains_clip_and_graph_validation_evidence() {
+        let mut timeline = Timeline::new_default();
+        let track = first_track(&timeline, TrackKind::Video);
+        let clip = timeline
+            .insert_clip(track, MediaId(1), Tick(0), Tick(10), Tick(0))
+            .unwrap();
+        let mut snapshot = timeline.snapshot();
+        snapshot.tracks[0].clips[0].video_effects = VideoEffectGraph {
+            schema_version: 9,
+            nodes: vec![],
+            connections: vec![],
+        };
+        assert!(matches!(
+            Timeline::from_snapshot(snapshot),
+            Err(TimelineSnapshotError::InvalidVideoEffectGraph {
+                clip: rejected,
+                error: VideoEffectGraphError::UnsupportedSchemaVersion { found: 9 },
+            }) if rejected == clip
+        ));
+    }
+
     #[test]
     fn color_effect_evaluates_source_time_boundaries_linear_and_hold() {
         let mut effect = BrightnessContrastEffect::default();
@@ -7430,7 +8548,7 @@ mod tests {
             kind: VideoEffectKind::BrightnessContrast(effect),
         };
         let mut clip = test_clip(1, 0, 100);
-        clip.video_effects = vec![node];
+        clip.video_effects = vec![node].into();
         assert_eq!(
             brightness_contrast(&clip.evaluate_video_effects(Tick(0)).active()[0]).brightness,
             -0.5
@@ -7447,7 +8565,11 @@ mod tests {
             brightness_contrast(&clip.evaluate_video_effects(Tick(40)).active()[0]).brightness,
             0.8
         );
-        clip.video_effects[0].enabled = false;
+        assert!(
+            clip.video_effects
+                .edit(0, |node| node.enabled = false)
+                .is_ok()
+        );
         assert!(clip.evaluate_video_effects(Tick(15)).is_empty());
     }
 
@@ -7470,7 +8592,7 @@ mod tests {
         };
         effect.brightness.value = 0.75;
         middle.enabled = false;
-        clip.video_effects = vec![first, middle, last];
+        clip.video_effects = vec![first, middle, last].into();
 
         let evaluated = clip.evaluate_video_effects(Tick(0));
         assert_eq!(evaluated.len(), 2);
@@ -7680,18 +8802,18 @@ mod tests {
 
         let mut nonfinite = timeline.snapshot();
         let VideoEffectKind::BrightnessContrast(effect) =
-            &mut nonfinite.tracks[0].clips[0].video_effects[0].kind
+            &mut nonfinite.tracks[0].clips[0].video_effects.nodes[0].kind
         else {
             panic!()
         };
         effect.brightness.value = f32::NAN;
         assert!(
-            matches!(Timeline::from_snapshot(nonfinite), Err(TimelineSnapshotError::InvalidVideoEffect { clip: rejected }) if rejected == clip)
+            matches!(Timeline::from_snapshot(nonfinite), Err(TimelineSnapshotError::InvalidVideoEffectGraph { clip: rejected, error: VideoEffectGraphError::InvalidNodeParameters { .. } }) if rejected == clip)
         );
 
         let mut unsorted = timeline.snapshot();
         let VideoEffectKind::BrightnessContrast(effect) =
-            &mut unsorted.tracks[0].clips[0].video_effects[0].kind
+            &mut unsorted.tracks[0].clips[0].video_effects.nodes[0].kind
         else {
             panic!()
         };
@@ -7708,7 +8830,7 @@ mod tests {
             },
         ];
         assert!(
-            matches!(Timeline::from_snapshot(unsorted), Err(TimelineSnapshotError::InvalidVideoEffect { clip: rejected }) if rejected == clip)
+            matches!(Timeline::from_snapshot(unsorted), Err(TimelineSnapshotError::InvalidVideoEffectGraph { clip: rejected, error: VideoEffectGraphError::InvalidNodeParameters { .. } }) if rejected == clip)
         );
     }
 
@@ -7720,7 +8842,7 @@ mod tests {
             .insert_clip(track, MediaId(1), Tick(0), Tick(100), Tick(0))
             .unwrap();
 
-        let too_many = (1..=(MAX_VIDEO_EFFECTS_PER_CLIP as u32 + 1))
+        let too_many: Vec<_> = (1..=(MAX_VIDEO_EFFECTS_PER_CLIP as u32 + 1))
             .map(color_effect)
             .collect();
         assert!(matches!(
@@ -7815,7 +8937,7 @@ mod tests {
             .unwrap();
 
         let mut legacy = serde_json::to_value(timeline.snapshot()).unwrap();
-        let effect = legacy["tracks"][0]["clips"][0]["video_effects"][0]
+        let effect = legacy["tracks"][0]["clips"][0]["video_effects"]["nodes"][0]
             .as_object_mut()
             .unwrap();
         for field in [

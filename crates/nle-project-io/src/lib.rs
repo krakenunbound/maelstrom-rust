@@ -11,7 +11,7 @@ use std::{
 use nle_ui_core::{EditorProjectSnapshot, EditorState, Language, MediaId};
 use serde::{Deserialize, Serialize};
 
-pub const PROJECT_DOCUMENT_VERSION: u32 = 7;
+pub const PROJECT_DOCUMENT_VERSION: u32 = 8;
 pub const PROJECT_TIMEBASE: u32 = 1_000_000;
 
 #[derive(Deserialize)]
@@ -205,12 +205,12 @@ fn preflight_document_version(bytes: &[u8]) -> Result<(), ProjectIoError> {
 }
 
 /// Versions 1–3 share this build's original durable fields; version 4 adds title overlays,
-/// version 5 adds video transitions, version 6 adds their kind, and version 7 adds audio
-/// transitions. Updating the header is lossless because absent collections and kinds deserialize
-/// to their defaults.
+/// version 5 adds video transitions, version 6 adds their kind, version 7 adds audio transitions,
+/// and version 8 writes clip video effects as explicit schema-v1 graphs. Legacy effect arrays are
+/// accepted and converted during deserialization, so updating the header is lossless.
 fn migrate_document(mut document: ProjectDocument) -> Result<ProjectDocument, ProjectIoError> {
     match document.version {
-        1..=6 => document.version = PROJECT_DOCUMENT_VERSION,
+        1..=7 => document.version = PROJECT_DOCUMENT_VERSION,
         PROJECT_DOCUMENT_VERSION => {}
         version => return Err(ProjectIoError::UnsupportedVersion(version)),
     }
@@ -383,13 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn current_documents_are_written_at_version_seven() {
-        let root = test_root("version-seven");
-        let path = root.join("VersionSeven.nleproj");
-        let editor = EditorState::new(Language::English, "Version seven");
+    fn current_documents_are_written_at_version_eight() {
+        let root = test_root("version-eight");
+        let path = root.join("VersionEight.nleproj");
+        let editor = EditorState::new(Language::English, "Version eight");
         let document = document_for_path(
             &path,
-            "Version seven",
+            "Version eight",
             editor.snapshot(),
             ProjectSettings::default(),
         );
@@ -599,11 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn version_one_through_six_documents_load_and_migrate_idempotently_to_version_seven() {
+    fn version_one_through_seven_documents_load_and_migrate_idempotently_to_version_eight() {
         let root = test_root("legacy-version");
         fs::create_dir_all(&root).unwrap();
         let editor = EditorState::new(Language::English, "Legacy version");
-        for version in 1..=6 {
+        for version in 1..=7 {
             let path = root.join(format!("Version{version}.nleproj"));
             let mut legacy = document_for_path(
                 &path,
@@ -636,7 +636,7 @@ mod tests {
             ));
         }
         let current = document_for_path(
-            &root.join("Version7.nleproj"),
+            &root.join("Version8.nleproj"),
             "Current version",
             editor.snapshot(),
             ProjectSettings::default(),
@@ -681,8 +681,9 @@ mod tests {
     }
 
     #[test]
-    fn version_three_documents_round_trip_ordered_video_effects_and_keyframe_interpolations() {
+    fn version_seven_effect_arrays_migrate_to_ordered_schema_v1_graphs() {
         let root = test_root("effect-stack-round-trip");
+        fs::create_dir_all(&root).unwrap();
         let path = root.join("EffectStack.nleproj");
         let mut editor = EditorState::new(Language::English, "Effect stack");
         editor.add_media_paths([PathBuf::from("clip.mp4")]);
@@ -715,12 +716,12 @@ mod tests {
             "brightness": { "value": 0.25, "keyframes": [] },
             "contrast": { "value": 1.5, "keyframes": [] }
         }]);
-        let document: ProjectDocument = serde_json::from_value(value).unwrap();
-        write_document(&path, &document).unwrap();
+        value["version"] = serde_json::json!(7);
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         let round_tripped = serde_json::to_value(read_document(&path).unwrap().unwrap()).unwrap();
         let keyframes = round_tripped["snapshot"]["timeline"]["tracks"][0]["clips"][0]
-            ["video_effects"][0]["brightness"]["keyframes"]
+            ["video_effects"]["nodes"][0]["brightness"]["keyframes"]
             .as_array()
             .unwrap();
         assert_eq!(
@@ -730,10 +731,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Smooth", "EaseIn", "EaseOut", "Linear"]
         );
-        let effects =
-            round_tripped["snapshot"]["timeline"]["tracks"][0]["clips"][0]["video_effects"]
-                .as_array()
-                .unwrap();
+        let graph =
+            &round_tripped["snapshot"]["timeline"]["tracks"][0]["clips"][0]["video_effects"];
+        assert_eq!(graph["schema_version"], 1);
+        assert_eq!(graph["connections"].as_array().unwrap().len(), 1);
+        let effects = graph["nodes"].as_array().unwrap();
         assert_eq!(
             effects
                 .iter()
@@ -741,6 +743,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_document_rejects_an_unsupported_nested_effect_graph_schema() {
+        let root = test_root("future-effect-graph");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("FutureEffectGraph.nleproj");
+        let mut editor = EditorState::new(Language::English, "Future effect graph");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let mut value = serde_json::to_value(document_for_path(
+            &path,
+            "Future effect graph",
+            editor.snapshot(),
+            ProjectSettings::default(),
+        ))
+        .unwrap();
+        value["snapshot"]["timeline"]["tracks"][0]["clips"][0]["video_effects"]["schema_version"] =
+            serde_json::json!(2);
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            read_document(&path),
+            Err(ProjectIoError::InvalidSnapshot(error))
+                if error.contains("UnsupportedSchemaVersion")
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

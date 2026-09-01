@@ -53,16 +53,22 @@ fn scalar_and_nested_mutations_detach_only_touched_record() {
             id: VideoEffectId(1),
             enabled: true,
             kind: VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
-        });
-    if let VideoEffectKind::BrightnessContrast(effect) =
-        &mut timeline.tracks[0].clips[1].video_effects[0].kind
-    {
-        effect.brightness.keyframes.push(ScalarKeyframe {
-            source_tick: Tick(1),
-            value: 0.5,
-            interpolation: KeyframeInterpolation::Hold,
-        });
-    }
+        })
+        .unwrap();
+    assert!(
+        timeline.tracks[0].clips[1]
+            .video_effects
+            .edit(0, |node| {
+                if let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind {
+                    effect.brightness.keyframes.push(ScalarKeyframe {
+                        source_tick: Tick(1),
+                        value: 0.5,
+                        interpolation: KeyframeInterpolation::Hold,
+                    });
+                }
+            })
+            .is_ok()
+    );
     let snapshot = timeline.snapshot();
     let saved_json = serde_json::to_value(&snapshot).unwrap();
     timeline.tracks[0].clips[0].gain_db = 3.0;
@@ -75,11 +81,16 @@ fn scalar_and_nested_mutations_detach_only_touched_record() {
         &snapshot.tracks[0].clips[1]
     ));
 
-    if let VideoEffectKind::BrightnessContrast(effect) =
-        &mut timeline.tracks[0].clips[1].video_effects[0].kind
-    {
-        effect.brightness.keyframes[0].value = 0.75;
-    }
+    assert!(
+        timeline.tracks[0].clips[1]
+            .video_effects
+            .edit(0, |node| {
+                if let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind {
+                    effect.brightness.keyframes[0].value = 0.75;
+                }
+            })
+            .is_ok()
+    );
     assert!(!shared(
         &timeline.tracks[0].clips[1],
         &snapshot.tracks[0].clips[1]
@@ -148,7 +159,7 @@ fn clip_json_is_flat_and_legacy_defaults_apply() {
         gain_left_db: 0.0,
         gain_right_db: 0.0,
         effects: Vec::new(),
-        video_effects: Vec::new(),
+        video_effects: Vec::new().into(),
         transform: nle_timeline::ClipTransform::default(),
         fade_in: Fade::default(),
         fade_out: Fade::default(),

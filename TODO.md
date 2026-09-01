@@ -395,7 +395,10 @@ Last updated: 2026-08-31
 
 ## Professional editor backlog
 
-- [ ] Finish the schema-versioned effect graph before expanding the effect catalog.
+- [ ] Finish the schema-versioned effect graph before expanding the effect catalog. Durable schema
+  v1, legacy-array migration, stable typed IDs/ports/parameters, and bounded structural validation
+  are complete; compiled runtime ownership, worker-side compilation, cache invalidation, and atomic
+  latest-valid swaps remain.
 - [ ] Complete preview/export parity for effects, transitions, titles, and color processing.
 - [ ] Add the remaining roadmap transitions, title tooling, Rec.709 color pipeline, LUT validation,
   and non-blocking scopes.

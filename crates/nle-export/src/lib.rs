@@ -2709,18 +2709,25 @@ mod tests {
             .unwrap()
             .clips[0];
         clip.video_effects
-            .push(brightness_contrast_node(true, scalar(-1.0), scalar(4.0)));
-        let VideoEffectKind::BrightnessContrast(effect) = &mut clip.video_effects[0].kind else {
-            panic!("expected the basic correction operation");
-        };
-        effect.temperature = scalar(0.4);
-        effect.tint = scalar(-0.2);
-        effect.saturation = scalar(1.25);
-        effect.exposure = scalar(0.5);
-        effect.highlights = scalar(0.3);
-        effect.shadows = scalar(-0.4);
-        effect.whites = scalar(0.55);
-        effect.blacks = scalar(-0.65);
+            .push(brightness_contrast_node(true, scalar(-1.0), scalar(4.0)))
+            .unwrap();
+        assert!(
+            clip.video_effects
+                .edit(0, |node| {
+                    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                        panic!("expected the basic correction operation");
+                    };
+                    effect.temperature = scalar(0.4);
+                    effect.tint = scalar(-0.2);
+                    effect.saturation = scalar(1.25);
+                    effect.exposure = scalar(0.5);
+                    effect.highlights = scalar(0.3);
+                    effect.shadows = scalar(-0.4);
+                    effect.whites = scalar(0.55);
+                    effect.blacks = scalar(-0.65);
+                })
+                .is_ok()
+        );
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -2757,17 +2764,24 @@ mod tests {
             .unwrap()
             .clips[0];
         clip.video_effects
-            .push(brightness_contrast_node(true, scalar(0.0), scalar(1.0)));
-        let VideoEffectKind::BrightnessContrast(effect) = &mut clip.video_effects[0].kind else {
-            panic!("expected the basic correction operation");
-        };
-        effect.curves.master = ColorCurve {
-            points: vec![
-                CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.5, y: 0.75 },
-                CurvePoint { x: 1.0, y: 1.0 },
-            ],
-        };
+            .push(brightness_contrast_node(true, scalar(0.0), scalar(1.0)))
+            .unwrap();
+        assert!(
+            clip.video_effects
+                .edit(0, |node| {
+                    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                        panic!("expected the basic correction operation");
+                    };
+                    effect.curves.master = ColorCurve {
+                        points: vec![
+                            CurvePoint { x: 0.0, y: 0.0 },
+                            CurvePoint { x: 0.5, y: 0.75 },
+                            CurvePoint { x: 1.0, y: 1.0 },
+                        ],
+                    };
+                })
+                .is_ok()
+        );
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -2797,63 +2811,71 @@ mod tests {
             .unwrap()
             .clips[0];
         clip.source_in = Tick(1_000_000);
-        clip.video_effects.push(brightness_contrast_node(
-            true,
-            AnimatedScalar {
-                value: 0.0,
-                keyframes: vec![
-                    ScalarKeyframe {
-                        source_tick: Tick(1_000_000),
+        clip.video_effects
+            .push(brightness_contrast_node(
+                true,
+                AnimatedScalar {
+                    value: 0.0,
+                    keyframes: vec![
+                        ScalarKeyframe {
+                            source_tick: Tick(1_000_000),
+                            value: 0.0,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                        ScalarKeyframe {
+                            source_tick: Tick(2_000_000),
+                            value: 0.5,
+                            interpolation: KeyframeInterpolation::Hold,
+                        },
+                        ScalarKeyframe {
+                            source_tick: Tick(3_000_000),
+                            value: -0.25,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                    ],
+                },
+                scalar(1.0),
+            ))
+            .unwrap();
+        assert!(
+            clip.video_effects
+                .edit(0, |node| {
+                    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                        panic!("expected the basic correction operation");
+                    };
+                    effect.temperature = AnimatedScalar {
                         value: 0.0,
-                        interpolation: KeyframeInterpolation::Linear,
-                    },
-                    ScalarKeyframe {
-                        source_tick: Tick(2_000_000),
-                        value: 0.5,
-                        interpolation: KeyframeInterpolation::Hold,
-                    },
-                    ScalarKeyframe {
-                        source_tick: Tick(3_000_000),
-                        value: -0.25,
-                        interpolation: KeyframeInterpolation::Linear,
-                    },
-                ],
-            },
-            scalar(1.0),
-        ));
-        let VideoEffectKind::BrightnessContrast(effect) = &mut clip.video_effects[0].kind else {
-            panic!("expected the basic correction operation");
-        };
-        effect.temperature = AnimatedScalar {
-            value: 0.0,
-            keyframes: vec![
-                ScalarKeyframe {
-                    source_tick: Tick(1_000_000),
-                    value: -0.5,
-                    interpolation: KeyframeInterpolation::Linear,
-                },
-                ScalarKeyframe {
-                    source_tick: Tick(2_000_000),
-                    value: 0.5,
-                    interpolation: KeyframeInterpolation::Linear,
-                },
-            ],
-        };
-        effect.whites = AnimatedScalar {
-            value: 0.0,
-            keyframes: vec![
-                ScalarKeyframe {
-                    source_tick: Tick(1_000_000),
-                    value: -0.25,
-                    interpolation: KeyframeInterpolation::Linear,
-                },
-                ScalarKeyframe {
-                    source_tick: Tick(2_000_000),
-                    value: 0.75,
-                    interpolation: KeyframeInterpolation::Linear,
-                },
-            ],
-        };
+                        keyframes: vec![
+                            ScalarKeyframe {
+                                source_tick: Tick(1_000_000),
+                                value: -0.5,
+                                interpolation: KeyframeInterpolation::Linear,
+                            },
+                            ScalarKeyframe {
+                                source_tick: Tick(2_000_000),
+                                value: 0.5,
+                                interpolation: KeyframeInterpolation::Linear,
+                            },
+                        ],
+                    };
+                    effect.whites = AnimatedScalar {
+                        value: 0.0,
+                        keyframes: vec![
+                            ScalarKeyframe {
+                                source_tick: Tick(1_000_000),
+                                value: -0.25,
+                                interpolation: KeyframeInterpolation::Linear,
+                            },
+                            ScalarKeyframe {
+                                source_tick: Tick(2_000_000),
+                                value: 0.75,
+                                interpolation: KeyframeInterpolation::Linear,
+                            },
+                        ],
+                    };
+                })
+                .is_ok()
+        );
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -2942,7 +2964,8 @@ mod tests {
             .unwrap()
             .clips[0]
             .video_effects
-            .push(brightness_contrast_node(false, scalar(1.0), scalar(4.0)));
+            .push(brightness_contrast_node(false, scalar(1.0), scalar(4.0)))
+            .unwrap();
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -2965,13 +2988,16 @@ mod tests {
             .find(|track| track.kind == TrackKind::Video)
             .unwrap()
             .clips[0];
+        let mut middle = brightness_contrast_node(false, scalar(0.4), scalar(3.0));
+        middle.id = VideoEffectId(2);
+        let mut last = brightness_contrast_node(true, scalar(-0.5), scalar(1.0));
+        last.id = VideoEffectId(3);
         clip.video_effects = vec![
             brightness_contrast_node(true, scalar(0.8), scalar(1.0)),
-            brightness_contrast_node(false, scalar(0.4), scalar(3.0)),
-            brightness_contrast_node(true, scalar(-0.5), scalar(1.0)),
-        ];
-        clip.video_effects[1].id = VideoEffectId(2);
-        clip.video_effects[2].id = VideoEffectId(3);
+            middle,
+            last,
+        ]
+        .into();
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -3004,7 +3030,8 @@ mod tests {
             .clips[0];
         clip.fade_in.duration = Tick(100_000);
         clip.video_effects
-            .push(brightness_contrast_node(true, scalar(0.1), scalar(1.0)));
+            .push(brightness_contrast_node(true, scalar(0.1), scalar(1.0)))
+            .unwrap();
         let request = ExportRequest {
             snapshot,
             ..request(&editor)
@@ -4500,7 +4527,8 @@ mod tests {
                     ],
                 },
                 scalar(1.2),
-            ));
+            ))
+            .unwrap();
         let request = ExportRequest {
             snapshot,
             settings: ProjectSettings {
@@ -4882,33 +4910,42 @@ mod tests {
             true,
             scalar(brightness),
             scalar(contrast),
-        )];
-        let VideoEffectKind::BrightnessContrast(effect) = &mut clip.video_effects[0].kind else {
-            panic!("expected the basic correction operation");
-        };
-        effect.temperature = scalar(temperature);
-        effect.tint = scalar(tint);
-        effect.saturation = scalar(saturation);
-        effect.exposure = scalar(exposure);
-        effect.highlights = scalar(highlights);
-        effect.shadows = scalar(shadows);
-        effect.whites = scalar(whites);
-        effect.blacks = scalar(blacks);
-        effect.curves.red = ColorCurve {
-            points: vec![
-                CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.5, y: 0.72 },
-                CurvePoint { x: 1.0, y: 1.0 },
-            ],
-        };
-        effect.curves.master = ColorCurve {
-            points: vec![
-                CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.5, y: 0.43 },
-                CurvePoint { x: 1.0, y: 1.0 },
-            ],
-        };
-        let curves = effect.curves.clone();
+        )]
+        .into();
+        let mut curves = None;
+        assert!(
+            clip.video_effects
+                .edit(0, |node| {
+                    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                        panic!("expected the basic correction operation");
+                    };
+                    effect.temperature = scalar(temperature);
+                    effect.tint = scalar(tint);
+                    effect.saturation = scalar(saturation);
+                    effect.exposure = scalar(exposure);
+                    effect.highlights = scalar(highlights);
+                    effect.shadows = scalar(shadows);
+                    effect.whites = scalar(whites);
+                    effect.blacks = scalar(blacks);
+                    effect.curves.red = ColorCurve {
+                        points: vec![
+                            CurvePoint { x: 0.0, y: 0.0 },
+                            CurvePoint { x: 0.5, y: 0.72 },
+                            CurvePoint { x: 1.0, y: 1.0 },
+                        ],
+                    };
+                    effect.curves.master = ColorCurve {
+                        points: vec![
+                            CurvePoint { x: 0.0, y: 0.0 },
+                            CurvePoint { x: 0.5, y: 0.43 },
+                            CurvePoint { x: 1.0, y: 1.0 },
+                        ],
+                    };
+                    curves = Some(effect.curves.clone());
+                })
+                .is_ok()
+        );
+        let curves = curves.unwrap();
         let correction = video_color_filter(&clip);
         let sample = |filter: &str| -> Vec<u8> {
             let output = Command::new(&ffmpeg)
@@ -5009,11 +5046,13 @@ mod tests {
             .unwrap()
             .clips[0]
             .clone();
+        let mut second = brightness_contrast_node(true, scalar(-0.5), scalar(1.0));
+        second.id = VideoEffectId(2);
         clip.video_effects = vec![
             brightness_contrast_node(true, scalar(0.8), scalar(1.0)),
-            brightness_contrast_node(true, scalar(-0.5), scalar(1.0)),
-        ];
-        clip.video_effects[1].id = VideoEffectId(2);
+            second,
+        ]
+        .into();
         let sample = |filter: &str| -> Vec<u8> {
             let output = Command::new(&ffmpeg)
                 .args([
@@ -5089,7 +5128,8 @@ mod tests {
             brightness_contrast_node(true, scalar(0.1), scalar(1.0)),
             vignette_node(2, true, 0.8),
             vignette_node(3, false, 1.0),
-        ];
+        ]
+        .into();
         let filter = video_color_filter(&clip);
         let color = filter.find(",geq=").unwrap();
         let vignette = filter.rfind(",geq=").unwrap();
@@ -5242,7 +5282,8 @@ mod tests {
                 true,
                 brightness.clone(),
                 scalar(1.0),
-            )];
+            )]
+            .into();
             let corrected = sample(&format!("format=rgba{}", video_color_filter(&clip)));
             assert_eq!(corrected.len(), baseline.len());
 

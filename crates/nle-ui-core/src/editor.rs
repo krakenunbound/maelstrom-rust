@@ -32,8 +32,9 @@ use nle_timeline::{
     MIN_VIGNETTE_AMOUNT, MIN_VIGNETTE_CENTER, MIN_VIGNETTE_FEATHER, MIN_VIGNETTE_MIDPOINT,
     MIN_WHITES, MediaId as TimelineMediaId, Tick, Timeline, TimelineCache, TimelineError,
     TimelineSnapshot, TimelineSnapshotError, TitleAlignment, TitleColor, TitleId, TitleOverlay,
-    Track, TrackDrawRecord, TrackId, TrackKind, TransitionId, UndoStack, VideoEffectId,
-    VideoEffectKind, VideoEffectNode, VideoTransition, VideoTransitionKind, VignetteEffect,
+    Track, TrackDrawRecord, TrackId, TrackKind, TransitionId, UndoStack, VideoEffectGraph,
+    VideoEffectId, VideoEffectKind, VideoEffectNode, VideoTransition, VideoTransitionKind,
+    VignetteEffect,
 };
 use serde::{Deserialize, Serialize};
 
@@ -9696,11 +9697,16 @@ fn add_video_effect(state: &mut EditorState, clip: &Clip, kind: VideoEffectKind)
     let Some(id) = next_video_effect_id(&effects) else {
         return;
     };
-    effects.push(VideoEffectNode {
-        id,
-        enabled: true,
-        kind,
-    });
+    if effects
+        .push(VideoEffectNode {
+            id,
+            enabled: true,
+            kind,
+        })
+        .is_err()
+    {
+        return;
+    }
     apply_track_header_edit(state, |timeline| {
         timeline.set_clip_video_effects(clip.id, effects)
     });
@@ -9738,7 +9744,7 @@ fn video_effect_scalars(kind: &VideoEffectKind) -> VideoEffectScalars<'_> {
     }
 }
 
-fn next_video_effect_id(effects: &[VideoEffectNode]) -> Option<VideoEffectId> {
+fn next_video_effect_id(effects: &VideoEffectGraph) -> Option<VideoEffectId> {
     let mut candidate = 1_u32;
     loop {
         let id = VideoEffectId(candidate);
@@ -9794,7 +9800,9 @@ fn color_effect_card(
                 ));
                 if enabled_response.changed() {
                     let mut effects = clip.video_effects.clone();
-                    effects[index].enabled = enabled;
+                    if effects.edit(index, |node| node.enabled = enabled).is_err() {
+                        return;
+                    }
                     apply_track_header_edit(state, |timeline| {
                         timeline.set_clip_video_effects(clip.id, effects)
                     });
@@ -9875,7 +9883,9 @@ fn color_effect_actions_menu(
             .clicked()
         {
             let mut effects = clip.video_effects.clone();
-            effects.swap(index, index - 1);
+            if effects.swap(index, index - 1).is_err() {
+                return;
+            }
             apply_track_header_edit(state, |timeline| {
                 timeline.set_clip_video_effects(clip.id, effects)
             });
@@ -9890,7 +9900,9 @@ fn color_effect_actions_menu(
             .clicked()
         {
             let mut effects = clip.video_effects.clone();
-            effects.swap(index, index + 1);
+            if effects.swap(index, index + 1).is_err() {
+                return;
+            }
             apply_track_header_edit(state, |timeline| {
                 timeline.set_clip_video_effects(clip.id, effects)
             });
@@ -9911,7 +9923,9 @@ fn color_effect_actions_menu(
                 next_video_effect_id(&effects).expect("enabled Duplicate has a free effect ID");
             let mut duplicate = node.clone();
             duplicate.id = id;
-            effects.insert(index + 1, duplicate);
+            if effects.insert(index + 1, duplicate).is_err() {
+                return;
+            }
             apply_track_header_edit(state, |timeline| {
                 timeline.set_clip_video_effects(clip.id, effects)
             });
@@ -9920,7 +9934,9 @@ fn color_effect_actions_menu(
         ui.separator();
         if ui.button(t(state.language, "Remove", "削除")).clicked() {
             let mut effects = clip.video_effects.clone();
-            effects.remove(index);
+            if effects.remove(index).is_err() {
+                return;
+            }
             apply_track_header_edit(state, |timeline| {
                 timeline.set_clip_video_effects(clip.id, effects)
             });
@@ -9959,26 +9975,32 @@ fn color_effect_group(
                     .clicked()
                 {
                     let mut effects = clip.video_effects.clone();
-                    let VideoEffectKind::BrightnessContrast(current) = &mut effects[index].kind
-                    else {
-                        return;
-                    };
                     let defaults = BrightnessContrastEffect::default();
-                    match group {
-                        ColorCorrectionGroup::Color => {
-                            current.temperature = defaults.temperature;
-                            current.tint = defaults.tint;
-                            current.saturation = defaults.saturation;
+                    let mut reset = false;
+                    let changed = effects.edit(index, |node| {
+                        let VideoEffectKind::BrightnessContrast(current) = &mut node.kind else {
+                            return;
+                        };
+                        match group {
+                            ColorCorrectionGroup::Color => {
+                                current.temperature = defaults.temperature;
+                                current.tint = defaults.tint;
+                                current.saturation = defaults.saturation;
+                            }
+                            ColorCorrectionGroup::Light => {
+                                current.exposure = defaults.exposure;
+                                current.contrast = defaults.contrast;
+                                current.highlights = defaults.highlights;
+                                current.shadows = defaults.shadows;
+                                current.whites = defaults.whites;
+                                current.blacks = defaults.blacks;
+                                current.brightness = defaults.brightness;
+                            }
                         }
-                        ColorCorrectionGroup::Light => {
-                            current.exposure = defaults.exposure;
-                            current.contrast = defaults.contrast;
-                            current.highlights = defaults.highlights;
-                            current.shadows = defaults.shadows;
-                            current.whites = defaults.whites;
-                            current.blacks = defaults.blacks;
-                            current.brightness = defaults.brightness;
-                        }
+                        reset = true;
+                    });
+                    if changed.is_err() || !reset {
+                        return;
                     }
                     apply_track_header_edit(state, |timeline| {
                         timeline.set_clip_video_effects(clip.id, effects)
@@ -10153,8 +10175,14 @@ fn vignette_effect_controls(
                 .clicked()
             {
                 let mut effects = clip.video_effects.clone();
-                if let VideoEffectKind::Vignette(current) = &mut effects[index].kind {
-                    *current = VignetteEffect::default();
+                let mut reset = false;
+                let changed = effects.edit(index, |node| {
+                    if let VideoEffectKind::Vignette(current) = &mut node.kind {
+                        *current = VignetteEffect::default();
+                        reset = true;
+                    }
+                });
+                if changed.is_ok() && reset {
                     apply_track_header_edit(state, |timeline| {
                         timeline.set_clip_video_effects(clip.id, effects)
                     });
@@ -10401,13 +10429,20 @@ fn mutate_color_curve(
         return false;
     };
     let mut effects = clip.video_effects.clone();
-    let Some(node) = effects.iter_mut().find(|node| node.id == effect_id) else {
+    let Some(index) = effects.iter().position(|node| node.id == effect_id) else {
         return false;
     };
-    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+    let mut matched = false;
+    let changed = effects.edit(index, |node| {
+        let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+            return;
+        };
+        mutate(curve_for_channel_mut(&mut effect.curves, channel));
+        matched = true;
+    });
+    if changed.is_err() || !matched {
         return false;
-    };
-    mutate(curve_for_channel_mut(&mut effect.curves, channel));
+    }
     let generation = state.timeline.generation();
     state
         .timeline
@@ -10427,13 +10462,22 @@ fn reset_curve_channel(
             return Err(TimelineError::InvalidVideoEffect);
         };
         let mut effects = clip.video_effects.clone();
-        let Some(node) = effects.iter_mut().find(|node| node.id == effect_id) else {
+        let Some(index) = effects.iter().position(|node| node.id == effect_id) else {
             return Err(TimelineError::InvalidVideoEffect);
         };
-        let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+        let mut matched = false;
+        effects
+            .edit(index, |node| {
+                let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                    return;
+                };
+                *curve_for_channel_mut(&mut effect.curves, channel) = ColorCurve::default();
+                matched = true;
+            })
+            .map_err(|_| TimelineError::InvalidVideoEffect)?;
+        if !matched {
             return Err(TimelineError::InvalidVideoEffect);
-        };
-        *curve_for_channel_mut(&mut effect.curves, channel) = ColorCurve::default();
+        }
         timeline.set_clip_video_effects(clip_id, effects)
     });
 }
@@ -10444,13 +10488,22 @@ fn reset_all_curves(state: &mut EditorState, clip_id: ClipId, effect_id: VideoEf
             return Err(TimelineError::InvalidVideoEffect);
         };
         let mut effects = clip.video_effects.clone();
-        let Some(node) = effects.iter_mut().find(|node| node.id == effect_id) else {
+        let Some(index) = effects.iter().position(|node| node.id == effect_id) else {
             return Err(TimelineError::InvalidVideoEffect);
         };
-        let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+        let mut matched = false;
+        effects
+            .edit(index, |node| {
+                let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                    return;
+                };
+                effect.curves = nle_timeline::RgbCurves::default();
+                matched = true;
+            })
+            .map_err(|_| TimelineError::InvalidVideoEffect)?;
+        if !matched {
             return Err(TimelineError::InvalidVideoEffect);
-        };
-        effect.curves = nle_timeline::RgbCurves::default();
+        }
         timeline.set_clip_video_effects(clip_id, effects)
     });
 }
@@ -10482,17 +10535,27 @@ fn color_curve_editor(
                         return Err(TimelineError::InvalidVideoEffect);
                     };
                     let mut effects = clip.video_effects.clone();
-                    let Some(node) = effects.iter_mut().find(|node| node.id == effect_id) else {
+                    let Some(index) = effects.iter().position(|node| node.id == effect_id) else {
                         return Err(TimelineError::InvalidVideoEffect);
                     };
-                    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                    let mut matched = false;
+                    effects
+                        .edit(index, |node| {
+                            let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                                return;
+                            };
+                            let curve =
+                                curve_for_channel_mut(&mut effect.curves, curve_state.channel);
+                            curve.points.push(new_point);
+                            curve
+                                .points
+                                .sort_by(|left, right| left.x.total_cmp(&right.x));
+                            matched = true;
+                        })
+                        .map_err(|_| TimelineError::InvalidVideoEffect)?;
+                    if !matched {
                         return Err(TimelineError::InvalidVideoEffect);
-                    };
-                    let curve = curve_for_channel_mut(&mut effect.curves, curve_state.channel);
-                    curve.points.push(new_point);
-                    curve
-                        .points
-                        .sort_by(|left, right| left.x.total_cmp(&right.x));
+                    }
                     timeline.set_clip_video_effects(clip_id, effects)
                 });
                 curve_state.selected_point = Some(selected_index);
@@ -10537,15 +10600,24 @@ fn color_curve_editor(
                 return Err(TimelineError::InvalidVideoEffect);
             };
             let mut effects = clip.video_effects.clone();
-            let Some(node) = effects.iter_mut().find(|node| node.id == effect_id) else {
+            let Some(index) = effects.iter().position(|node| node.id == effect_id) else {
                 return Err(TimelineError::InvalidVideoEffect);
             };
-            let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+            let mut matched = false;
+            effects
+                .edit(index, |node| {
+                    let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                        return;
+                    };
+                    curve_for_channel_mut(&mut effect.curves, curve_state.channel)
+                        .points
+                        .remove(selected);
+                    matched = true;
+                })
+                .map_err(|_| TimelineError::InvalidVideoEffect)?;
+            if !matched {
                 return Err(TimelineError::InvalidVideoEffect);
-            };
-            curve_for_channel_mut(&mut effect.curves, curve_state.channel)
-                .points
-                .remove(selected);
+            }
             timeline.set_clip_video_effects(clip_id, effects)
         });
         curve_state.selected_point = None;
@@ -10566,15 +10638,24 @@ fn color_curve_editor(
                     return Err(TimelineError::InvalidVideoEffect);
                 };
                 let mut effects = clip.video_effects.clone();
-                let Some(node) = effects.iter_mut().find(|node| node.id == effect_id) else {
+                let Some(index) = effects.iter().position(|node| node.id == effect_id) else {
                     return Err(TimelineError::InvalidVideoEffect);
                 };
-                let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                let mut matched = false;
+                effects
+                    .edit(index, |node| {
+                        let VideoEffectKind::BrightnessContrast(effect) = &mut node.kind else {
+                            return;
+                        };
+                        curve_for_channel_mut(&mut effect.curves, curve_state.channel)
+                            .points
+                            .remove(selected);
+                        matched = true;
+                    })
+                    .map_err(|_| TimelineError::InvalidVideoEffect)?;
+                if !matched {
                     return Err(TimelineError::InvalidVideoEffect);
-                };
-                curve_for_channel_mut(&mut effect.curves, curve_state.channel)
-                    .points
-                    .remove(selected);
+                }
                 timeline.set_clip_video_effects(clip_id, effects)
             });
             curve_state.selected_point = None;
@@ -17515,7 +17596,7 @@ mod tests {
             gain_left_db: 0.0,
             gain_right_db: 0.0,
             effects: Vec::new(),
-            video_effects: Vec::new(),
+            video_effects: Vec::new().into(),
             transform: nle_timeline::ClipTransform::default(),
             fade_in: Default::default(),
             fade_out: Default::default(),
@@ -17568,7 +17649,7 @@ mod tests {
             gain_left_db: 0.0,
             gain_right_db: 0.0,
             effects: Vec::new(),
-            video_effects: Vec::new(),
+            video_effects: Vec::new().into(),
             transform: nle_timeline::ClipTransform::default(),
             fade_in: Default::default(),
             fade_out: Default::default(),
@@ -17622,7 +17703,7 @@ mod tests {
                 gain_left_db: 0.0,
                 gain_right_db: 0.0,
                 effects: Vec::new(),
-                video_effects: Vec::new(),
+                video_effects: Vec::new().into(),
                 transform: nle_timeline::ClipTransform::default(),
                 fade_in: Default::default(),
                 fade_out: Default::default(),
@@ -17677,7 +17758,7 @@ mod tests {
                     gain_left_db: 0.0,
                     gain_right_db: 0.0,
                     effects: Vec::new(),
-                    video_effects: Vec::new(),
+                    video_effects: Vec::new().into(),
                     transform: nle_timeline::ClipTransform::default(),
                     fade_in: Default::default(),
                     fade_out: Default::default(),
@@ -19943,7 +20024,7 @@ mod tests {
         assert_eq!(correction.contrast, 1.75);
 
         let mut bypassed = editor.timeline.clip(clip_id).unwrap().video_effects.clone();
-        bypassed[0].enabled = false;
+        assert!(bypassed.edit(0, |node| node.enabled = false).is_ok());
         editor
             .timeline
             .set_clip_video_effects(clip_id, bypassed)
@@ -20414,7 +20495,7 @@ mod tests {
         let original = editor.timeline.clip(clip_id).unwrap().video_effects.clone();
         assert_eq!(next_video_effect_id(&original), Some(VideoEffectId(2)));
         let mut reordered = original.clone();
-        reordered.swap(0, 1);
+        reordered.swap(0, 1).unwrap();
         apply_track_header_edit(&mut editor, |timeline| {
             timeline.set_clip_video_effects(clip_id, reordered)
         });
@@ -20431,9 +20512,9 @@ mod tests {
         );
 
         let mut duplicated = editor.timeline.clip(clip_id).unwrap().video_effects.clone();
-        let mut duplicate = duplicated[0].clone();
+        let mut duplicate = duplicated.first().unwrap().clone();
         duplicate.id = next_video_effect_id(&duplicated).unwrap();
-        duplicated.insert(1, duplicate);
+        duplicated.insert(1, duplicate).unwrap();
         apply_track_header_edit(&mut editor, |timeline| {
             timeline.set_clip_video_effects(clip_id, duplicated)
         });
@@ -23470,7 +23551,7 @@ mod tests {
                 gain_left_db: 0.0,
                 gain_right_db: 0.0,
                 effects: Vec::new(),
-                video_effects: Vec::new(),
+                video_effects: Vec::new().into(),
                 transform: nle_timeline::ClipTransform::default(),
                 fade_in: Default::default(),
                 fade_out: Default::default(),
