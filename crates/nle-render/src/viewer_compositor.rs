@@ -253,7 +253,7 @@ pub struct ViewerCompositorEncodeTiming {
 }
 
 /// Maximum number of ordered encoded-sRGB color-correction nodes per monitor layer.
-pub const MAX_COLOR_CORRECTIONS_PER_LAYER: usize = 8;
+pub const MAX_COLOR_CORRECTIONS_PER_LAYER: usize = 10;
 /// One lookup entry per encoded 8-bit channel value, matching export precision.
 pub const COLOR_CURVE_LUT_SAMPLES: usize = 256;
 pub const MAX_COLOR_CURVE_POINTS: usize = 16;
@@ -610,7 +610,7 @@ struct GpuColorCorrectionStack {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuCurveLutStack {
     /// Node-major final RGB lookup values. Curves live in a storage buffer because the complete
-    /// eight-node 8-bit payload is larger than WebGPU's guaranteed 16 KiB uniform limit.
+    /// ten-node 8-bit payload is larger than WebGPU's guaranteed 16 KiB uniform limit.
     samples: [[f32; 4]; MAX_COLOR_CORRECTIONS_PER_LAYER * COLOR_CURVE_LUT_SAMPLES],
 }
 
@@ -3177,6 +3177,22 @@ mod tests {
     }
 
     #[test]
+    fn color_correction_capacity_matches_ten_node_gpu_and_shader_layouts() {
+        assert_eq!(MAX_COLOR_CORRECTIONS_PER_LAYER, 10);
+        assert_eq!(std::mem::size_of::<GpuColorCorrectionStack>(), 656);
+        assert_eq!(
+            std::mem::size_of::<GpuCurveLutStack>(),
+            10 * COLOR_CURVE_LUT_SAMPLES * std::mem::size_of::<[f32; 4]>()
+        );
+        assert!(VIEWER_SHADER.contains("corrections: array<ColorCorrection, 10>"));
+        assert!(VIEWER_SHADER.contains("samples: array<vec4<f32>, 2560>"));
+        assert!(
+            VIEWER_SHADER.contains("min(color_stack.count, 10u)"),
+            "the shader iteration limit must match the Rust payload capacity"
+        );
+    }
+
+    #[test]
     fn viewer_sampling_quality_defaults_to_manual_bicubic() {
         assert_eq!(
             ViewerSamplingQuality::default(),
@@ -3546,18 +3562,53 @@ mod tests {
         assert_eq!(stack.corrections[0].effect[0], 0.0);
         assert_eq!(curves.samples[255], [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(
-            stack.corrections.map(|correction| correction.light),
-            [
+            stack.corrections[..3]
+                .iter()
+                .map(|correction| correction.light)
+                .collect::<Vec<_>>(),
+            vec![
                 [0.25, 2.0, 0.75, -0.5],
                 [-1.0, 1.0, 0.0, 0.0],
                 [0.0, 4.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
             ]
         );
+        assert!(
+            stack.corrections[3..]
+                .iter()
+                .all(|correction| correction.light == [0.0, 1.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn all_ten_color_corrections_transfer_and_evaluate_curve_luts() {
+        let corrections = std::array::from_fn(|index| {
+            let value = index as f32 / MAX_COLOR_CORRECTIONS_PER_LAYER as f32;
+            let mut correction = ViewerColorCorrection {
+                brightness: value,
+                ..Default::default()
+            };
+            correction.curves.red.points[0][1] = value;
+            correction.curves.red.points[1][1] = value;
+            correction
+        });
+        let primitive = ViewerLayerPrimitive {
+            quad: full_test_quad(1),
+            content_uv: [Uv { u: 0.0, v: 0.0 }; 4],
+            color_corrections: corrections,
+            color_correction_count: MAX_COLOR_CORRECTIONS_PER_LAYER as u32,
+        };
+
+        let stack = gpu_color_correction_stack(primitive);
+        let curves = gpu_curve_lut_stack(primitive);
+        assert_eq!(stack.count, 10);
+        for index in 0..MAX_COLOR_CORRECTIONS_PER_LAYER {
+            let value = index as f32 / MAX_COLOR_CORRECTIONS_PER_LAYER as f32;
+            assert_eq!(stack.corrections[index].light[0], value);
+            assert_eq!(
+                curves.samples[index * COLOR_CURVE_LUT_SAMPLES + 128],
+                [value, 128.0 / 255.0, 128.0 / 255.0, 0.0],
+            );
+        }
     }
 
     #[test]
@@ -3750,6 +3801,8 @@ mod tests {
             color_corrections: [
                 corrections[1],
                 corrections[0],
+                ViewerColorCorrection::default(),
+                ViewerColorCorrection::default(),
                 ViewerColorCorrection::default(),
                 ViewerColorCorrection::default(),
                 ViewerColorCorrection::default(),

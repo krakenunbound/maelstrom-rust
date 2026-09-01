@@ -325,7 +325,7 @@ impl AudioEffect {
 
 /// Clip-owned effects remain bounded so preview and export can use a fixed
 /// evaluation buffer without allocating on every frame.
-pub const MAX_VIDEO_EFFECTS_PER_CLIP: usize = 8;
+pub const MAX_VIDEO_EFFECTS_PER_CLIP: usize = 10;
 /// Audio rack entries are bounded independently for each clip and audio
 /// track. This keeps snapshot validation and signal-graph construction cheap.
 pub const MAX_AUDIO_EFFECTS_PER_SCOPE: usize = 8;
@@ -8348,6 +8348,7 @@ mod tests {
 
     #[test]
     fn video_effect_graph_mutations_are_transactional() {
+        assert_eq!(MAX_VIDEO_EFFECTS_PER_CLIP, 10);
         let mut graph = VideoEffectGraph::from(vec![color_effect(1), vignette_effect(2, true)]);
         let original = graph.clone();
         assert_eq!(
@@ -9096,12 +9097,17 @@ mod tests {
 
     #[test]
     fn video_effect_stack_rejects_too_many_duplicate_and_zero_ids() {
+        assert_eq!(MAX_VIDEO_EFFECTS_PER_CLIP, 10);
         let mut timeline = Timeline::new_default();
         let track = first_track(&timeline, TrackKind::Video);
         let clip = timeline
             .insert_clip(track, MediaId(1), Tick(0), Tick(100), Tick(0))
             .unwrap();
 
+        let full: Vec<_> = (1..=MAX_VIDEO_EFFECTS_PER_CLIP as u32)
+            .map(color_effect)
+            .collect();
+        assert!(timeline.set_clip_video_effects(clip, full).is_ok());
         let too_many: Vec<_> = (1..=(MAX_VIDEO_EFFECTS_PER_CLIP as u32 + 1))
             .map(color_effect)
             .collect();

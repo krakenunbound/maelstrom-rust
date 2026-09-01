@@ -747,6 +747,72 @@ mod tests {
     }
 
     #[test]
+    fn current_document_round_trips_the_exact_full_ten_node_graph_and_keyframes() {
+        let root = test_root("ten-node-effect-graph");
+        let path = root.join("TenNodeEffectGraph.nleproj");
+        let mut editor = EditorState::new(Language::English, "Ten-node effect graph");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let clip_id = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .clips[0]
+            .id;
+        let graph: nle_timeline::VideoEffectGraph = (0..nle_timeline::MAX_VIDEO_EFFECTS_PER_CLIP)
+            .map(|index| {
+                let mut effect = nle_timeline::BrightnessContrastEffect::default();
+                effect.brightness.value = index as f32 * 0.01;
+                effect.brightness.keyframes = vec![
+                    nle_timeline::ScalarKeyframe {
+                        source_tick: Tick(0),
+                        value: index as f32 * 0.01,
+                        interpolation: nle_timeline::KeyframeInterpolation::Hold,
+                    },
+                    nle_timeline::ScalarKeyframe {
+                        source_tick: Tick(1_000_000),
+                        value: index as f32 * -0.01,
+                        interpolation: nle_timeline::KeyframeInterpolation::EaseOut,
+                    },
+                ];
+                nle_timeline::VideoEffectNode {
+                    id: nle_timeline::VideoEffectId(index as u32 + 1),
+                    enabled: index % 3 != 0,
+                    kind: nle_timeline::VideoEffectKind::BrightnessContrast(effect),
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
+        editor
+            .timeline
+            .set_clip_video_effects(clip_id, graph.clone())
+            .unwrap();
+        let document = document_for_path(
+            &path,
+            "Ten-node effect graph",
+            editor.snapshot(),
+            ProjectSettings::default(),
+        );
+
+        write_document(&path, &document).unwrap();
+        let restored = read_document(&path).unwrap().unwrap();
+        let restored_graph = &restored
+            .snapshot
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .clips[0]
+            .video_effects;
+        assert_eq!(restored_graph, &graph);
+        assert_eq!(restored_graph.len(), 10);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn current_document_rejects_an_unsupported_nested_effect_graph_schema() {
         let root = test_root("future-effect-graph");
         fs::create_dir_all(&root).unwrap();

@@ -23,7 +23,8 @@ schema.
 
 ## Validation and compatibility
 
-Timeline restoration rejects unsupported graph versions, excessive or duplicate nodes, zero IDs,
+Timeline restoration accepts at most ten ordered nodes per clip and rejects unsupported graph
+versions, excessive or duplicate nodes, zero IDs,
 invalid effect parameters, missing edge nodes or ports, wrong port directions, incompatible value
 types, duplicate edges, cycles, branching, and noncanonical order. Unknown graph fields are rejected
 instead of being silently discarded. Structural edits rebuild canonical connections immediately,

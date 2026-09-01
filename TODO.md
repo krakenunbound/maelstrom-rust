@@ -401,6 +401,10 @@ Last updated: 2026-08-31
   bounded runtime caching, owner-thread whole-plan swaps, and export-plan compilation are covered by
   focused parity/lifecycle tests. Output-size/color-setting invalidation and renderer resource
   caches remain with their later roadmap items.
+- [x] Close the Phase 3 ten-node capacity, live-edit, stale-result, and exact-state gates. Timeline,
+  UI authoring, renderer/WGSL buffers, curve LUTs, and export now agree on ten nodes; the app keeps
+  playback active through 120 rapid edits under the 8 ms UI p95 budget and installs only current
+  compiled work. Current-format save/reopen and UI undo/redo preserve the exact full graph and keys.
 - [ ] Complete preview/export parity for effects, transitions, titles, and color processing.
 - [ ] Add the remaining roadmap transitions, title tooling, Rec.709 color pipeline, LUT validation,
   and non-blocking scopes.

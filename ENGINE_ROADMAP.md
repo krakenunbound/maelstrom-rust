@@ -767,9 +767,17 @@ Add a small deterministic graph before adding a large effects catalog.
 
 Exit gate:
 
-- [ ] A ten-node graph can be edited while playing without timeline regression.
-- [ ] Obsolete graph compilation and effect results never reach the viewer.
-- [ ] Save/reopen and undo/redo restore exact graph and keyframe state.
+- [x] A ten-node graph can be edited while playing without timeline regression. Timeline, UI,
+      renderer payloads, curve-LUT storage, WGSL limits, and export all share the exact ten-node
+      boundary. A 120-edit live-playback app regression keeps transport active and the UI-side
+      nearest-rank p95 below the existing 8 ms budget while the bounded compiler coalesces work.
+- [x] Obsolete graph compilation and effect results never reach the viewer. Rapid live edits enqueue
+      120 generations for one clip; latest-wins request ownership and generation/source validation
+      permit only the final current graph to install, while existing ready-before-replacement and
+      stale edit/undo/redo regressions retain direct authoritative evaluation until that swap.
+- [x] Save/reopen and undo/redo restore exact graph and keyframe state. The current document format
+      round-trips the full ten-node graph, node order/enabled state, and per-node Hold/EaseOut keys;
+      UI history independently restores the exact ten-node graph and the tenth node's keyframe.
 - [ ] Export and preview evaluate the same graph description with matching frame results within
       defined color/rounding tolerance.
 

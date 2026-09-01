@@ -12,7 +12,7 @@ struct ColorCorrection {
     center: vec4<f32>,
 };
 struct ColorCorrectionStack {
-    corrections: array<ColorCorrection, 8>,
+    corrections: array<ColorCorrection, 10>,
     count: u32,
     // 0 = nearest, 1 = bilinear, 2 = manually filtered bicubic.
     sampling_quality: u32,
@@ -21,8 +21,8 @@ struct ColorCorrectionStack {
 };
 @group(0) @binding(2) var<uniform> color_stack: ColorCorrectionStack;
 struct CurveLutStack {
-    // Eight node-major, 256-entry component-then-master RGB lookup tables.
-    samples: array<vec4<f32>, 2048>,
+    // Ten node-major, 256-entry component-then-master RGB lookup tables.
+    samples: array<vec4<f32>, 2560>,
 };
 @group(0) @binding(3) var<storage, read> curve_luts: CurveLutStack;
 
@@ -170,7 +170,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Composition textures contain premultiplied encoded-sRGB values. Color operations remain
     // defined on straight encoded color until the Phase 4 linear working-space migration.
     var encoded = select(vec3<f32>(0.0), sample.rgb / alpha, alpha > 0.0);
-    for (var index = 0u; index < min(color_stack.count, 8u); index = index + 1u) {
+    for (var index = 0u; index < min(color_stack.count, 10u); index = index + 1u) {
         let correction = color_stack.corrections[index];
         if (correction.effect.x == 1.0) {
             let dx = 2.0 * (input.uv.x - (0.5 + correction.center.x * 0.5));

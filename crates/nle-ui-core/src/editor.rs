@@ -20298,17 +20298,15 @@ mod tests {
         editor.add_media_paths([PathBuf::from("color.mp4")]);
         assert!(editor.add_selected_to_timeline());
         let clip_id = editor.selected_timeline_clip.unwrap();
-        let effect_id = VideoEffectId(1);
+        let effect_id = VideoEffectId(MAX_VIDEO_EFFECTS_PER_CLIP as u32);
+        let effects = VideoEffectGraph::from(
+            (1..=MAX_VIDEO_EFFECTS_PER_CLIP as u32)
+                .map(|id| default_color_effect(VideoEffectId(id)))
+                .collect::<Vec<_>>(),
+        );
 
         apply_track_header_edit(&mut editor, |timeline| {
-            timeline.set_clip_video_effects(
-                clip_id,
-                vec![VideoEffectNode {
-                    id: effect_id,
-                    enabled: true,
-                    kind: VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
-                }],
-            )
+            timeline.set_clip_video_effects(clip_id, effects.clone())
         });
         apply_track_header_edit(&mut editor, |timeline| {
             timeline.set_color_keyframe(
@@ -20345,8 +20343,8 @@ mod tests {
         );
         assert!(editor.redo_timeline());
         assert_eq!(
-            editor.timeline.clip(clip_id).unwrap().video_effects.len(),
-            1
+            editor.timeline.clip(clip_id).unwrap().video_effects,
+            effects
         );
         assert!(editor.redo_timeline());
         assert_eq!(
@@ -20357,6 +20355,42 @@ mod tests {
                 .interpolation,
             KeyframeInterpolation::Smooth
         );
+    }
+
+    #[test]
+    fn video_effect_authoring_accepts_ten_nodes_and_rejects_eleventh() {
+        assert_eq!(MAX_VIDEO_EFFECTS_PER_CLIP, 10);
+
+        let mut editor = EditorState::new(Language::English, "Color effect capacity");
+        editor.add_media_paths([PathBuf::from("color.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let clip_id = editor.selected_timeline_clip.unwrap();
+
+        for _ in 0..MAX_VIDEO_EFFECTS_PER_CLIP {
+            let clip = editor.timeline.clip(clip_id).unwrap().clone();
+            add_video_effect(
+                &mut editor,
+                &clip,
+                VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
+            );
+        }
+        assert_eq!(
+            editor.timeline.clip(clip_id).unwrap().video_effects.len(),
+            10
+        );
+
+        let history_len = editor.history.undo.len();
+        let clip = editor.timeline.clip(clip_id).unwrap().clone();
+        add_video_effect(
+            &mut editor,
+            &clip,
+            VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
+        );
+        assert_eq!(
+            editor.timeline.clip(clip_id).unwrap().video_effects.len(),
+            10
+        );
+        assert_eq!(editor.history.undo.len(), history_len);
     }
 
     #[test]

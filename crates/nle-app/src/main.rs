@@ -5364,7 +5364,8 @@ impl App {
         }
     }
 
-    fn poll_effect_graph_compiler(&mut self) {
+    fn poll_effect_graph_compiler(&mut self) -> usize {
+        let mut installed = 0;
         for result in self.effect_graph_compiler.drain_current_results() {
             match result.compiled {
                 Ok(compiled) => {
@@ -5372,13 +5373,16 @@ impl App {
                         result.timeline_generation,
                         result.clip_id,
                         compiled,
-                    ) && self
-                        .effect_graph_compiler
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|(clip_id, _)| *clip_id == result.clip_id)
-                    {
-                        self.effect_graph_compiler.last_error = None;
+                    ) {
+                        installed += 1;
+                        if self
+                            .effect_graph_compiler
+                            .last_error
+                            .as_ref()
+                            .is_some_and(|(clip_id, _)| *clip_id == result.clip_id)
+                        {
+                            self.effect_graph_compiler.last_error = None;
+                        }
                     }
                 }
                 Err(error) => {
@@ -5386,6 +5390,7 @@ impl App {
                 }
             }
         }
+        installed
     }
 
     fn poll_video_export(&mut self) {
@@ -8866,6 +8871,21 @@ mod tests {
         .into()
     }
 
+    fn ten_node_compiled_test_graph(brightness_offset: f32) -> nle_timeline::VideoEffectGraph {
+        (0..nle_timeline::MAX_VIDEO_EFFECTS_PER_CLIP)
+            .map(|index| {
+                let mut effect = nle_timeline::BrightnessContrastEffect::default();
+                effect.brightness.value = brightness_offset + index as f32 * 0.01;
+                nle_timeline::VideoEffectNode {
+                    id: nle_timeline::VideoEffectId(index as u32 + 1),
+                    enabled: true,
+                    kind: nle_timeline::VideoEffectKind::BrightnessContrast(effect),
+                }
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     #[test]
     fn effect_graph_compiler_is_lazy_and_publishes_only_latest_requested_graph() {
         let (notify_tx, notify_rx) = mpsc::channel();
@@ -8968,6 +8988,108 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "idle compiler shutdown must not wait indefinitely"
+        );
+    }
+
+    #[test]
+    fn ten_node_effect_graph_recompiles_after_a_live_playback_edit_without_stopping_transport() {
+        let (notify_tx, notify_rx) = mpsc::channel();
+        let mut app = App::new_with_catalog(false, None);
+        app.effect_graph_compiler = EffectGraphCompiler::new(Arc::new(move || {
+            let _ = notify_tx.send(());
+        }));
+        app.screen = Screen::Editor;
+        app.editor
+            .add_media_paths([PathBuf::from("ten-node-playback.mp4")]);
+        let video_track = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == nle_timeline::TrackKind::Video)
+            .unwrap()
+            .id;
+        let clip_id = app
+            .editor
+            .timeline
+            .insert_clip(
+                video_track,
+                nle_timeline::MediaId(1),
+                nle_timeline::Tick(0),
+                nle_timeline::Tick(2_000_000),
+                nle_timeline::Tick(0),
+            )
+            .unwrap();
+        app.editor
+            .timeline
+            .set_clip_video_effects(clip_id, ten_node_compiled_test_graph(0.0))
+            .unwrap();
+        app.editor.set_playhead(nle_timeline::Tick(500_000));
+        app.editor.playing = true;
+
+        app.synchronize_effect_graph_compiler();
+        notify_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial ten-node graph compilation");
+        assert_eq!(app.poll_effect_graph_compiler(), 1);
+        assert!(app.editor.playing);
+        assert_eq!(
+            app.editor
+                .playback_target()
+                .unwrap()
+                .video_effects
+                .active()
+                .len(),
+            10
+        );
+
+        let mut samples_ms = [0.0; FRAME_TIME_SAMPLE_COUNT];
+        let mut edited = ten_node_compiled_test_graph(0.0);
+        for (index, sample) in samples_ms.iter_mut().enumerate() {
+            edited = ten_node_compiled_test_graph(0.001 * index as f32);
+            let started = Instant::now();
+            app.editor.advance_playback(Duration::from_millis(1));
+            app.editor
+                .timeline
+                .set_clip_video_effects(clip_id, edited.clone())
+                .unwrap();
+            app.synchronize_effect_graph_compiler();
+            assert_eq!(
+                app.editor
+                    .playback_target()
+                    .unwrap()
+                    .video_effects
+                    .active()
+                    .len(),
+                10
+            );
+            *sample = started.elapsed().as_secs_f32() * 1_000.0;
+            assert!(app.editor.playing, "a graph edit must not stop playback");
+        }
+        assert!(
+            nearest_rank_p95(&samples_ms) < 8.0,
+            "ten-node live graph-edit p95 exceeded the 8 ms UI budget: {:.3} ms",
+            nearest_rank_p95(&samples_ms)
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.poll_effect_graph_compiler() == 0 {
+            let _ = notify_rx.recv_timeout(Duration::from_millis(20));
+            assert!(
+                Instant::now() < deadline,
+                "latest live-edited ten-node graph was not installed"
+            );
+        }
+
+        assert!(app.editor.playing);
+        assert_eq!(app.editor.playhead, nle_timeline::Tick(620_000));
+        assert_eq!(
+            app.effect_graph_compiler.requested[&clip_id].timeline_generation,
+            app.editor.timeline.generation()
+        );
+        assert_eq!(
+            app.editor.playback_target().unwrap().video_effects,
+            edited.compile().unwrap().evaluate(app.editor.playhead)
         );
     }
 

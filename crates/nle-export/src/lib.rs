@@ -1779,8 +1779,8 @@ fn brightness_contrast_filter(effect: &BrightnessContrastEffect, source_in: Tick
     let red = format!("({red})*{exposure_scale}");
     let green = format!("({green})*{exposure_scale}");
     let blue = format!("({blue})*{exposure_scale}");
-    // FFmpeg expression registers keep the generated graph comfortably below Windows' command
-    // line limit even with the full eight-node correction stack. Saturation preserves luma, so
+    // FFmpeg expression registers keep the generated script compact even with the full ten-node
+    // correction stack. Saturation preserves luma, so
     // the post-contrast luma in register 4 can be derived directly from register 3. The tonal
     // order matches the native viewer: broad Highlights/Shadows quadratic masks, then narrower
     // Whites/Blacks eighth-power masks. All controls are normalized encoded-sRGB offsets.
@@ -3056,6 +3056,39 @@ mod tests {
             !graph.contains("3.000000"),
             "disabled node reached export: {graph}"
         );
+    }
+
+    #[test]
+    fn full_ten_node_color_stack_compiles_once_and_lowers_every_node() {
+        let mut editor = EditorState::new(Language::English, "Ten-node color stack");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let mut snapshot = editor.snapshot();
+        let clip = &mut snapshot
+            .timeline
+            .tracks
+            .iter_mut()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .clips[0];
+        clip.video_effects = (0..nle_timeline::MAX_VIDEO_EFFECTS_PER_CLIP)
+            .map(|index| {
+                let mut node =
+                    brightness_contrast_node(true, scalar(0.01 * (index + 1) as f32), scalar(1.0));
+                node.id = VideoEffectId(index as u32 + 1);
+                node
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let request = ExportRequest {
+            snapshot,
+            ..request(&editor)
+        };
+
+        let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
+        assert_eq!(plan.video_tracks[0].clips[0].effects.len(), 10);
+        let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        assert_eq!(graph.matches(",geq=r=").count(), 10, "{graph}");
     }
 
     #[test]
