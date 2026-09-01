@@ -380,7 +380,7 @@ try {
         'renderer_backend', 'renderer_driver', 'renderer_driver_info', 'decoder_backends',
         'encoder_backend', 'cpu_identity', 'logical_cpu_count', 'total_physical_memory_bytes',
         'selected_preview_quality', 'resolved_preview_quality', 'preview_width', 'preview_height',
-        'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'decoder_stage_timings',
+        'monitor_cache_cap_bytes', 'display_refresh_millihertz', 'observation_scope', 'decoder_stage_timings',
         'viewer_stage_timings', 'gpu_stage_timings', 'audio_stage_timings', 'runtime_diagnostics'
     )) {
         if ($surfaceSubmission.PSObject.Properties.Name -notcontains $property) {
@@ -390,8 +390,16 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 7) {
+    if ($surfaceSubmission.schema_version -ne 8) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
+    }
+    $observationScope = $surfaceSubmission.observation_scope
+    if ($null -eq $observationScope -or
+        $observationScope.surface_submission_observed -ne $true -or
+        $observationScope.surface_present_call_cpu_observed -ne $true -or
+        $observationScope.gpu_submission_completion_observed -ne $true -or
+        $observationScope.physical_scanout_observed -ne $false) {
+        throw 'Surface submission probe returned an invalid or overstated observation scope.'
     }
     foreach ($property in @(
         'monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames',

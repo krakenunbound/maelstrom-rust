@@ -241,7 +241,7 @@ try {
         $latestSurface = $null
         $prefix = $adapterClass.ToLowerInvariant()
         $startupPath = Join-Path $artifactRoot "$prefix-startup.json"
-        $surfacePath = Join-Path $artifactRoot "$prefix-surface-schema7.json"
+        $surfacePath = Join-Path $artifactRoot "$prefix-surface-schema8.json"
         $mediaReportPath = Join-Path $artifactRoot "$prefix-media-acceptance.json"
         $exportPath = Join-Path $artifactRoot "$prefix-cancelled-export.mp4"
         Remove-Item -LiteralPath $startupPath, $surfacePath, $mediaReportPath, $exportPath -Force -ErrorAction SilentlyContinue
@@ -290,13 +290,21 @@ try {
             }
             $reportedDecoderBackends = @($surface.decoder_backends | ForEach-Object { [string]$_ } |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            if ($surface.schema_version -ne 7 -or $surface.samples -lt 120 -or
+            if ($surface.schema_version -ne 8 -or $surface.samples -lt 120 -or
                 $surface.renderer_device_type -ne $adapterClass -or $surface.renderer_backend -ne 'Dx12' -or
                 [string]::IsNullOrWhiteSpace([string]$surface.renderer_gpu_name) -or
                 $reportedDecoderBackends.Count -lt 1 -or
                 [string]::IsNullOrWhiteSpace([string]$surface.encoder_backend) -or
                 $surface.encoder_backend -eq 'not_observed') {
-                throw "$adapterClass surface report omitted required schema-7 renderer/media evidence."
+                throw "$adapterClass surface report omitted required schema-8 renderer/media evidence."
+            }
+            $observationScope = $surface.observation_scope
+            if ($null -eq $observationScope -or
+                $observationScope.surface_submission_observed -ne $true -or
+                $observationScope.surface_present_call_cpu_observed -ne $true -or
+                $observationScope.gpu_submission_completion_observed -ne $true -or
+                $observationScope.physical_scanout_observed -ne $false) {
+                throw "$adapterClass surface report returned an invalid or overstated observation scope."
             }
             if (-not (Test-FiniteNonnegativeNumber $surface.cpu_p95_ms) -or $surface.cpu_p95_ms -gt 8.0 -or
                 -not (Test-FiniteNonnegativeNumber $surface.surface_submission_interval_p95_ms) -or
@@ -498,7 +506,7 @@ try {
             $combined = [ordered]@{
                 schema_version = 2
                 status = $qualificationStatus
-                scope = 'packaged_editor_full_surface_schema7'
+                scope = 'packaged_editor_full_surface_schema8'
                 executable_path = $resolvedExecutable
                 executable_sha256 = $executableHash
                 physical_scanout_observed = $false

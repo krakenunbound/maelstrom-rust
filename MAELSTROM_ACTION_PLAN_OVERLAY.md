@@ -180,8 +180,10 @@ Follow `ENGINE_ROADMAP.md`.
   hover in English/Japanese, with truthful mean-versus-p95 labels, sample counts, active layers,
   preview scale, and explicit unavailable GPU rows. Physical scanout is still not measured.
 
-Gate update: full schema-7 surface reports now pass on integrated Intel and discrete NVIDIA GPUs on
-the hybrid Windows host. Physical scanout and broader cross-hardware soak proof remain open.
+Gate update: the schema-8 surface contract now distinguishes submission, present-call CPU, GPU
+completion, and unobserved physical scanout. The preceding schema-7 runs passed on integrated Intel
+and discrete NVIDIA GPUs on the hybrid Windows host; schema-8 runtime requalification, physical
+scanout, and broader cross-hardware soak proof remain open.
 Foundation 50k + package gates must stay green.
 
 ### Then — Phase 1 holes

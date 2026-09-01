@@ -9,6 +9,12 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
+- [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 8 now
+  distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
+  from physical scanout, which remains explicitly false. Package and cross-adapter validators reject
+  missing, contradictory, or overstated scope. The preceding Intel/NVIDIA schema-7 runs remain
+  historical evidence; a fresh schema-8 windowed run still requires explicit editor-launch
+  permission. See `docs/performance-reports.md`.
 - [x] Close the Phase 2 integrated Auto-preview gate without lowering the user's selected quality.
   A schema-1 headless app test uses two independent real 1920x1080 sources, observes Auto Full
   640x360, applies four disclosed controller-pressure samples through the production completion

@@ -2209,6 +2209,7 @@ struct SurfaceSubmissionMetrics {
 struct SurfaceSubmissionReport {
     schema_version: u32,
     samples: usize,
+    observation_scope: SurfaceObservationScope,
     cpu_p95_ms: f32,
     surface_submission_interval_p95_ms: f32,
     surface_present_call_cpu_p95_ms: f32,
@@ -2236,6 +2237,28 @@ struct SurfaceSubmissionReport {
     gpu_stage_timings: GpuStageTimingsReport,
     audio_stage_timings: AudioStageTimingsReport,
     runtime_diagnostics: RuntimeDiagnosticsReport,
+}
+
+/// Declares which portions of a surface report are directly observed by the
+/// current instrumentation. GPU completion is not inferred from CPU timing,
+/// and physical scanout is not observable from this process.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+struct SurfaceObservationScope {
+    surface_submission_observed: bool,
+    surface_present_call_cpu_observed: bool,
+    gpu_submission_completion_observed: bool,
+    physical_scanout_observed: bool,
+}
+
+impl SurfaceObservationScope {
+    fn from_samples(surface_samples: usize, gpu_completion_samples: usize) -> Self {
+        Self {
+            surface_submission_observed: surface_samples > 0,
+            surface_present_call_cpu_observed: surface_samples > 0,
+            gpu_submission_completion_observed: gpu_completion_samples > 0,
+            physical_scanout_observed: false,
+        }
+    }
 }
 
 /// CPU/API submission timing only; it does not measure GPU completion or scanout.
@@ -2994,8 +3017,15 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 7,
+            schema_version: 8,
             samples: metrics.samples,
+            observation_scope: SurfaceObservationScope::from_samples(
+                metrics.samples,
+                environment
+                    .gpu_stage_timings
+                    .submission_to_completion_elapsed
+                    .samples,
+            ),
             cpu_p95_ms: metrics.cpu_p95_ms,
             surface_submission_interval_p95_ms: metrics.surface_submission_interval_p95_ms,
             surface_present_call_cpu_p95_ms: metrics.surface_present_call_cpu_p95_ms,
@@ -10632,7 +10662,7 @@ mod tests {
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 7);
+        assert_eq!(report.schema_version, 8);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);
@@ -10677,6 +10707,15 @@ mod tests {
         assert_eq!(report.audio_stage_timings.output_callback_cpu.samples, 2);
         assert_eq!(report.audio_stage_timings.mix_render_cpu.samples, 2);
         assert_eq!(report.runtime_diagnostics, runtime_diagnostics);
+        assert_eq!(
+            report.observation_scope,
+            SurfaceObservationScope {
+                surface_submission_observed: true,
+                surface_present_call_cpu_observed: true,
+                gpu_submission_completion_observed: true,
+                physical_scanout_observed: false,
+            }
+        );
         assert!(
             (report.audio_stage_timings.output_callback_cpu.total_ms - 5.0).abs() < f64::EPSILON
         );
@@ -10689,6 +10728,14 @@ mod tests {
         assert_eq!(
             json.pointer("/viewer_stage_timings/upload_cpu/samples"),
             Some(&serde_json::Value::from(2))
+        );
+        assert_eq!(
+            json.pointer("/observation_scope/gpu_submission_completion_observed"),
+            Some(&serde_json::Value::from(true))
+        );
+        assert_eq!(
+            json.pointer("/observation_scope/physical_scanout_observed"),
+            Some(&serde_json::Value::from(false))
         );
         assert_eq!(
             json.pointer("/gpu_stage_timings/composite_pass_gpu/p95_ms"),
@@ -10721,6 +10768,30 @@ mod tests {
         assert_eq!(
             json.pointer("/runtime_diagnostics/audio_underrun_frames"),
             Some(&serde_json::Value::from(20))
+        );
+    }
+
+    #[test]
+    fn surface_observation_scope_keeps_unavailable_gpu_completion_explicit() {
+        let scope = SurfaceObservationScope::from_samples(1, 0);
+        assert_eq!(
+            scope,
+            SurfaceObservationScope {
+                surface_submission_observed: true,
+                surface_present_call_cpu_observed: true,
+                gpu_submission_completion_observed: false,
+                physical_scanout_observed: false,
+            }
+        );
+
+        let json = serde_json::to_value(scope).expect("observation scope serializes");
+        assert_eq!(
+            json.pointer("/gpu_submission_completion_observed"),
+            Some(&serde_json::Value::from(false))
+        );
+        assert_eq!(
+            json.pointer("/physical_scanout_observed"),
+            Some(&serde_json::Value::from(false))
         );
     }
 

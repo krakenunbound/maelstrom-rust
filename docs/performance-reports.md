@@ -87,7 +87,7 @@ GPU rows display p95/maximum values; every observed row includes its sample coun
 shows active contributing video layers and selected-to-resolved preview quality. A compositor CPU
 snapshot uses a non-blocking lock attempt, so diagnostics never wait for the render callback.
 Unsupported GPU timestamp queries, a busy callback snapshot, and stages with no samples display as
-unavailable rather than a fabricated zero. This live view does not change the schema-7 report or
+unavailable rather than a fabricated zero. This live view does not change the schema-8 report or
 its qualification role.
 
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
@@ -163,7 +163,7 @@ The runner enforces CPU p95 at or below 8 ms and GPU-pass p95 at or below the 33
 budget. It deliberately records `physical_scanout_observed: false` and
 `app_auto_preview_observed: false`, and is limited to
 `scope: "headless_transformed_multilayer_viewer_compositor_with_post_measurement_state_scenarios"`:
-it does not replace the schema-7
+it does not replace the schema-8
 surface report or establish app Auto resolution, presentation, DWM composition, physical scanout,
 or end-to-end display latency.
 
@@ -234,9 +234,13 @@ Run it only against the full absolute packaged path:
   -ExecutablePath 'H:\Maelstrom Rust\dist\Maelstrom-Windows-x64\Maelstrom.exe'
 ```
 
-The ignored `artifacts/phase0-cross-adapter-surface` directory retains the two schema-7 surface
+The ignored `artifacts/phase0-cross-adapter-surface` directory retains the most recent surface
 reports, startup reports, media-acceptance reports, and a schema-version 2 wrapper containing the
-exact executable hash plus every completed child-report hash. A pass has `failure: null`. Once the
+exact executable hash plus every completed child-report hash. Surface schema 8 adds a nested
+`observation_scope`: submission, present-call CPU, and completed GPU submissions are independently
+reported, while `physical_scanout_observed` remains false until supported instrumentation exists.
+The preceding retained cross-adapter evidence is schema 7 and therefore requires a fresh explicitly
+authorized editor run before it can qualify schema 8. A pass has `failure: null`. Once the
 report destination has been validated and the exclusive run lock acquired, the runner attempts to
 atomically publish `status: "failed"` and one structured `failure` object before returning a
 nonzero result. A unique same-directory temporary file prevents stale fixed-temp collisions. That

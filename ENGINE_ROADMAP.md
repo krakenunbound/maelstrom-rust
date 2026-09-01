@@ -141,14 +141,16 @@ Build the evidence harness before adding engine complexity.
       reports submit-to-GPU-completion elapsed time. Optional wgpu pass-boundary timestamps now
       isolate changed viewer-compositor GPU execution with one asynchronous sample in flight;
       unsupported adapters retain the existing path and serialize the stage as unavailable rather
-      than zero. Neither GPU metric claims presentation or physical scanout. The schema-7 surface
-      report also carries a nested cumulative
+      than zero. Neither GPU metric claims presentation or physical scanout. Schema 8 makes that
+      boundary machine-readable: surface submission, present-call CPU, and observed GPU completion
+      are separate booleans while `physical_scanout_observed` must remain false. The report also
+      carries a nested cumulative
       `runtime_diagnostics` snapshot for
       monitor drop/hold/late/error and audio underrun/lock/late-discard counters; these counters
       cover process/session lifetime rather than the fixed 120-frame timing window. Windows package
       validation exercises report structure and required evidence, while numeric thresholds remain
       in the dedicated soak gates. The hybrid Windows host now has both the narrower schema-1
-      headless DX12 `ViewerCompositorRenderer` proof and full schema-7 surface qualification for
+      headless DX12 `ViewerCompositorRenderer` proof and full schema-8 surface qualification for
       Intel UHD 770 `IntegratedGpu` and NVIDIA RTX 3090 `DiscreteGpu`. The full runs exercised the
       ordinary window surface, deterministic A/V import, native viewer uploads, audio callbacks,
       GPU completion/timestamp evidence, and clean cancelled export. The retained schema-1 summary
@@ -172,11 +174,13 @@ Build the evidence harness before adding engine complexity.
 
 Exit gate:
 
-- [x] The full schema-7 surface report can be produced on integrated and discrete Windows hardware.
+- [ ] Produce and qualify the full schema-8 surface report on integrated and discrete Windows
+      hardware without overstating scanout. The contract and validators are implemented.
       The retained 2026-08-30 hybrid-host qualification selected Intel UHD 770 `IntegratedGpu` and
       NVIDIA RTX 3090 `DiscreteGpu` explicitly, rejected adapter-class fallback, and passed all
       schema, CPU, cadence, media, audio, GPU, runtime-counter, and cancelled-export checks. It does
-      not prove DWM composition or physical scanout.
+      not prove DWM composition or physical scanout. Schema 8 now encodes that limitation; renewed
+      cross-adapter runtime evidence remains pending explicit editor-launch permission.
 - [ ] Existing foundation gates remain green.
       Requalified on 2026-08-30 against the exact Windows package. Workspace tests and strict
       all-target Clippy passed; the release 50,000-bar editor measured 0.472 ms wide-frame p95,
