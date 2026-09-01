@@ -736,11 +736,20 @@ Add a small deterministic graph before adding a large effects catalog.
       serialization. Schema v1 preserves clip-local effect IDs, adds stable typed port and
       parameter signatures plus explicit canonical connections, and migrates legacy ordered arrays
       into project-document version 8 without changing preview/export evaluation order.
-- [ ] Separate immutable graph description from compiled runtime graph and derived caches.
+- [x] Separate immutable graph description from compiled runtime graph and derived caches.
+      Worker-produced plans own a distinct immutable canonical operation sequence while retaining
+      the normalized durable graph only for identity checks. Brightness/contrast curve arrays are
+      derived once during compilation and reused for allocation-free frame evaluation; compiled
+      state is never serialized.
 - [x] Validate cycles, missing nodes, incompatible ports, and unsupported versions without crashing.
       Timeline restoration now rejects every malformed graph class with clip-specific evidence;
       unknown graph fields and invalid graphs are also refused before serialization.
-- [ ] Compile graph changes on a worker; atomically swap the latest valid compiled graph.
+- [x] Compile graph changes on a worker; atomically swap the latest valid compiled graph.
+      The app submits only the active four-layer viewer set to a lazy bounded latest-wins worker.
+      Generation-tagged requests and results are capped at four, superseded work is discarded, and
+      the owner thread replaces a complete `Arc` only after current-generation/source validation.
+      Direct evaluation remains authoritative while compilation is pending. Export compiles once
+      per clip during worker-owned plan construction and reports invalid graphs during preflight.
 - [x] Add bounded source-time brightness/contrast keyframes with linear, smooth, ease-in,
       ease-out, and hold interpolation shared by preview and export.
 - [x] Expose the active correction's brightness/contrast keys as selected-clip timeline lanes with

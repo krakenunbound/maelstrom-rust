@@ -27,8 +27,9 @@ use nle_compositor::{
 use nle_project_io::{PROJECT_TIMEBASE, ProjectSettings, replace_file};
 use nle_timeline::{
     AnimatedScalar, AudioEffect, AudioTransition, AudioTransitionKind, BrightnessContrastEffect,
-    Clip, ClipId, ColorCurve, Fade, KeyframeInterpolation, Tick, TimelineSnapshot, TitleOverlay,
-    Track, TrackKind, VideoEffectKind, VideoTransition, VideoTransitionKind, VignetteEffect,
+    Clip, ClipId, ColorCurve, CompiledVideoEffectGraph, Fade, KeyframeInterpolation, Tick,
+    TimelineSnapshot, TitleOverlay, Track, TrackKind, VideoEffectKind, VideoTransition,
+    VideoTransitionKind, VignetteEffect,
 };
 use nle_title::{TitleRaster, rasterize_title};
 use nle_ui_core::{EditorProjectSnapshot, MediaKind, classify_path};
@@ -142,6 +143,8 @@ struct MediaProbe {
 #[derive(Clone, Debug)]
 struct VideoClipPlan {
     clip: Clip,
+    /// Immutable validated effect operations captured once on the export worker.
+    effects: CompiledVideoEffectGraph,
     path: PathBuf,
     is_still: bool,
     source_size: PixelSize,
@@ -958,8 +961,15 @@ impl ExportPlan {
                             |item| transition_error(item, "window end overflows the timeline"),
                         )
                     })?;
+                let effects = clip.video_effects.compile().map_err(|error| {
+                    format!(
+                        "clip {} has an invalid video effect graph: {error}",
+                        clip.id.0
+                    )
+                })?;
                 clips.push(VideoClipPlan {
                     clip: clip.clone(),
+                    effects,
                     path,
                     is_still,
                     source_size,
@@ -1534,7 +1544,7 @@ fn video_filter(input: usize, video: &VideoClipPlan, fps: &str, label: &str) -> 
     let crop_height = (video.source_size.height as f32
         * (1.0 - transform.crop_top - transform.crop_bottom))
         .max(1.0);
-    let color = video_color_filter_at_source(&video.clip, video.input_source_in);
+    let color = video_color_filter_at_source(&video.effects, video.input_source_in);
     let fades = video_fade_filter(&video.clip, video.timeline_start.0 - video.clip.start.0);
     let transition = video_transition_filter(
         video.incoming_opacity.as_ref(),
@@ -1706,15 +1716,19 @@ fn pan_right(pan: f32) -> f64 {
 /// The stack runs immediately after `format=rgba`, before opacity, fades, and rotation; alpha
 /// passes through unchanged so the effects are purely chromatic.
 #[cfg(test)]
-fn video_color_filter(clip: &Clip) -> String {
-    video_color_filter_at_source(clip, clip.source_in)
+fn video_color_filter(clip: &Clip) -> Result<String, String> {
+    let effects = clip
+        .video_effects
+        .compile()
+        .map_err(|error| error.to_string())?;
+    Ok(video_color_filter_at_source(&effects, clip.source_in))
 }
 
-fn video_color_filter_at_source(clip: &Clip, source_in: Tick) -> String {
-    clip.video_effects
+fn video_color_filter_at_source(effects: &CompiledVideoEffectGraph, source_in: Tick) -> String {
+    effects
         .iter()
-        .filter(|node| node.enabled)
-        .map(|node| match &node.kind {
+        .filter(|operation| operation.enabled())
+        .map(|operation| match operation.kind() {
             VideoEffectKind::BrightnessContrast(effect) => {
                 brightness_contrast_filter(effect, source_in)
             }
@@ -2973,6 +2987,35 @@ mod tests {
         let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
         let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
         assert!(!graph.contains("r(X\\,Y)"), "{graph}");
+    }
+
+    #[test]
+    fn export_plan_reports_invalid_video_effect_graphs_before_filter_lowering() {
+        let mut editor = EditorState::new(Language::English, "Invalid color graph");
+        editor.add_media_paths([PathBuf::from("clip.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let mut snapshot = editor.snapshot();
+        let clip = &mut snapshot
+            .timeline
+            .tracks
+            .iter_mut()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .clips[0];
+        clip.video_effects = vec![brightness_contrast_node(
+            true,
+            scalar(f32::NAN),
+            scalar(1.0),
+        )]
+        .into();
+        let request = ExportRequest {
+            snapshot,
+            ..request(&editor)
+        };
+
+        let error = ExportPlan::from_request_with_probe(&request, probe).unwrap_err();
+        assert!(error.contains("clip"), "{error}");
+        assert!(error.contains("invalid video effect graph"), "{error}");
     }
 
     #[test]
@@ -4946,7 +4989,7 @@ mod tests {
                 .is_ok()
         );
         let curves = curves.unwrap();
-        let correction = video_color_filter(&clip);
+        let correction = video_color_filter(&clip).unwrap();
         let sample = |filter: &str| -> Vec<u8> {
             let output = Command::new(&ffmpeg)
                 .args([
@@ -5083,7 +5126,10 @@ mod tests {
             output.stdout
         };
         let baseline = sample("format=rgba");
-        let corrected = sample(&format!("format=rgba{}", video_color_filter(&clip)));
+        let corrected = sample(&format!(
+            "format=rgba{}",
+            video_color_filter(&clip).unwrap()
+        ));
         assert_eq!(corrected.len(), baseline.len());
         for channel in 0..3 {
             let encoded = baseline[channel] as f32 / 255.0;
@@ -5130,7 +5176,7 @@ mod tests {
             vignette_node(3, false, 1.0),
         ]
         .into();
-        let filter = video_color_filter(&clip);
+        let filter = video_color_filter(&clip).unwrap();
         let color = filter.find(",geq=").unwrap();
         let vignette = filter.rfind(",geq=").unwrap();
         assert!(color < vignette, "vignette must follow prior enabled nodes");
@@ -5284,7 +5330,10 @@ mod tests {
                 scalar(1.0),
             )]
             .into();
-            let corrected = sample(&format!("format=rgba{}", video_color_filter(&clip)));
+            let corrected = sample(&format!(
+                "format=rgba{}",
+                video_color_filter(&clip).unwrap()
+            ));
             assert_eq!(corrected.len(), baseline.len());
 
             for frame in 0..8 {

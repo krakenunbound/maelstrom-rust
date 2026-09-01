@@ -395,10 +395,12 @@ Last updated: 2026-08-31
 
 ## Professional editor backlog
 
-- [ ] Finish the schema-versioned effect graph before expanding the effect catalog. Durable schema
-  v1, legacy-array migration, stable typed IDs/ports/parameters, and bounded structural validation
-  are complete; compiled runtime ownership, worker-side compilation, cache invalidation, and atomic
-  latest-valid swaps remain.
+- [x] Complete the schema-v1 graph/runtime foundation before expanding the effect catalog. Durable
+  migration, typed IDs/ports/parameters, bounded validation, distinct immutable compiled plans,
+  prederived curve data, four-slot latest-wins worker compilation, generation/source rejection,
+  bounded runtime caching, owner-thread whole-plan swaps, and export-plan compilation are covered by
+  focused parity/lifecycle tests. Output-size/color-setting invalidation and renderer resource
+  caches remain with their later roadmap items.
 - [ ] Complete preview/export parity for effects, transitions, titles, and color processing.
 - [ ] Add the remaining roadmap transitions, title tooling, Rec.709 color pipeline, LUT validation,
   and non-blocking scopes.

@@ -1,7 +1,7 @@
 //! The editor shell. Media data enters this crate only after the app layer has chosen it.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::{self, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
@@ -22,13 +22,13 @@ use nle_compositor::{
 use nle_timeline::ClipData;
 use nle_timeline::{
     AnimatedScalar, AudioEffect, AudioTransitionId, BrightnessContrastEffect, Clip, ClipId,
-    ColorCurve, ColorParameter, CurvePoint, EditTarget, EvaluatedVideoEffectStack, Fade, FadeEdge,
-    KeyframeInterpolation, MAX_AUDIO_EFFECTS_PER_SCOPE, MAX_BLACKS, MAX_BRIGHTNESS,
-    MAX_COLOR_CURVE_POINTS, MAX_CONTRAST, MAX_EXPOSURE, MAX_GAIN_DB, MAX_HIGHLIGHTS, MAX_PAN,
-    MAX_SATURATION, MAX_SHADOWS, MAX_TEMPERATURE, MAX_TINT, MAX_VIDEO_EFFECTS_PER_CLIP,
-    MAX_VIGNETTE_AMOUNT, MAX_VIGNETTE_CENTER, MAX_VIGNETTE_FEATHER, MAX_VIGNETTE_MIDPOINT,
-    MAX_WHITES, MIN_BLACKS, MIN_BRIGHTNESS, MIN_CONTRAST, MIN_EXPOSURE, MIN_GAIN_DB,
-    MIN_HIGHLIGHTS, MIN_PAN, MIN_SATURATION, MIN_SHADOWS, MIN_TEMPERATURE, MIN_TINT,
+    ColorCurve, ColorParameter, CompiledVideoEffectGraph, CurvePoint, EditTarget,
+    EvaluatedVideoEffectStack, Fade, FadeEdge, KeyframeInterpolation, MAX_AUDIO_EFFECTS_PER_SCOPE,
+    MAX_BLACKS, MAX_BRIGHTNESS, MAX_COLOR_CURVE_POINTS, MAX_CONTRAST, MAX_EXPOSURE, MAX_GAIN_DB,
+    MAX_HIGHLIGHTS, MAX_PAN, MAX_SATURATION, MAX_SHADOWS, MAX_TEMPERATURE, MAX_TINT,
+    MAX_VIDEO_EFFECTS_PER_CLIP, MAX_VIGNETTE_AMOUNT, MAX_VIGNETTE_CENTER, MAX_VIGNETTE_FEATHER,
+    MAX_VIGNETTE_MIDPOINT, MAX_WHITES, MIN_BLACKS, MIN_BRIGHTNESS, MIN_CONTRAST, MIN_EXPOSURE,
+    MIN_GAIN_DB, MIN_HIGHLIGHTS, MIN_PAN, MIN_SATURATION, MIN_SHADOWS, MIN_TEMPERATURE, MIN_TINT,
     MIN_VIGNETTE_AMOUNT, MIN_VIGNETTE_CENTER, MIN_VIGNETTE_FEATHER, MIN_VIGNETTE_MIDPOINT,
     MIN_WHITES, MediaId as TimelineMediaId, Tick, Timeline, TimelineCache, TimelineError,
     TimelineSnapshot, TimelineSnapshotError, TitleAlignment, TitleColor, TitleId, TitleOverlay,
@@ -1369,6 +1369,14 @@ struct ProvisionalHistoryEntry {
     after: HashSet<ClipId>,
 }
 
+/// A compiled effect graph is only valid for the exact timeline revision and graph that
+/// produced it. It is runtime playback state, never project data.
+#[derive(Clone, Debug)]
+struct CompiledVideoEffectCacheEntry {
+    timeline_generation: u64,
+    graph: Arc<CompiledVideoEffectGraph>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct EditorUndoStack {
     timeline: UndoStack,
@@ -1471,6 +1479,11 @@ pub struct EditorState {
     pending_history: Option<EditorHistoryCheckpoint>,
     timeline_cache: TimelineCache,
     timeline_draw_records: Vec<TrackDrawRecord>,
+    /// Worker-produced effect programs. Timeline and source-graph checks make late results
+    /// harmless while preserving direct evaluation until a matching program arrives.
+    compiled_video_effect_graphs: HashMap<ClipId, CompiledVideoEffectCacheEntry>,
+    /// Most-recently installed order keeps compiled state within the four-layer viewer bound.
+    compiled_video_effect_order: VecDeque<ClipId>,
     pub selected_timeline_clip: Option<ClipId>,
     pub selected_title: Option<TitleId>,
     /// Runtime-only Inspector focus for the compact timeline keyframe overlay.
@@ -1629,6 +1642,8 @@ impl EditorState {
             pending_history: None,
             timeline_cache: TimelineCache::new(),
             timeline_draw_records: Vec::with_capacity(1_024),
+            compiled_video_effect_graphs: HashMap::new(),
+            compiled_video_effect_order: VecDeque::with_capacity(PREVIEW_VIDEO_LAYER_COUNT),
             selected_timeline_clip: None,
             selected_title: None,
             active_color_effect: None,
@@ -1721,6 +1736,45 @@ impl EditorState {
     /// Cheap autosave predicate. A snapshot is only built after this changes.
     pub fn durable_generation(&self) -> u64 {
         self.durable_generation
+    }
+
+    /// Installs a worker-produced effect graph only if it still describes the current clip.
+    ///
+    /// This is deliberately owner-thread assignment: callers hand off the completed `Arc`, and
+    /// the editor replaces the one matching entry without retaining stale visual state.
+    pub fn install_compiled_video_effect_graph(
+        &mut self,
+        generation: u64,
+        clip_id: ClipId,
+        graph: Arc<CompiledVideoEffectGraph>,
+    ) -> bool {
+        let Some(clip) = self.timeline.clip(clip_id) else {
+            return false;
+        };
+        if self.timeline.generation() != generation || graph.source_graph() != &clip.video_effects {
+            return false;
+        }
+        if let Some(index) = self
+            .compiled_video_effect_order
+            .iter()
+            .position(|cached| *cached == clip_id)
+        {
+            self.compiled_video_effect_order.remove(index);
+        }
+        self.compiled_video_effect_order.push_back(clip_id);
+        self.compiled_video_effect_graphs.insert(
+            clip_id,
+            CompiledVideoEffectCacheEntry {
+                timeline_generation: generation,
+                graph,
+            },
+        );
+        while self.compiled_video_effect_order.len() > PREVIEW_VIDEO_LAYER_COUNT {
+            if let Some(evicted) = self.compiled_video_effect_order.pop_front() {
+                self.compiled_video_effect_graphs.remove(&evicted);
+            }
+        }
+        true
     }
 
     pub fn set_workspace(&mut self, workspace: EditorWorkspace) {
@@ -3339,7 +3393,16 @@ impl EditorState {
                 }
             }),
             transform: clip.transform,
-            video_effects: clip.evaluate_video_effects(source_tick),
+            video_effects: self
+                .compiled_video_effect_graphs
+                .get(&clip.id)
+                // Timeline mutation APIs advance this O(1) generation. The deeper graph
+                // equality check belongs at installation, not in the per-frame viewer path.
+                .filter(|entry| entry.timeline_generation == self.timeline.generation())
+                .map_or_else(
+                    || clip.evaluate_video_effects(source_tick),
+                    |entry| entry.graph.evaluate(source_tick),
+                ),
         })
     }
 
@@ -20030,6 +20093,203 @@ mod tests {
             .set_clip_video_effects(clip_id, bypassed)
             .unwrap();
         assert!(editor.playback_target().unwrap().video_effects.is_empty());
+    }
+
+    #[test]
+    fn compiled_video_effect_graph_install_accepts_only_current_matching_work() {
+        let mut editor = EditorState::new(Language::English, "Compiled effects");
+        editor.add_media_paths([PathBuf::from("color.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let clip_id = editor.selected_timeline_clip.unwrap();
+        let effect_id = VideoEffectId(1);
+        editor
+            .timeline
+            .set_clip_video_effects(
+                clip_id,
+                vec![VideoEffectNode {
+                    id: effect_id,
+                    enabled: true,
+                    kind: VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
+                }],
+            )
+            .unwrap();
+        let generation = editor.timeline.generation();
+        let graph = Arc::new(
+            editor
+                .timeline
+                .clip(clip_id)
+                .unwrap()
+                .video_effects
+                .compile()
+                .unwrap(),
+        );
+
+        assert!(!editor.install_compiled_video_effect_graph(
+            generation.wrapping_sub(1),
+            clip_id,
+            Arc::clone(&graph),
+        ));
+        assert!(!editor.install_compiled_video_effect_graph(
+            generation,
+            ClipId(u32::MAX),
+            Arc::clone(&graph),
+        ));
+        let wrong_graph = Arc::new(VideoEffectGraph::default().compile().unwrap());
+        assert!(!editor.install_compiled_video_effect_graph(generation, clip_id, wrong_graph));
+        assert!(editor.install_compiled_video_effect_graph(
+            generation,
+            clip_id,
+            Arc::clone(&graph)
+        ));
+        assert!(Arc::ptr_eq(
+            &editor.compiled_video_effect_graphs[&clip_id].graph,
+            &graph
+        ));
+    }
+
+    #[test]
+    fn compiled_video_effect_graph_install_replaces_current_result() {
+        let mut editor = EditorState::new(Language::English, "Compiled replacement");
+        editor.add_media_paths([PathBuf::from("color.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let clip_id = editor.selected_timeline_clip.unwrap();
+        let generation = editor.timeline.generation();
+        let graph = editor.timeline.clip(clip_id).unwrap().video_effects.clone();
+        let first = Arc::new(graph.compile().unwrap());
+        let replacement = Arc::new(graph.compile().unwrap());
+
+        assert!(editor.install_compiled_video_effect_graph(generation, clip_id, first));
+        assert!(editor.install_compiled_video_effect_graph(
+            generation,
+            clip_id,
+            Arc::clone(&replacement),
+        ));
+        assert!(Arc::ptr_eq(
+            &editor.compiled_video_effect_graphs[&clip_id].graph,
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn compiled_video_effect_graph_cache_stays_within_viewer_layer_bound() {
+        let mut editor = EditorState::new(Language::English, "Compiled bound");
+        editor.add_media_paths([PathBuf::from("color.mp4")]);
+        let mut installed = Vec::new();
+        for index in 0..(PREVIEW_VIDEO_LAYER_COUNT + 2) {
+            assert!(editor.insert_media_at(1, Tick(index as i64 * 20_000_000)));
+            let clip_id = editor.selected_timeline_clip.unwrap();
+            let graph = Arc::new(
+                editor
+                    .timeline
+                    .clip(clip_id)
+                    .unwrap()
+                    .video_effects
+                    .compile()
+                    .unwrap(),
+            );
+            assert!(editor.install_compiled_video_effect_graph(
+                editor.timeline.generation(),
+                clip_id,
+                graph,
+            ));
+            installed.push(clip_id);
+        }
+        assert_eq!(
+            editor.compiled_video_effect_graphs.len(),
+            PREVIEW_VIDEO_LAYER_COUNT
+        );
+        assert_eq!(
+            editor.compiled_video_effect_order.len(),
+            PREVIEW_VIDEO_LAYER_COUNT
+        );
+        assert!(
+            !editor
+                .compiled_video_effect_graphs
+                .contains_key(&installed[0])
+        );
+        assert!(
+            !editor
+                .compiled_video_effect_graphs
+                .contains_key(&installed[1])
+        );
+        assert!(
+            installed[2..]
+                .iter()
+                .all(|clip_id| editor.compiled_video_effect_graphs.contains_key(clip_id))
+        );
+    }
+
+    #[test]
+    fn stale_compiled_video_effect_graph_falls_back_after_edit_undo_and_redo() {
+        let mut editor = EditorState::new(Language::English, "Compiled fallback");
+        editor.add_media_paths([PathBuf::from("color.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let clip_id = editor.selected_timeline_clip.unwrap();
+        let generation = editor.timeline.generation();
+        let graph = Arc::new(
+            editor
+                .timeline
+                .clip(clip_id)
+                .unwrap()
+                .video_effects
+                .compile()
+                .unwrap(),
+        );
+        assert!(editor.install_compiled_video_effect_graph(generation, clip_id, graph));
+
+        apply_track_header_edit(&mut editor, |timeline| {
+            timeline.set_clip_video_effects(
+                clip_id,
+                vec![VideoEffectNode {
+                    id: VideoEffectId(1),
+                    enabled: true,
+                    kind: VideoEffectKind::BrightnessContrast(BrightnessContrastEffect::default()),
+                }],
+            )
+        });
+        for operation in ["edit", "undo", "redo"] {
+            if operation == "undo" {
+                assert!(editor.undo_timeline());
+            } else if operation == "redo" {
+                assert!(editor.redo_timeline());
+            }
+            let clip = editor.timeline.clip(clip_id).unwrap();
+            let target = editor.playback_target().unwrap();
+            assert_eq!(
+                target.video_effects,
+                clip.evaluate_video_effects(target.source_tick),
+                "{operation} must ignore the stale compiled graph",
+            );
+            assert_ne!(
+                editor.compiled_video_effect_graphs[&clip_id].timeline_generation,
+                editor.timeline.generation(),
+            );
+        }
+    }
+
+    #[test]
+    fn restore_starts_without_compiled_video_effect_graphs() {
+        let mut editor = EditorState::new(Language::English, "Compiled restore");
+        editor.add_media_paths([PathBuf::from("color.mp4")]);
+        assert!(editor.add_selected_to_timeline());
+        let clip_id = editor.selected_timeline_clip.unwrap();
+        let generation = editor.timeline.generation();
+        let graph = Arc::new(
+            editor
+                .timeline
+                .clip(clip_id)
+                .unwrap()
+                .video_effects
+                .compile()
+                .unwrap(),
+        );
+        assert!(editor.install_compiled_video_effect_graph(generation, clip_id, graph));
+        assert!(!editor.compiled_video_effect_graphs.is_empty());
+
+        let restored =
+            EditorState::restore(Language::English, "Compiled restore", editor.snapshot()).unwrap();
+        assert!(restored.compiled_video_effect_graphs.is_empty());
+        assert!(restored.compiled_video_effect_order.is_empty());
     }
 
     #[test]

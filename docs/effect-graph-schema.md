@@ -29,7 +29,26 @@ types, duplicate edges, cycles, branching, and noncanonical order. Unknown graph
 instead of being silently discarded. Structural edits rebuild canonical connections immediately,
 and serialization validates a copy before writing.
 
-This schema change does not alter rendering. Preview and export still evaluate the same bounded
-ordered nodes through their existing paths. A compiled runtime graph, worker-side compilation,
-derived caches, arbitrary DAG execution, and a larger effects catalog remain separate roadmap work.
+## Compiled runtime contract
 
+The durable graph remains project truth. `VideoEffectGraph::compile` clones, normalizes, and
+validates that truth into a separate immutable operation sequence. The compiled plan retains stable
+node identity and full animated parameters for export, while precomputing the fixed-size RGB curve
+representation used by repeated preview evaluation. Compiled plans and derived data are never
+serialized.
+
+The app compiles only the active bounded viewer set on a dedicated latest-wins worker. Requests are
+tagged with the timeline generation; pending and completed queues are capped at the four-layer
+viewer limit. The owner thread installs an `Arc` only when both the generation and source graph
+still match, replacing the complete entry in one assignment. Until then, preview uses the existing
+direct evaluator, so an edit cannot display stale effects. The runtime cache is recency-bounded to
+four clips and is empty after project restore. Worker polling and compilation remain outside the
+render hot path.
+
+Export compiles each video clip once while building its immutable export plan, then lowers that
+same canonical compiled operation order to source-time FFmpeg expressions. Invalid graphs fail
+export preflight normally instead of being skipped or causing a panic. Existing preview and export
+results remain unchanged.
+
+Arbitrary DAG execution, parameter links, output-size/color-setting cache keys, renderer resource
+caches, and a larger effects catalog remain separate roadmap work.

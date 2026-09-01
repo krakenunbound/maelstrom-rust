@@ -944,6 +944,85 @@ impl From<Vec<VideoEffectNode>> for VideoEffectGraph {
     }
 }
 
+/// One immutable operation in a compiled v1 effect-chain plan.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompiledVideoEffectOperation {
+    id: VideoEffectId,
+    enabled: bool,
+    kind: VideoEffectKind,
+    evaluated_curves: Option<EvaluatedRgbCurves>,
+}
+
+impl CompiledVideoEffectOperation {
+    fn from_node(node: &VideoEffectNode) -> Self {
+        let evaluated_curves = match &node.kind {
+            VideoEffectKind::BrightnessContrast(effect) => {
+                Some(EvaluatedRgbCurves::from(&effect.curves))
+            }
+            VideoEffectKind::Vignette(_) => None,
+        };
+        Self {
+            id: node.id,
+            enabled: node.enabled,
+            kind: node.kind.clone(),
+            evaluated_curves,
+        }
+    }
+
+    pub fn id(&self) -> VideoEffectId {
+        self.id
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Full normalized durable effect data for export inspection.
+    pub fn kind(&self) -> &VideoEffectKind {
+        &self.kind
+    }
+}
+
+/// An immutable, validated v1 effect-chain plan suitable for repeated frame
+/// evaluation. It owns a source snapshot for cache identity validation and a
+/// distinct operation sequence with prederived frame data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompiledVideoEffectGraph {
+    source_graph: VideoEffectGraph,
+    operations: Vec<CompiledVideoEffectOperation>,
+}
+
+impl CompiledVideoEffectGraph {
+    /// The normalized durable graph this plan was compiled from. Callers can
+    /// compare it with a current graph before reusing a cached plan.
+    pub fn source_graph(&self) -> &VideoEffectGraph {
+        &self.source_graph
+    }
+
+    /// Ordered immutable operations, including disabled nodes and their full
+    /// durable effect data.
+    pub fn operations(&self) -> &[CompiledVideoEffectOperation] {
+        &self.operations
+    }
+
+    pub fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, CompiledVideoEffectOperation> {
+        self.operations.iter()
+    }
+
+    /// Evaluates enabled operations in durable clip order without allocating.
+    pub fn evaluate(&self, source_tick: Tick) -> EvaluatedVideoEffectStack {
+        evaluate_compiled_video_effect_operations(&self.operations, source_tick)
+    }
+}
+
 impl VideoEffectGraph {
     pub fn schema_version(&self) -> u32 {
         self.schema_version
@@ -963,6 +1042,23 @@ impl VideoEffectGraph {
     pub fn iter(&self) -> std::slice::Iter<'_, VideoEffectNode> {
         self.nodes.iter()
     }
+
+    /// Clones, normalizes, and validates this durable v1 graph into an
+    /// immutable frame-evaluation plan.
+    pub fn compile(&self) -> Result<CompiledVideoEffectGraph, VideoEffectGraphError> {
+        let mut source_graph = self.clone();
+        source_graph.normalize_and_validate()?;
+        let operations = source_graph
+            .nodes
+            .iter()
+            .map(CompiledVideoEffectOperation::from_node)
+            .collect();
+        Ok(CompiledVideoEffectGraph {
+            source_graph,
+            operations,
+        })
+    }
+
     /// Mutates one node transactionally. Invalid IDs, parameters, or topology
     /// leave the original graph unchanged.
     pub fn edit(
@@ -1744,42 +1840,93 @@ impl ClipData {
 
     /// Evaluates every enabled video effect at an absolute source tick.
     pub fn evaluate_video_effects(&self, source_tick: Tick) -> EvaluatedVideoEffectStack {
-        let mut evaluated = EvaluatedVideoEffectStack::default();
-        for node in &self.video_effects {
-            if !node.enabled {
-                continue;
+        evaluate_video_effect_nodes(&self.video_effects.nodes, source_tick)
+    }
+}
+
+fn evaluate_video_effect_nodes(
+    nodes: &[VideoEffectNode],
+    source_tick: Tick,
+) -> EvaluatedVideoEffectStack {
+    let mut evaluated = EvaluatedVideoEffectStack::default();
+    for node in nodes {
+        if !node.enabled {
+            continue;
+        }
+        match &node.kind {
+            VideoEffectKind::BrightnessContrast(effect) => {
+                evaluated.push(EvaluatedVideoEffect::BrightnessContrast(
+                    EvaluatedBrightnessContrast {
+                        brightness: effect.brightness.evaluate(source_tick),
+                        contrast: effect.contrast.evaluate(source_tick),
+                        temperature: effect.temperature.evaluate(source_tick),
+                        tint: effect.tint.evaluate(source_tick),
+                        saturation: effect.saturation.evaluate(source_tick),
+                        exposure: effect.exposure.evaluate(source_tick),
+                        highlights: effect.highlights.evaluate(source_tick),
+                        shadows: effect.shadows.evaluate(source_tick),
+                        whites: effect.whites.evaluate(source_tick),
+                        blacks: effect.blacks.evaluate(source_tick),
+                        curves: EvaluatedRgbCurves::from(&effect.curves),
+                    },
+                ));
             }
-            match &node.kind {
-                VideoEffectKind::BrightnessContrast(effect) => {
-                    evaluated.push(EvaluatedVideoEffect::BrightnessContrast(
-                        EvaluatedBrightnessContrast {
-                            brightness: effect.brightness.evaluate(source_tick),
-                            contrast: effect.contrast.evaluate(source_tick),
-                            temperature: effect.temperature.evaluate(source_tick),
-                            tint: effect.tint.evaluate(source_tick),
-                            saturation: effect.saturation.evaluate(source_tick),
-                            exposure: effect.exposure.evaluate(source_tick),
-                            highlights: effect.highlights.evaluate(source_tick),
-                            shadows: effect.shadows.evaluate(source_tick),
-                            whites: effect.whites.evaluate(source_tick),
-                            blacks: effect.blacks.evaluate(source_tick),
-                            curves: EvaluatedRgbCurves::from(&effect.curves),
-                        },
-                    ));
-                }
-                VideoEffectKind::Vignette(effect) => {
-                    evaluated.push(EvaluatedVideoEffect::Vignette(EvaluatedVignette {
-                        amount: effect.amount.evaluate(source_tick),
-                        midpoint: effect.midpoint.evaluate(source_tick),
-                        feather: effect.feather.evaluate(source_tick),
-                        center_x: effect.center_x.evaluate(source_tick),
-                        center_y: effect.center_y.evaluate(source_tick),
-                    }));
-                }
+            VideoEffectKind::Vignette(effect) => {
+                evaluated.push(EvaluatedVideoEffect::Vignette(EvaluatedVignette {
+                    amount: effect.amount.evaluate(source_tick),
+                    midpoint: effect.midpoint.evaluate(source_tick),
+                    feather: effect.feather.evaluate(source_tick),
+                    center_x: effect.center_x.evaluate(source_tick),
+                    center_y: effect.center_y.evaluate(source_tick),
+                }));
             }
         }
-        evaluated
     }
+    evaluated
+}
+
+fn evaluate_compiled_video_effect_operations(
+    operations: &[CompiledVideoEffectOperation],
+    source_tick: Tick,
+) -> EvaluatedVideoEffectStack {
+    let mut evaluated = EvaluatedVideoEffectStack::default();
+    for operation in operations {
+        if !operation.enabled {
+            continue;
+        }
+        match &operation.kind {
+            VideoEffectKind::BrightnessContrast(effect) => {
+                let curves = operation
+                    .evaluated_curves
+                    .expect("brightness/contrast operations precompute curves");
+                evaluated.push(EvaluatedVideoEffect::BrightnessContrast(
+                    EvaluatedBrightnessContrast {
+                        brightness: effect.brightness.evaluate(source_tick),
+                        contrast: effect.contrast.evaluate(source_tick),
+                        temperature: effect.temperature.evaluate(source_tick),
+                        tint: effect.tint.evaluate(source_tick),
+                        saturation: effect.saturation.evaluate(source_tick),
+                        exposure: effect.exposure.evaluate(source_tick),
+                        highlights: effect.highlights.evaluate(source_tick),
+                        shadows: effect.shadows.evaluate(source_tick),
+                        whites: effect.whites.evaluate(source_tick),
+                        blacks: effect.blacks.evaluate(source_tick),
+                        curves,
+                    },
+                ));
+            }
+            VideoEffectKind::Vignette(effect) => {
+                evaluated.push(EvaluatedVideoEffect::Vignette(EvaluatedVignette {
+                    amount: effect.amount.evaluate(source_tick),
+                    midpoint: effect.midpoint.evaluate(source_tick),
+                    feather: effect.feather.evaluate(source_tick),
+                    center_x: effect.center_x.evaluate(source_tick),
+                    center_y: effect.center_y.evaluate(source_tick),
+                }));
+            }
+        }
+    }
+    evaluated
 }
 
 fn normalize_animated_scalar(scalar: &mut AnimatedScalar, minimum: f32, maximum: f32) -> bool {
@@ -8317,6 +8464,119 @@ mod tests {
                 .map(|operation| brightness_contrast(operation).brightness)
                 .collect::<Vec<_>>(),
             [-0.25, 0.5]
+        );
+    }
+
+    #[test]
+    fn compiled_video_effect_graph_preserves_nodes_and_evaluation() {
+        let mut color = color_effect(10);
+        let VideoEffectKind::BrightnessContrast(color_parameters) = &mut color.kind else {
+            panic!()
+        };
+        color_parameters.brightness.keyframes = vec![
+            ScalarKeyframe {
+                source_tick: Tick(0),
+                value: -0.5,
+                interpolation: KeyframeInterpolation::EaseIn,
+            },
+            ScalarKeyframe {
+                source_tick: Tick(20),
+                value: 0.75,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        color_parameters.curves.master.points = vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 0.5, y: 0.8 },
+            CurvePoint { x: 1.0, y: 1.0 },
+        ];
+
+        let mut bypassed = color_effect(20);
+        bypassed.enabled = false;
+        let mut vignette = vignette_effect(30, true);
+        let VideoEffectKind::Vignette(vignette_effect) = &mut vignette.kind else {
+            panic!()
+        };
+        vignette_effect.amount.keyframes = vec![
+            ScalarKeyframe {
+                source_tick: Tick(0),
+                value: 0.1,
+                interpolation: KeyframeInterpolation::Smooth,
+            },
+            ScalarKeyframe {
+                source_tick: Tick(20),
+                value: 0.8,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+
+        let graph = VideoEffectGraph::from(vec![color, bypassed, vignette]);
+        let compiled = graph.compile().unwrap();
+        assert_eq!(compiled.source_graph(), &graph);
+        assert_eq!(compiled.operations().len(), graph.len());
+        assert_eq!(compiled.operations()[0].id(), graph[0].id);
+        assert_eq!(compiled.operations()[0].enabled(), graph[0].enabled);
+        assert_eq!(compiled.operations()[0].kind(), &graph[0].kind);
+        assert!(!std::ptr::eq(
+            compiled.operations()[0].kind(),
+            &compiled.source_graph()[0].kind
+        ));
+        let VideoEffectKind::BrightnessContrast(source_color) = &graph[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            compiled.operations()[0].evaluated_curves,
+            Some(EvaluatedRgbCurves::from(&source_color.curves))
+        );
+        let mut changed_graph = graph.clone();
+        changed_graph.edit(0, |node| node.enabled = false).unwrap();
+        assert_ne!(compiled.source_graph(), &changed_graph);
+        assert!(compiled.operations()[0].enabled());
+        assert_eq!(
+            compiled
+                .iter()
+                .map(|operation| (operation.id(), operation.enabled()))
+                .collect::<Vec<_>>(),
+            vec![
+                (VideoEffectId(10), true),
+                (VideoEffectId(20), false),
+                (VideoEffectId(30), true)
+            ]
+        );
+
+        let mut clip = test_clip(1, 0, 100);
+        clip.video_effects = graph;
+        for tick in [Tick(0), Tick(5), Tick(15), Tick(20)] {
+            assert_eq!(compiled.evaluate(tick), clip.evaluate_video_effects(tick));
+        }
+    }
+
+    #[test]
+    fn compiled_video_effect_graph_rejects_malformed_graphs() {
+        let unsupported = VideoEffectGraph {
+            schema_version: EFFECT_GRAPH_SCHEMA_VERSION + 1,
+            nodes: vec![],
+            connections: vec![],
+        };
+        assert_eq!(
+            unsupported.compile(),
+            Err(VideoEffectGraphError::UnsupportedSchemaVersion {
+                found: EFFECT_GRAPH_SCHEMA_VERSION + 1
+            })
+        );
+
+        let malformed = graph_with(
+            vec![color_effect(1), color_effect(2)],
+            vec![graph_connection(
+                2,
+                VideoEffectPortId::VIDEO_OUTPUT,
+                1,
+                VideoEffectPortId::VIDEO_INPUT,
+            )],
+        );
+        assert_eq!(
+            malformed.compile(),
+            Err(VideoEffectGraphError::NonCanonicalNodeOrder)
         );
     }
 

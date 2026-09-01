@@ -3379,6 +3379,250 @@ fn nearest_rank_p95(samples: &[f32; FRAME_TIME_SAMPLE_COUNT]) -> f32 {
     ordered.get(index).copied().unwrap_or_default()
 }
 
+#[derive(Clone, Debug)]
+struct EffectGraphCompileRequest {
+    request_id: u64,
+    timeline_generation: u64,
+    clip_id: nle_timeline::ClipId,
+    graph: nle_timeline::VideoEffectGraph,
+}
+
+#[derive(Debug)]
+struct EffectGraphCompileResult {
+    request_id: u64,
+    timeline_generation: u64,
+    clip_id: nle_timeline::ClipId,
+    compiled: Result<Arc<nle_timeline::CompiledVideoEffectGraph>, String>,
+}
+
+struct EffectGraphCompileWorker {
+    pending: Arc<Mutex<VecDeque<EffectGraphCompileRequest>>>,
+    results: Arc<Mutex<VecDeque<EffectGraphCompileResult>>>,
+    wake: mpsc::SyncSender<()>,
+    shutdown: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl EffectGraphCompileWorker {
+    fn start(notify: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
+        let pending = Arc::new(Mutex::new(VecDeque::with_capacity(MONITOR_LAYER_COUNT)));
+        let results = Arc::new(Mutex::new(VecDeque::with_capacity(MONITOR_LAYER_COUNT)));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (wake, wake_rx) = mpsc::sync_channel(1);
+        let worker_pending = Arc::clone(&pending);
+        let worker_results = Arc::clone(&results);
+        let worker_shutdown = Arc::clone(&shutdown);
+        let join = thread::Builder::new()
+            .name("maelstrom-effect-graph-compiler".to_owned())
+            .spawn(move || {
+                effect_graph_compile_loop(
+                    worker_pending,
+                    worker_results,
+                    wake_rx,
+                    worker_shutdown,
+                    notify,
+                )
+            })?;
+        Ok(Self {
+            pending,
+            results,
+            wake,
+            shutdown,
+            join: Some(join),
+        })
+    }
+
+    fn submit(&self, request: EffectGraphCompileRequest) {
+        let mut pending = self.pending.lock().expect("effect graph pending lock");
+        if let Some(index) = pending
+            .iter()
+            .position(|queued| queued.clip_id == request.clip_id)
+        {
+            pending.remove(index);
+        }
+        if pending.len() == MONITOR_LAYER_COUNT {
+            pending.pop_front();
+        }
+        pending.push_back(request);
+        drop(pending);
+        let _ = self.wake.try_send(());
+    }
+
+    fn drain_results(&self) -> VecDeque<EffectGraphCompileResult> {
+        std::mem::take(&mut *self.results.lock().expect("effect graph result lock"))
+    }
+}
+
+impl Drop for EffectGraphCompileWorker {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn effect_graph_compile_loop(
+    pending: Arc<Mutex<VecDeque<EffectGraphCompileRequest>>>,
+    results: Arc<Mutex<VecDeque<EffectGraphCompileResult>>>,
+    wake: mpsc::Receiver<()>,
+    shutdown: Arc<AtomicBool>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+) {
+    while wake.recv().is_ok() {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        loop {
+            let request = pending
+                .lock()
+                .expect("effect graph pending lock")
+                .pop_front();
+            let Some(request) = request else {
+                break;
+            };
+            let compiled = request
+                .graph
+                .compile()
+                .map(Arc::new)
+                .map_err(|error| error.to_string());
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            let superseded = pending
+                .lock()
+                .expect("effect graph pending lock")
+                .iter()
+                .any(|queued| {
+                    queued.clip_id == request.clip_id && queued.request_id > request.request_id
+                });
+            if superseded {
+                continue;
+            }
+            let mut output = results.lock().expect("effect graph result lock");
+            output.retain(|ready| ready.clip_id != request.clip_id);
+            if output.len() == MONITOR_LAYER_COUNT {
+                output.pop_front();
+            }
+            output.push_back(EffectGraphCompileResult {
+                request_id: request.request_id,
+                timeline_generation: request.timeline_generation,
+                clip_id: request.clip_id,
+                compiled,
+            });
+            drop(output);
+            notify();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RequestedEffectGraph {
+    request_id: u64,
+    timeline_generation: u64,
+}
+
+struct EffectGraphCompiler {
+    notify: Arc<dyn Fn() + Send + Sync>,
+    worker: Option<EffectGraphCompileWorker>,
+    requested: HashMap<nle_timeline::ClipId, RequestedEffectGraph>,
+    next_request_id: u64,
+    last_error: Option<(nle_timeline::ClipId, String)>,
+}
+
+impl EffectGraphCompiler {
+    fn new(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self {
+            notify,
+            worker: None,
+            requested: HashMap::with_capacity(MONITOR_LAYER_COUNT),
+            next_request_id: 1,
+            last_error: None,
+        }
+    }
+
+    fn retain_active(&mut self, active: &[Option<nle_timeline::ClipId>; MONITOR_LAYER_COUNT]) {
+        self.requested
+            .retain(|clip_id, _| active.contains(&Some(*clip_id)));
+    }
+
+    fn needs_request(&self, timeline_generation: u64, clip_id: nle_timeline::ClipId) -> bool {
+        self.requested
+            .get(&clip_id)
+            .is_none_or(|requested| requested.timeline_generation != timeline_generation)
+    }
+
+    fn request(
+        &mut self,
+        timeline_generation: u64,
+        clip_id: nle_timeline::ClipId,
+        graph: nle_timeline::VideoEffectGraph,
+    ) {
+        if graph.is_empty() {
+            self.requested.remove(&clip_id);
+            return;
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        if self.worker.is_none() {
+            match EffectGraphCompileWorker::start(Arc::clone(&self.notify)) {
+                Ok(worker) => self.worker = Some(worker),
+                Err(error) => {
+                    self.last_error = Some((
+                        clip_id,
+                        format!("could not start effect graph compiler: {error}"),
+                    ));
+                    self.requested.insert(
+                        clip_id,
+                        RequestedEffectGraph {
+                            request_id,
+                            timeline_generation,
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(worker) = self.worker.as_ref() else {
+            return;
+        };
+        worker.submit(EffectGraphCompileRequest {
+            request_id,
+            timeline_generation,
+            clip_id,
+            graph,
+        });
+        self.requested.insert(
+            clip_id,
+            RequestedEffectGraph {
+                request_id,
+                timeline_generation,
+            },
+        );
+    }
+
+    fn drain_current_results(&mut self) -> VecDeque<EffectGraphCompileResult> {
+        let Some(worker) = self.worker.as_ref() else {
+            return VecDeque::new();
+        };
+        worker
+            .drain_results()
+            .into_iter()
+            .filter(|result| self.is_current_result(result))
+            .collect()
+    }
+
+    fn is_current_result(&self, result: &EffectGraphCompileResult) -> bool {
+        self.requested
+            .get(&result.clip_id)
+            .is_some_and(|requested| {
+                requested.request_id == result.request_id
+                    && requested.timeline_generation == result.timeline_generation
+            })
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -3477,6 +3721,7 @@ struct App {
     project_dialog_tx: mpsc::Sender<ProjectDialogResult>,
     project_dialog_rx: mpsc::Receiver<ProjectDialogResult>,
     project_dialog_notify: Arc<dyn Fn() + Send + Sync>,
+    effect_graph_compiler: EffectGraphCompiler,
     media_dialog_tx: mpsc::Sender<Vec<PathBuf>>,
     media_dialog_rx: mpsc::Receiver<Vec<PathBuf>>,
     media_analysis_tx: mpsc::Sender<MediaAnalysisResult>,
@@ -3754,6 +3999,8 @@ impl App {
         let hub = ProjectHubState::new(demo_hub);
         let editor = EditorState::new(Language::English, "Untitled Project");
         let monitor_notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(monitor_notifier);
+        let project_dialog_notify: Arc<dyn Fn() + Send + Sync> = Arc::new(project_dialog_notifier);
+        let effect_graph_compiler = EffectGraphCompiler::new(Arc::clone(&project_dialog_notify));
         let monitor_cache_bytes = monitor_cache_bytes_override
             .unwrap_or_else(|| monitor_cache_bytes_from_args(std::env::args()));
         let monitor_frame_cache_pool = nle_decode::MonitorFrameCachePool::new(monitor_cache_bytes);
@@ -3870,7 +4117,8 @@ impl App {
             editor,
             project_dialog_tx,
             project_dialog_rx,
-            project_dialog_notify: Arc::new(project_dialog_notifier),
+            project_dialog_notify,
+            effect_graph_compiler,
             media_dialog_tx,
             media_dialog_rx,
             media_analysis_tx,
@@ -5084,6 +5332,59 @@ impl App {
                 self.editor.set_export_running(0.0);
             }
             Err(error) => self.editor.set_export_failed(error),
+        }
+    }
+
+    fn synchronize_effect_graph_compiler(&mut self) {
+        let mut active = [None; MONITOR_LAYER_COUNT];
+        if self.screen == Screen::Editor {
+            for (slot, target) in active.iter_mut().zip(self.editor.playback_targets()) {
+                *slot = Some(target.clip_id);
+            }
+        }
+        self.effect_graph_compiler.retain_active(&active);
+        let timeline_generation = self.editor.timeline.generation();
+        for clip_id in active.into_iter().flatten() {
+            if !self
+                .effect_graph_compiler
+                .needs_request(timeline_generation, clip_id)
+            {
+                continue;
+            }
+            let Some(graph) = self
+                .editor
+                .timeline
+                .clip(clip_id)
+                .map(|clip| clip.video_effects.clone())
+            else {
+                continue;
+            };
+            self.effect_graph_compiler
+                .request(timeline_generation, clip_id, graph);
+        }
+    }
+
+    fn poll_effect_graph_compiler(&mut self) {
+        for result in self.effect_graph_compiler.drain_current_results() {
+            match result.compiled {
+                Ok(compiled) => {
+                    if self.editor.install_compiled_video_effect_graph(
+                        result.timeline_generation,
+                        result.clip_id,
+                        compiled,
+                    ) && self
+                        .effect_graph_compiler
+                        .last_error
+                        .as_ref()
+                        .is_some_and(|(clip_id, _)| *clip_id == result.clip_id)
+                    {
+                        self.effect_graph_compiler.last_error = None;
+                    }
+                }
+                Err(error) => {
+                    self.effect_graph_compiler.last_error = Some((result.clip_id, error));
+                }
+            }
         }
     }
 
@@ -8240,6 +8541,8 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::ProjectDialog => {
                 self.poll_project_dialog();
+                self.synchronize_effect_graph_compiler();
+                self.poll_effect_graph_compiler();
                 self.poll_video_export();
                 self.poll_kraken_upscale();
                 self.poll_proxy_job();
@@ -8279,6 +8582,8 @@ impl ApplicationHandler<AppEvent> for App {
         self.poll_project_writer_events();
         self.poll_catalog_writer_errors();
         self.poll_project_dialog();
+        self.synchronize_effect_graph_compiler();
+        self.poll_effect_graph_compiler();
         self.poll_video_export();
         self.poll_kraken_upscale();
         self.poll_proxy_job();
@@ -8549,6 +8854,122 @@ fn main() {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn compiled_test_graph(node_id: u32, brightness: f32) -> nle_timeline::VideoEffectGraph {
+        let mut effect = nle_timeline::BrightnessContrastEffect::default();
+        effect.brightness.value = brightness;
+        vec![nle_timeline::VideoEffectNode {
+            id: nle_timeline::VideoEffectId(node_id),
+            enabled: true,
+            kind: nle_timeline::VideoEffectKind::BrightnessContrast(effect),
+        }]
+        .into()
+    }
+
+    #[test]
+    fn effect_graph_compiler_is_lazy_and_publishes_only_latest_requested_graph() {
+        let (notify_tx, notify_rx) = mpsc::channel();
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = notify_tx.send(());
+        });
+        let mut compiler = EffectGraphCompiler::new(notify);
+        compiler.retain_active(&[None; MONITOR_LAYER_COUNT]);
+        assert!(compiler.worker.is_none());
+
+        let clip_id = nle_timeline::ClipId(41);
+        let first = compiled_test_graph(1, 0.1);
+        let latest = compiled_test_graph(2, 0.2);
+        compiler.request(7, clip_id, first);
+        notify_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first effect graph result");
+        let first_ready = compiler
+            .worker
+            .as_ref()
+            .unwrap()
+            .drain_results()
+            .pop_back()
+            .expect("first effect graph was ready before replacement");
+        compiler.request(8, clip_id, latest.clone());
+        assert!(
+            !compiler.is_current_result(&first_ready),
+            "a ready result must become stale as soon as a newer request owns the clip"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let result = loop {
+            let _ = notify_rx.recv_timeout(Duration::from_millis(20));
+            if let Some(result) = compiler.drain_current_results().pop_back() {
+                break result;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "effect graph compiler did not publish the latest request"
+            );
+        };
+        assert_eq!(result.timeline_generation, 8);
+        assert_eq!(result.clip_id, clip_id);
+        assert_eq!(
+            result.compiled.unwrap().source_graph(),
+            &latest,
+            "a completed superseded graph must not replace the current request"
+        );
+    }
+
+    #[test]
+    fn effect_graph_worker_bounds_pending_and_ready_slots_per_visible_layer() {
+        let worker = EffectGraphCompileWorker::start(Arc::new(|| {})).unwrap();
+        for index in 0..(MONITOR_LAYER_COUNT * 3) {
+            worker.submit(EffectGraphCompileRequest {
+                request_id: index as u64 + 1,
+                timeline_generation: 1,
+                clip_id: nle_timeline::ClipId(index as u32 + 1),
+                graph: compiled_test_graph(index as u32 + 1, 0.0),
+            });
+            assert!(
+                worker
+                    .pending
+                    .lock()
+                    .expect("effect graph pending lock")
+                    .len()
+                    <= MONITOR_LAYER_COUNT
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let pending = worker
+                .pending
+                .lock()
+                .expect("effect graph pending lock")
+                .len();
+            let ready = worker
+                .results
+                .lock()
+                .expect("effect graph result lock")
+                .len();
+            assert!(pending <= MONITOR_LAYER_COUNT);
+            assert!(ready <= MONITOR_LAYER_COUNT);
+            if pending == 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "effect graph worker did not drain"
+            );
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn effect_graph_worker_drop_wakes_and_joins_an_idle_thread() {
+        let worker = EffectGraphCompileWorker::start(Arc::new(|| {})).unwrap();
+        let started = Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "idle compiler shutdown must not wait indefinitely"
+        );
+    }
 
     #[test]
     fn optional_proxy_routing_changes_monitor_video_only() {
