@@ -71,8 +71,8 @@ try {
         throw "Cross-adapter qualification exited with code $testExitCode without writing its report. Both DX12 IntegratedGpu and DiscreteGpu adapters are required."
     }
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw | ConvertFrom-Json
-    if ($testExitCode -ne 0 -or $report.schema_version -ne 2 -or $report.status -ne 'passed' -or
-        $report.scope -ne 'headless_transformed_multilayer_viewer_compositor' -or $report.physical_scanout_observed -ne $false -or
+    if ($testExitCode -ne 0 -or $report.schema_version -ne 3 -or $report.status -ne 'passed' -or
+        $report.scope -ne 'headless_transformed_multilayer_viewer_compositor_with_post_measurement_state_scenarios' -or $report.physical_scanout_observed -ne $false -or
         $report.app_auto_preview_observed -ne $false -or $null -eq $report.machine -or $null -eq $report.workload -or
         @($report.adapters).Count -ne 2) {
         throw "Cross-adapter qualification failed or has an invalid report shape: $resolvedReportPath"
@@ -84,7 +84,7 @@ try {
         [int]$workload.measured_submissions -ne 30 -or [int]$workload.target_fps -ne 30 -or
         -not [bool]$workload.uploads_excluded_from_timing -or -not [bool]$workload.warmup_excluded_from_timing -or
         -not [double]::IsFinite([double]$workload.frame_budget_ms) -or [math]::Abs([double]$workload.frame_budget_ms - (1000.0 / 30.0)) -gt 0.001) {
-        throw "Cross-adapter report has an invalid schema-2 workload: $resolvedReportPath"
+        throw "Cross-adapter report has an invalid schema-3 workload: $resolvedReportPath"
     }
     $deviceTypes = @($report.adapters | ForEach-Object { [string]$_.device_type })
     foreach ($requiredType in @('IntegratedGpu', 'DiscreteGpu')) {
@@ -126,6 +126,102 @@ try {
             if ([math]::Abs([int]$actual[$index] - [int]$expected[$index]) -gt [int]$adapter.correctness_tolerance) {
                 throw "Cross-adapter report correctness verification exceeded tolerance for adapter '$($adapter.name)': $resolvedReportPath"
             }
+        }
+        $scenarios = @($adapter.state_scenarios)
+        $scenarioNames = @('top_transform_off_center', 'top_layer_disabled', 'top_source_missing', 'top_source_late_arrival')
+        $scenarioFields = @('name', 'generation', 'actual_rgba', 'expected_rgba', 'correctness_passed', 'probes', 'uploads_performed', 'upload_serials_before', 'upload_serials_after', 'composed_upload_serials', 'composition_matches_current_uploads', 'top_layer_composed')
+        $probeFields = @('x', 'y', 'actual_rgba', 'expected_rgba', 'correctness_passed')
+        if ($scenarios.Count -ne $scenarioNames.Count -or @($scenarios | ForEach-Object { [string]$_.name }) -join '|' -ne ($scenarioNames -join '|')) {
+            throw "Cross-adapter report has an invalid state-scenario shape for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        $baselineSerials = @($scenarios[0].upload_serials_before)
+        if ($baselineSerials.Count -ne 4 -or $baselineSerials[$expectedLayerCount - 1] -le 0) {
+            throw "Cross-adapter report is missing initial top-layer upload evidence for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) {
+            $scenario = $scenarios[$scenarioIndex]
+            $actual = @($scenario.actual_rgba)
+            $expected = @($scenario.expected_rgba)
+            $before = @($scenario.upload_serials_before)
+            $after = @($scenario.upload_serials_after)
+            $composed = @($scenario.composed_upload_serials)
+            $probes = @($scenario.probes)
+            $expectedProbeCount = if ($scenarioIndex -eq 0) { 2 } else { 1 }
+            $actualFields = @($scenario.PSObject.Properties.Name | Sort-Object)
+            if ((($actualFields -join '|') -ne (($scenarioFields | Sort-Object) -join '|')) -or
+                $scenario.correctness_passed -isnot [bool] -or $scenario.uploads_performed -isnot [bool] -or
+                $scenario.composition_matches_current_uploads -isnot [bool] -or $scenario.top_layer_composed -isnot [bool] -or
+                [int64]$scenario.generation -ne ([int64]$workload.warmup_submissions + [int64]$workload.measured_submissions + 1 + $scenarioIndex) -or
+                $actual.Count -ne 4 -or $expected.Count -ne 4 -or $before.Count -ne 4 -or $after.Count -ne 4 -or $composed.Count -ne 4 -or
+                $probes.Count -ne $expectedProbeCount -or
+                -not [bool]$scenario.correctness_passed -or -not [bool]$scenario.composition_matches_current_uploads) {
+                throw "Cross-adapter report has incomplete state-scenario evidence for adapter '$($adapter.name)': $resolvedReportPath"
+            }
+            for ($index = 0; $index -lt 4; $index++) {
+                if ([math]::Abs([int]$actual[$index] - [int]$expected[$index]) -gt [int]$adapter.correctness_tolerance) {
+                    throw "Cross-adapter state scenario '$($scenario.name)' exceeded readback tolerance for adapter '$($adapter.name)': $resolvedReportPath"
+                }
+            }
+            foreach ($probe in $probes) {
+                $probeActual = @($probe.actual_rgba)
+                $probeExpected = @($probe.expected_rgba)
+                if ((@($probe.PSObject.Properties.Name | Sort-Object) -join '|') -ne (($probeFields | Sort-Object) -join '|') -or
+                    $probe.correctness_passed -isnot [bool] -or -not [bool]$probe.correctness_passed -or
+                    $probeActual.Count -ne 4 -or $probeExpected.Count -ne 4) {
+                    throw "Cross-adapter report has an invalid readback probe for adapter '$($adapter.name)': $resolvedReportPath"
+                }
+                for ($channel = 0; $channel -lt 4; $channel++) {
+                    if ([math]::Abs([int]$probeActual[$channel] - [int]$probeExpected[$channel]) -gt [int]$adapter.correctness_tolerance) {
+                        throw "Cross-adapter probe exceeded readback tolerance for adapter '$($adapter.name)': $resolvedReportPath"
+                    }
+                }
+            }
+        }
+        $transform = $scenarios[0]
+        $transformCenter = @($transform.probes)[0]
+        $transformMoved = @($transform.probes)[1]
+        if ([bool]$transform.uploads_performed -or -not [bool]$transform.top_layer_composed -or
+            ((@($transform.upload_serials_before) -join ',') -ne (@($transform.upload_serials_after) -join ',')) -or
+            @($transform.composed_upload_serials)[$expectedLayerCount - 1] -ne @($transform.upload_serials_after)[$expectedLayerCount - 1] -or
+            [int]$transformCenter.x -ne 960 -or [int]$transformCenter.y -ne 540 -or
+            [int]$transformMoved.x -ne 1800 -or [int]$transformMoved.y -ne 120 -or
+            ((@($transformCenter.actual_rgba) -join ',') -ne (@($transform.actual_rgba) -join ',')) -or
+            ((@($transformCenter.expected_rgba) -join ',') -ne (@($transform.expected_rgba) -join ',')) -or
+            ((@($transformMoved.expected_rgba) -join ',') -ne (@($adapter.correctness_expected_rgba) -join ','))) {
+            throw "Cross-adapter transform scenario did not prove retained-texture recomposition for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        $disabled = $scenarios[1]
+        if ([bool]$disabled.uploads_performed -or [bool]$disabled.top_layer_composed -or
+            ((@($disabled.upload_serials_before) -join ',') -ne (@($disabled.upload_serials_after) -join ','))) {
+            throw "Cross-adapter disabled-layer scenario did not prove no-upload recomposition for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        $missing = $scenarios[2]
+        $missingBefore = @($missing.upload_serials_before)
+        $missingAfter = @($missing.upload_serials_after)
+        $missingComposed = @($missing.composed_upload_serials)
+        if ([bool]$missing.uploads_performed -or [bool]$missing.top_layer_composed -or
+            $missingAfter[$expectedLayerCount - 1] -ne 0 -or $missingBefore[$expectedLayerCount - 1] -le 0) {
+            throw "Cross-adapter missing-source scenario did not prove ready-layer composition without a new upload for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        for ($index = 0; $index -lt ($expectedLayerCount - 1); $index++) {
+            if ($missingBefore[$index] -ne $missingAfter[$index] -or $missingComposed[$index] -eq $null) {
+                throw "Cross-adapter missing-source scenario lost ready-layer evidence for adapter '$($adapter.name)': $resolvedReportPath"
+            }
+        }
+        $late = $scenarios[3]
+        $lateBefore = @($late.upload_serials_before)
+        $lateAfter = @($late.upload_serials_after)
+        $lateComposed = @($late.composed_upload_serials)
+        if (-not [bool]$late.uploads_performed -or -not [bool]$late.top_layer_composed -or
+            $lateBefore[$expectedLayerCount - 1] -ne 0 -or
+            $lateAfter[$expectedLayerCount - 1] -le $baselineSerials[$expectedLayerCount - 1] -or
+            $lateComposed[$expectedLayerCount - 1] -ne $lateAfter[$expectedLayerCount - 1]) {
+            throw "Cross-adapter late-arrival scenario did not restore the top layer for adapter '$($adapter.name)': $resolvedReportPath"
+        }
+        if ((@($scenarios[0].expected_rgba) -join ',') -ne (@($scenarios[1].expected_rgba) -join ',') -or
+            (@($scenarios[0].expected_rgba) -join ',') -ne (@($scenarios[2].expected_rgba) -join ',') -or
+            (@($late.expected_rgba) -join ',') -ne (@($adapter.correctness_expected_rgba) -join ',')) {
+            throw "Cross-adapter state scenarios do not have the required remaining/full composition expectations for adapter '$($adapter.name)': $resolvedReportPath"
         }
     }
     Write-Host "Phase 0 cross-adapter compositor qualification: PASS ($resolvedReportPath)"

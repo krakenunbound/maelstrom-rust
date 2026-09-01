@@ -692,17 +692,33 @@ Replace “topmost clip wins” with a generation-aware retained compositor.
 Exit gate:
 
 - [x] At least four transformed 1080p layers composite correctly on the discrete reference profile.
-      The 2026-08-31 schema-2 headless DX12 qualification pre-uploaded four 1920x1080 sources,
+      The 2026-08-31 schema-3 headless DX12 qualification pre-uploaded four 1920x1080 sources,
       used Bicubic sampling, excluded five warmups, measured 30 changed generations, and matched
-      deterministic RGBA readback on RTX 3090. CPU encode p95 was 0.2001 ms and GPU pass p95 was
-      0.2775 ms against the 33.333 ms frame budget. This is offscreen compositor evidence, not app
+      deterministic RGBA readback on RTX 3090. The final run measured 0.0904 ms CPU encode p95 and
+      0.2765 ms GPU pass p95 against the 33.333 ms frame budget. This is offscreen compositor evidence, not app
       presentation, DWM or physical scanout. See `docs/performance-reports.md`.
 - [ ] At least two layers operate on the integrated reference profile using Auto preview quality.
       The same qualification passed the two-layer compositor prerequisite on Intel UHD 770 at
-      0.2347 ms CPU / 6.9969 ms GPU p95, but explicitly did not exercise app Auto selection or
+      0.1997 ms CPU / 6.9053 ms GPU p95, but explicitly did not exercise app Auto selection or
       presentation; this gate remains open.
-- [ ] Disabling a layer or changing a transform appears on the next available preview generation.
-- [ ] Missing/late layers hold or become transparent without stalling ready layers or input.
+- [x] Disabling a layer or changing a transform appears on the next available preview generation.
+      The schema-3 cross-adapter gate runs four post-measurement state transitions on the same
+      retained production renderer. Changing only the top transform recomposes the next generation
+      off-center with no upload while retaining that layer's composition serial; disabling it in
+      the following generation removes it with unchanged upload serials. Intel and NVIDIA exact
+      center readbacks prove the moved layer left the center, while a second probe inside its new
+      quad proves it rendered at the transformed location. The renewed 32-cycle real-media
+      generation stress also proves
+      disable/re-enable compaction, newest-generation acceptance, and stale replay rejection. This
+      is headless compositor/scheduler evidence, not window presentation or scanout. See
+      `docs/performance-reports.md` and `docs/phase1-generation-stress.md`.
+- [x] Missing/late layers hold or become transparent without stalling ready layers or input.
+      The schema-3 GPU sequence clears the declared top source texture, composes the ready lower
+      layers with matching readback and current serials, then re-uploads the late source and
+      restores the full composition on the next generation. Separately, the current real-media
+      missing-upper regression presents its lower layer while the upper source stays absent; the
+      renewed four-source stress supersedes a deliberately blocked request and preserves unaffected
+      layers with zero current monitor errors. This does not claim physical presentation.
 - [x] Timeline and full-frame CPU budgets remain green.
 
 ### Phase 3 — Effect graph and parameter engine

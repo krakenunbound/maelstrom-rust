@@ -133,7 +133,7 @@ The media path is omitted. The renewed report SHA-256 is
 
 The headless DX12 qualification exercises the production `ViewerCompositorRenderer` offscreen,
 not the editor, window surface, DWM, or a display. It explicitly enumerates one
-`IntegratedGpu` and one `DiscreteGpu` adapter. Schema 2 uses pre-uploaded 1920x1080 sources and a
+`IntegratedGpu` and one `DiscreteGpu` adapter. Schema 3 uses pre-uploaded 1920x1080 sources and a
 1920x1080 output with Bicubic sampling: two transformed layers on the integrated adapter and four
 on the discrete adapter. Five warmups are excluded, followed by 30 changed generations with CPU
 encode and required `TIMESTAMP_QUERY` GPU-pass timing. A deterministic center-pixel readback must
@@ -144,23 +144,36 @@ runner:
 & 'H:\Maelstrom Rust\scripts\Run-Phase0CrossAdapterGpu.ps1'
 ```
 
-The atomically written ignored local evidence is schema-version 2 JSON at
+After the timed workload, schema 3 runs four ordered state transitions on the same retained
+renderer. It moves only the top-layer transform away from the center, disables the top layer,
+restores its declaration while removing its retained texture to model a missing source, then re-uploads it
+to model late arrival. Every transition advances the frame generation and verifies center RGBA,
+current upload/composition serial relationships, top-layer participation, and whether an upload
+was permitted. The transform transition additionally probes inside the moved quad, so it must show
+the remaining stack at center and the full stack at the transformed location. The transform and
+disable transitions must not upload. The missing transition must keep every ready lower source
+composed. The late transition must allocate a newer upload serial and restore the full expected
+composition.
+
+The atomically written ignored local evidence is schema-version 3 JSON at
 `artifacts/phase0-cross-adapter/phase0-cross-adapter-gpu.json`. It records machine identity and
 adapter name/vendor/device/type/backend/driver information, workload dimensions, sampling mode,
 layer count, warmup/measurement counts, actual and expected RGBA, and CPU/GPU p95 and maximum.
 The runner enforces CPU p95 at or below 8 ms and GPU-pass p95 at or below the 33.333 ms 30 fps
 budget. It deliberately records `physical_scanout_observed: false` and
 `app_auto_preview_observed: false`, and is limited to
-`scope: "headless_transformed_multilayer_viewer_compositor"`: it does not replace the schema-7
+`scope: "headless_transformed_multilayer_viewer_compositor_with_post_measurement_state_scenarios"`:
+it does not replace the schema-7
 surface report or establish app Auto resolution, presentation, DWM composition, physical scanout,
 or end-to-end display latency.
 
-The final 2026-08-31 qualification run passed on Intel UHD 770 with two layers at 0.2347 ms CPU /
-6.9969 ms GPU p95 and on RTX 3090 with four layers at 0.2001 ms CPU / 0.2775 ms GPU p95. Both
-adapters matched the expected readback across all channels. This file is regenerated on every run,
-so its timing-dependent SHA-256 is intentionally not a stable documentation identifier.
+The 2026-08-31 schema-3 qualification passes on Intel UHD 770 with two layers and RTX 3090 with
+four layers. Both adapters pass all four state readbacks and serial invariants while staying within
+the unchanged CPU and 30 fps GPU budgets. The file is regenerated on every run, so its
+timing-dependent SHA-256 and individual timing samples are intentionally not stable documentation
+identifiers.
 
-The schema-2 file is retained success evidence only; adapter discovery, device creation, or GPU
+The schema-3 file is retained success evidence only; adapter discovery, device creation, or GPU
 execution failures can terminate before publication and remain visible in the Cargo diagnostic
 output. Machine-readable failed-run evidence is still an open qualification-harness improvement.
 

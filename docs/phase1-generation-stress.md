@@ -55,6 +55,16 @@ were five under the cap of eight. No session, source group, live actor, or
 retiring actor survived teardown. The retained report SHA-256 is
 `b58f086ffde99780d76a04de984c0b5948593c4f670dd5f117d9650b3dc9954c`.
 
+The gate was renewed on clean commit `d90283c` on 2026-08-31. It again passed all 32 cycles,
+32 forward and 32 backward submissions, 33 disable/re-enable pairs, one deliberately superseded
+request, and 96 resource checkpoints. The Software decoder produced 301 completed frames and 303
+fallback presentations; all 39 rejected events were bounded stale/non-converging work, current
+monitor errors remained zero, and eight holds plus eighteen late frames did not block final newest
+request completion. Peak cache accounting was 130,867,200 bytes below the 1 GiB cap, peak sticky
+sessions were five below eight, and no session, source group, live actor, or retiring actor survived
+App teardown. The report is regenerated evidence, so this run does not replace the historical
+immutable hash above.
+
 App (131), decoder (71), and UI-core (210) ordinary tests passed, as did strict
 all-target app Clippy. Separately, the existing release
 `editor::tests::fifty_thousand_clip_editor_history_events_stay_under_two_ms`

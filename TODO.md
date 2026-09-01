@@ -9,11 +9,21 @@ Last updated: 2026-08-31
 
 ## Current stopping point
 
-- [x] Qualify the retained compositor at full 1920x1080 on both reference adapters. The schema-2
+- [x] Prove next-generation layer-state changes across both reference GPUs. The schema-3 headless
+  1080p compositor gate retains its timed Bicubic workload, then changes only the top transform,
+  disables that layer, removes its retained source texture, and re-uploads it as a late arrival.
+  Exact center plus moved-quad readbacks and upload/composition serials prove no-upload
+  transform/disable recomposition, ready
+  lower-layer output while the source is missing, and full restoration when it arrives. The
+  renewed four-source real-media stress simultaneously passed 32 disable/re-enable/backward-scrub
+  cycles with one blocked request superseded, 39 stale events rejected, zero monitor errors, and
+  bounded teardown. App Auto, window presentation, DWM and scanout remain separate. See
+  `docs/performance-reports.md` and `docs/phase1-generation-stress.md`.
+- [x] Qualify the retained compositor at full 1920x1080 on both reference adapters. The schema-3
   headless DX12 gate pre-uploads its sources, excludes five warmups, then measures 30 changed
   generations using Bicubic sampling and verifies the center pixel. Intel UHD 770 passed two
-  transformed layers at 0.2347 ms CPU / 6.9969 ms GPU p95; RTX 3090 passed four transformed layers
-  at 0.2001 ms CPU / 0.2775 ms GPU p95. This closes the discrete four-layer compositor gate and
+  transformed layers at 0.1997 ms CPU / 6.9053 ms GPU p95; RTX 3090 passed four transformed layers
+  at 0.0904 ms CPU / 0.2765 ms GPU p95. This closes the discrete four-layer compositor gate and
   only the integrated two-layer compositor prerequisite: app Auto quality, presentation, DWM and
   physical scanout remain unproven. See `docs/performance-reports.md`.
 - [x] Renew the clean-HEAD Phase 0 timeline-foundation evidence at `4f4fd5e`. Ten 50,000-clip
@@ -362,10 +372,12 @@ Last updated: 2026-08-31
   `egui_wgpu` owns the callback encoder, so the compositor allocates no command buffers to pool.
 - [x] Implement correct premultiplied-alpha image/video semantics.
 - [x] Add nearest, bilinear, and bicubic preview sampling where supported.
-- [x] Prove four transformed 1080p layers on the discrete reference profile with the schema-2
+- [x] Prove four transformed 1080p layers on the discrete reference profile with the schema-3
   headless compositor qualification. Presentation and physical scanout are separate gates.
 - [ ] Prove at least two layers with Auto quality on the integrated reference profile.
-- [ ] Prove missing or late layers never stall ready layers or input.
+- [x] Prove missing or late layers never stall ready layers or input. Schema-3 GPU scenarios cover
+  missing/late texture output; renewed real-media missing-upper and supersession stress cover the
+  independent monitor scheduler. This remains headless evidence, not physical presentation.
 
 ## Professional editor backlog
 

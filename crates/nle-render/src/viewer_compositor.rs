@@ -2229,6 +2229,36 @@ mod tests {
         measured_submissions: u32,
         cpu_encode_timing: CrossAdapterTiming,
         gpu_pass_timing: CrossAdapterTiming,
+        state_scenarios: Vec<CrossAdapterStateScenario>,
+    }
+
+    /// Evidence from a production-renderer state transition performed after the
+    /// timed workload. These transitions deliberately do not contribute to the
+    /// timing window; they prove the retained compositor reacts to declaration
+    /// changes and source availability without a hidden re-upload.
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterStateScenario {
+        name: &'static str,
+        generation: u64,
+        actual_rgba: [u8; 4],
+        expected_rgba: [u8; 4],
+        correctness_passed: bool,
+        probes: Vec<CrossAdapterReadbackProbe>,
+        uploads_performed: bool,
+        upload_serials_before: [u64; MAX_COMPOSITE_LAYERS],
+        upload_serials_after: [u64; MAX_COMPOSITE_LAYERS],
+        composed_upload_serials: [Option<u64>; MAX_COMPOSITE_LAYERS],
+        composition_matches_current_uploads: bool,
+        top_layer_composed: bool,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CrossAdapterReadbackProbe {
+        x: u32,
+        y: u32,
+        actual_rgba: [u8; 4],
+        expected_rgba: [u8; 4],
+        correctness_passed: bool,
     }
 
     #[derive(Debug, PartialEq, Serialize)]
@@ -2363,6 +2393,38 @@ mod tests {
         }
     }
 
+    fn qualification_frame_top_off_center(layer_count: usize) -> ViewerFrame {
+        let mut frame = qualification_frame(layer_count);
+        let top = frame.layers[layer_count - 1]
+            .as_mut()
+            .expect("top qualification layer");
+        top.quad.positions = [
+            Point {
+                x: 1_700.0,
+                y: 20.0,
+            },
+            Point {
+                x: 1_900.0,
+                y: 20.0,
+            },
+            Point {
+                x: 1_900.0,
+                y: 220.0,
+            },
+            Point {
+                x: 1_700.0,
+                y: 220.0,
+            },
+        ];
+        frame
+    }
+
+    fn qualification_frame_without_top(layer_count: usize) -> ViewerFrame {
+        let mut frame = qualification_frame(layer_count);
+        frame.layers[layer_count - 1] = None;
+        frame
+    }
+
     fn black_matte_qualification_frame() -> ViewerFrame {
         let full_quad = |id| CompositeQuad {
             clip_id: ClipId(id),
@@ -2455,6 +2517,44 @@ mod tests {
         readback_first_pixel(device, buffer, submission)
     }
 
+    fn readback_probe_pixels(
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        submission: wgpu::SubmissionIndex,
+        count: usize,
+    ) -> Result<Vec<[u8; 4]>, String> {
+        let (sent, received) = mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sent.send(result);
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(2)),
+            })
+            .map_err(|error| format!("viewer GPU completion: {error}"))?;
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("readback callback: {error}"))?
+            .map_err(|error| format!("mapped output: {error}"))?;
+        let bytes = buffer.slice(..).get_mapped_range();
+        let pixels = (0..count)
+            .map(|index| {
+                let offset = index * 256;
+                bytes
+                    .get(offset..offset + 4)
+                    .ok_or_else(|| "viewer GPU readback omitted a probe pixel".to_owned())?
+                    .try_into()
+                    .map_err(|_| "viewer GPU probe pixel was not four bytes".to_owned())
+            })
+            .collect::<Result<Vec<[u8; 4]>, String>>();
+        drop(bytes);
+        buffer.unmap();
+        pixels
+    }
+
     fn verify_black_matte_readback(
         device: &wgpu::Device,
         buffer: &wgpu::Buffer,
@@ -2496,6 +2596,15 @@ mod tests {
         ]
     }
 
+    fn qualification_layer_rgba(layer: usize) -> [u8; 4] {
+        [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 255, 255],
+        ][layer]
+    }
+
     fn rgba_within_tolerance(actual: [u8; 4], expected: [u8; 4], tolerance: u8) -> bool {
         actual
             .into_iter()
@@ -2524,6 +2633,128 @@ mod tests {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn run_cross_adapter_state_scenario(
+        renderer: &mut ViewerCompositorRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        readback: &wgpu::Buffer,
+        adapter_info: &wgpu::AdapterInfo,
+        top_layer: usize,
+        state_scenarios: &mut Vec<CrossAdapterStateScenario>,
+        name: &'static str,
+        frame: ViewerFrame,
+        generation: u64,
+        probes: &[(u32, u32, [u8; 4])],
+        uploads_performed: bool,
+        upload_serials_before: [u64; MAX_COMPOSITE_LAYERS],
+    ) -> Result<(), String> {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        if !renderer.prepare(
+            device,
+            queue,
+            &mut encoder,
+            Some(frame),
+            generation,
+            QUALIFICATION_OUTPUT_SIZE,
+        ) {
+            return Err(format!(
+                "state scenario {name} generation {generation} was skipped"
+            ));
+        }
+        let output = &renderer
+            .outputs
+            .as_ref()
+            .expect("output after state prepare")[renderer.front_output]
+            ._texture;
+        for (index, &(x, y, _)) in probes.iter().enumerate() {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: (index * 256) as u64,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let actual_pixels = readback_probe_pixels(
+            device,
+            readback,
+            queue.submit([encoder.finish()]),
+            probes.len(),
+        )?;
+        let probes = probes
+            .iter()
+            .copied()
+            .zip(actual_pixels)
+            .map(
+                |((x, y, expected_rgba), actual_rgba)| CrossAdapterReadbackProbe {
+                    x,
+                    y,
+                    actual_rgba,
+                    expected_rgba,
+                    correctness_passed: rgba_within_tolerance(
+                        actual_rgba,
+                        expected_rgba,
+                        QUALIFICATION_READBACK_TOLERANCE,
+                    ),
+                },
+            )
+            .collect::<Vec<_>>();
+        let actual_rgba = probes[0].actual_rgba;
+        let expected_rgba = probes[0].expected_rgba;
+        let evidence = renderer.presentation_evidence();
+        let correctness_passed = probes.iter().all(|probe| probe.correctness_passed);
+        if !correctness_passed {
+            let failed = probes
+                .iter()
+                .find(|probe| !probe.correctness_passed)
+                .expect("failed scenario has a failed probe");
+            return Err(format!(
+                "{} state scenario {name} probe ({}, {}) readback {:?} did not match {:?} within {}",
+                adapter_label(adapter_info),
+                failed.x,
+                failed.y,
+                failed.actual_rgba,
+                failed.expected_rgba,
+                QUALIFICATION_READBACK_TOLERANCE
+            ));
+        }
+        let composed_upload_serials = renderer.presentation.composed_upload_serials;
+        let top_layer_composed = composed_upload_serials[top_layer].is_some();
+        state_scenarios.push(CrossAdapterStateScenario {
+            name,
+            generation,
+            actual_rgba,
+            expected_rgba,
+            correctness_passed,
+            probes,
+            uploads_performed,
+            upload_serials_before,
+            upload_serials_after: evidence.upload_serials,
+            composed_upload_serials,
+            composition_matches_current_uploads: composed_upload_serials
+                .iter()
+                .zip(evidence.upload_serials)
+                .all(|(painted, uploaded)| painted.is_none_or(|serial| serial == uploaded)),
+            top_layer_composed,
+        });
+        Ok(())
+    }
+
     fn qualify_viewer_compositor_adapter(
         adapter: wgpu::Adapter,
         layer_count: usize,
@@ -2547,16 +2778,7 @@ mod tests {
         let mut renderer = ViewerCompositorRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
         let source_pixels =
             (QUALIFICATION_SOURCE_SIZE.width * QUALIFICATION_SOURCE_SIZE.height) as usize;
-        for (layer, color) in [
-            [255, 0, 0, 255],
-            [0, 255, 0, 255],
-            [0, 0, 255, 255],
-            [255, 255, 255, 255],
-        ]
-        .into_iter()
-        .enumerate()
-        .take(layer_count)
-        {
+        for layer in 0..layer_count {
             renderer
                 .upload_layer_rgba(
                     &device,
@@ -2564,7 +2786,7 @@ mod tests {
                     layer,
                     QUALIFICATION_SOURCE_SIZE.width,
                     QUALIFICATION_SOURCE_SIZE.height,
-                    &color.repeat(source_pixels),
+                    &qualification_layer_rgba(layer).repeat(source_pixels),
                 )
                 .map_err(|error| format!("upload qualification layer {layer}: {error}"))?;
         }
@@ -2597,7 +2819,7 @@ mod tests {
             Vec::with_capacity(QUALIFICATION_MEASURED_SUBMISSIONS as usize);
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("phase0 cross-adapter viewer center readback"),
-            size: 256,
+            size: 512,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -2690,6 +2912,108 @@ mod tests {
             p95_ms: gpu_timing.p95_ms,
             max_ms: gpu_timing.max_ms,
         };
+        renderer.set_gpu_timing_enabled(false);
+        let initial_upload_serials = renderer.presentation_evidence().upload_serials;
+        let top_layer = layer_count - 1;
+        let mut state_scenarios = Vec::with_capacity(4);
+        let remaining_expected = qualification_expected_rgba(layer_count - 1);
+        let first_state_generation =
+            (QUALIFICATION_WARMUP_SUBMISSIONS + QUALIFICATION_MEASURED_SUBMISSIONS + 1) as u64;
+        run_cross_adapter_state_scenario(
+            &mut renderer,
+            &device,
+            &queue,
+            &readback,
+            &info,
+            top_layer,
+            &mut state_scenarios,
+            "top_transform_off_center",
+            qualification_frame_top_off_center(layer_count),
+            first_state_generation,
+            &[
+                (
+                    QUALIFICATION_OUTPUT_SIZE.width / 2,
+                    QUALIFICATION_OUTPUT_SIZE.height / 2,
+                    remaining_expected,
+                ),
+                (1_800, 120, expected),
+            ],
+            false,
+            initial_upload_serials,
+        )?;
+        let before_disable = renderer.presentation_evidence().upload_serials;
+        run_cross_adapter_state_scenario(
+            &mut renderer,
+            &device,
+            &queue,
+            &readback,
+            &info,
+            top_layer,
+            &mut state_scenarios,
+            "top_layer_disabled",
+            qualification_frame_without_top(layer_count),
+            first_state_generation + 1,
+            &[(
+                QUALIFICATION_OUTPUT_SIZE.width / 2,
+                QUALIFICATION_OUTPUT_SIZE.height / 2,
+                remaining_expected,
+            )],
+            false,
+            before_disable,
+        )?;
+        let before_missing = renderer.presentation_evidence().upload_serials;
+        renderer
+            .clear_layer(top_layer)
+            .map_err(|error| format!("clear top qualification layer: {error}"))?;
+        run_cross_adapter_state_scenario(
+            &mut renderer,
+            &device,
+            &queue,
+            &readback,
+            &info,
+            top_layer,
+            &mut state_scenarios,
+            "top_source_missing",
+            qualification_frame(layer_count),
+            first_state_generation + 2,
+            &[(
+                QUALIFICATION_OUTPUT_SIZE.width / 2,
+                QUALIFICATION_OUTPUT_SIZE.height / 2,
+                remaining_expected,
+            )],
+            false,
+            before_missing,
+        )?;
+        let before_late = renderer.presentation_evidence().upload_serials;
+        renderer
+            .upload_layer_rgba(
+                &device,
+                &queue,
+                top_layer,
+                QUALIFICATION_SOURCE_SIZE.width,
+                QUALIFICATION_SOURCE_SIZE.height,
+                &qualification_layer_rgba(top_layer).repeat(source_pixels),
+            )
+            .map_err(|error| format!("late qualification top-layer upload: {error}"))?;
+        run_cross_adapter_state_scenario(
+            &mut renderer,
+            &device,
+            &queue,
+            &readback,
+            &info,
+            top_layer,
+            &mut state_scenarios,
+            "top_source_late_arrival",
+            qualification_frame(layer_count),
+            first_state_generation + 3,
+            &[(
+                QUALIFICATION_OUTPUT_SIZE.width / 2,
+                QUALIFICATION_OUTPUT_SIZE.height / 2,
+                expected,
+            )],
+            true,
+            before_late,
+        )?;
         Ok(CrossAdapterEvidence {
             name: info.name,
             vendor: info.vendor,
@@ -2708,6 +3032,7 @@ mod tests {
             measured_submissions: QUALIFICATION_MEASURED_SUBMISSIONS,
             cpu_encode_timing,
             gpu_pass_timing,
+            state_scenarios,
         })
     }
 
@@ -4002,9 +4327,9 @@ mod tests {
             );
         }
         let report = CrossAdapterReport {
-            schema_version: 2,
+            schema_version: 3,
             status: "passed",
-            scope: "headless_transformed_multilayer_viewer_compositor",
+            scope: "headless_transformed_multilayer_viewer_compositor_with_post_measurement_state_scenarios",
             physical_scanout_observed: false,
             app_auto_preview_observed: false,
             machine: cross_adapter_machine(),
