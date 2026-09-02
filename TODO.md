@@ -29,6 +29,12 @@ Last updated: 2026-09-01
   nor derivative are redistributed. QSV reverse seeks retain exactly seven named-decoder reopens
   per output size. This is host/backend evidence, not physical-adapter, GUI, scanout, export-parity,
   or universal no-lag proof. See `docs/media-fixtures.md` and `docs/hardware-decode-parity.md`.
+- [x] Preserve shifted AV1 VFR presentation timing through media analysis and app scrub routing.
+  The bounded decoded-frame scan now retries `av1_cuvid` then `av1_qsv` only when the default AV1
+  decoder yields no usable timing; it never substitutes packet order for presentation frames.
+  The local AOM-derived fixture publishes all eight normalized boundaries and the app proves
+  bidirectional floor/hold routing. This is local named-decoder evidence, not arbitrary AV1 or
+  physical-adapter conformance. See `docs/media-fixtures.md`.
 - [x] Persist the user's per-media proxy enable choice without persisting derived media. Project
   schema 9 stores one defaulted boolean; v1–v8 migrate disabled, while export and duplicate preserve
   intent. Reopen keeps original routing until current cache validation succeeds, and explicit
@@ -418,9 +424,10 @@ Last updated: 2026-09-01
   a three-second stream origin, B-frame packet reordering, and exact waveform/decode/app local-time
   checks. Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 also have exact local Software
   timing/pixel evidence. ProRes/DNxHR and shifted/reordered MPEG-4 now also pass 30
-  export-graph source-identity cases with a test MPEG-4 encoder. Named CUVID/QSV H.264 and HEVC now
-  join D3D11VA/DXVA2 in the exact local hardware matrix. AV1, broader camera sources, QSV reverse
-  performance, cross-machine hardware/color parity, and production-encoder conformance remain open.
+  export-graph source-identity cases with a test MPEG-4 encoder. Named CUVID/QSV H.264, HEVC, and
+  AV1 now join D3D11VA/DXVA2 in the exact local hardware matrix; shifted AV1 analysis/app routing is
+  also covered. Broader AV1/camera sources, QSV reverse performance, cross-machine hardware/color
+  parity, and production-encoder conformance remain open.
 
 ## Phase 2 implementation queue
 

@@ -14842,6 +14842,16 @@ mod tests {
                 ],
                 433_332,
             ),
+            (
+                "MAELSTROM_AV1_VFR_TEST_MEDIA",
+                "av1",
+                5.0,
+                5.433,
+                [
+                    0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+                ],
+                433_000,
+            ),
         ] {
             let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
                 continue;

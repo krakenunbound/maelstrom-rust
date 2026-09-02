@@ -46,8 +46,9 @@ cross-platform bit-exact guarantee.
   failing default AV1 decoder is never mistaken for a reference.
   References explicitly use bicubic plus accurate conversion to describe the
   corrected color policy, not the former layout-dependent default. FFprobe
-  supplies presentation timestamps; AV1 uses packet PTS because its frame
-  best-effort timestamps are unavailable through the default decoder. The existing one-microsecond rounding
+  supplies presentation timestamps; the hardware-test reference uses AV1 packet PTS because its frame
+  best-effort timestamps are unavailable through the default decoder. Application analysis remains
+  frame-derived by retrying explicit CUVID/QSV AV1 decoders. The existing one-microsecond rounding
   tolerance applies only to timestamps; pixel tolerance remains zero.
 - Fixture bounds are eight frames, positive shifted origin, irregular increasing
   timestamps, 16:9 H.264/HEVC sources at most 1920x1080, plus the 352x288 AV1

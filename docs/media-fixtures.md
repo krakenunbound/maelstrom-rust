@@ -69,7 +69,7 @@ reordered fixture's waveform/decode/preview source-time path and the two generat
 ## Local AOM AV1 shifted-VFR fixture
 
 `fixtures/media/av1-vfr-fixture.json` is a separate, reproducible contract for a local-only AV1
-fixture. It records the official AOM checksum manifest as provenance and pins the test-data URLs,
+fixture. It records the official AOM checksum-manifest URL as provenance and pins the test-data URLs,
 input hashes/sizes, the two published frame
 MD5 values, and the derived `vfr-av1-aom-shifted.mkv` hash, size, stream metadata, and all eight
 packet PTS/DTS/duration/flag values. The script stream-copies the two-packet IVF input four times,
@@ -78,7 +78,17 @@ then uses `setts` (`time_base=1/1000`, `prescale=1`) to assign PTS/DTS of 5000, 
 
 The AOM inputs and resulting MKV stay only in ignored `artifacts/media-fixtures`; this repository
 does not redistribute them and makes no licensing claim. Obtain and use the source under its own
-terms. With already acquired local inputs, run:
+terms.
+
+The opt-in `MAELSTROM_AV1_VFR_TEST_MEDIA` waveform and app checks keep timing decoder-derived:
+the normal bounded decoded-frame scan runs first, then AV1 alone retries the production named-decoder
+order (`av1_cuvid`, then `av1_qsv`) when the bundled default decoder produces no usable frames.
+No packet-to-frame assumption is used. The resulting local presentation index is
+0/33/100/133/200/267/367/400 ms, and app preview routing is checked at every boundary in both
+directions. This proves the local fixture and usable named decoder on this host, not arbitrary AV1
+conformance or physical-adapter identity.
+
+With already acquired local inputs, run:
 
 ```powershell
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File `

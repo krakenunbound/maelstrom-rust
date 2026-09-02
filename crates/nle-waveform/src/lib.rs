@@ -55,6 +55,7 @@ const FRAME_TIMING_PROBE_ARGS: [&str; 11] = [
     "-of",
     "compact=p=0:nk=0",
 ];
+const AV1_FRAME_TIMING_DECODERS: [&str; 2] = ["av1_cuvid", "av1_qsv"];
 
 fn media_tool(name: &'static str) -> PathBuf {
     media_tool_from_executable(name, std::env::current_exe().ok().as_deref())
@@ -865,10 +866,83 @@ pub fn analyze_frame_timing_cancellable(
         });
     }
 
+    let default_timing = scan_decoded_frame_timing(path, &cancelled, None);
+    match &default_timing {
+        Ok(FrameTiming::Constant | FrameTiming::Variable(_)) => return default_timing,
+        Err(WaveformError::Cancelled { .. }) => return default_timing,
+        Ok(FrameTiming::Unknown) | Err(WaveformError::FrameTiming { .. }) => {}
+        Err(_) => return default_timing,
+    }
+
+    let metadata = match probe_media_metadata_cancellable(path, Arc::clone(&cancelled)) {
+        Ok(metadata) => metadata,
+        Err(WaveformError::Cancelled { .. }) => {
+            return Err(WaveformError::Cancelled {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(metadata_error) => {
+            return match default_timing {
+                Ok(FrameTiming::Unknown) => Ok(FrameTiming::Unknown),
+                Err(default_error) => Err(frame_timing_error(
+                    path,
+                    format!(
+                        "default decoded-frame scan failed: {default_error}; AV1 metadata probe failed: {metadata_error}"
+                    ),
+                )),
+                Ok(_) => unreachable!("handled above"),
+            };
+        }
+    };
+    if metadata.video_codec.as_deref() != Some("av1") {
+        return default_timing;
+    }
+
+    let mut retry_failures = Vec::new();
+    for decoder in AV1_FRAME_TIMING_DECODERS {
+        match scan_decoded_frame_timing(path, &cancelled, Some(decoder)) {
+            Ok(timing @ (FrameTiming::Constant | FrameTiming::Variable(_))) => return Ok(timing),
+            Ok(FrameTiming::Unknown) => retry_failures.push(format!("{decoder}: no usable timing")),
+            Err(WaveformError::Cancelled { .. }) => {
+                return Err(WaveformError::Cancelled {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(error) => retry_failures.push(format!("{decoder}: {error}")),
+        }
+    }
+    match default_timing {
+        Ok(FrameTiming::Unknown) => Ok(FrameTiming::Unknown),
+        Err(default_error) => Err(frame_timing_error(
+            path,
+            format!(
+                "default decoded-frame scan failed: {default_error}; AV1 decoder retries failed: {}",
+                retry_failures.join("; ")
+            ),
+        )),
+        Ok(_) => unreachable!("handled above"),
+    }
+}
+
+/// Runs one bounded decoded-frame FFprobe scan. When supplied, `decoder` is
+/// selected before the input so FFprobe decodes with that implementation.
+fn scan_decoded_frame_timing(
+    path: &Path,
+    cancelled: &AtomicBool,
+    decoder: Option<&str>,
+) -> Result<FrameTiming, WaveformError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(WaveformError::Cancelled {
+            path: path.to_path_buf(),
+        });
+    }
     let mut command = Command::new(media_tool(FFPROBE));
     hide_console_window(&mut command);
+    command.args(FRAME_TIMING_PROBE_ARGS);
+    if let Some(decoder) = decoder {
+        command.args(["-c:v", decoder]);
+    }
     let mut child = command
-        .args(FRAME_TIMING_PROBE_ARGS)
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -881,7 +955,7 @@ pub fn analyze_frame_timing_cancellable(
     let mut pending = Vec::new();
 
     let scan = 'scan: loop {
-        let chunk = match receive_chunk(&chunks, &mut child, &cancelled, path) {
+        let chunk = match receive_chunk(&chunks, &mut child, cancelled, path) {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break Ok(()),
             Err(WaveformError::Cancelled { .. }) => {
@@ -921,7 +995,7 @@ pub fn analyze_frame_timing_cancellable(
     if let Err(source) = stdout_result {
         return Err(frame_timing_error(path, source.to_string()));
     }
-    let status = wait_for_child(&mut child, &cancelled, path).map_err(|error| match error {
+    let status = wait_for_child(&mut child, cancelled, path).map_err(|error| match error {
         WaveformError::Cancelled { .. } => WaveformError::Cancelled {
             path: path.to_path_buf(),
         },
@@ -1603,6 +1677,7 @@ mod tests {
                 .any(|pair| pair == ["-show_entries", "frame=best_effort_timestamp_time"])
         );
         assert!(!FRAME_TIMING_PROBE_ARGS.contains(&"-show_packets"));
+        assert_eq!(AV1_FRAME_TIMING_DECODERS, ["av1_cuvid", "av1_qsv"]);
     }
 
     #[test]
@@ -1708,6 +1783,25 @@ mod tests {
             FrameTiming::Variable(FrameTimeIndex {
                 pts_microseconds: vec![
                     0, 41_666, 125_000, 166_666, 250_000, 333_333, 458_333, 500_000,
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn supplied_av1_vfr_fixture_publishes_local_decoded_presentation_timestamps() {
+        let Some(path) = std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let metadata = probe_media_metadata(&path).expect("probe supplied AV1 VFR fixture");
+        assert_eq!(metadata.video_codec.as_deref(), Some("av1"));
+        let timing = analyze_frame_timing(&path).expect("scan supplied AV1 VFR fixture");
+        assert_eq!(
+            timing,
+            FrameTiming::Variable(FrameTimeIndex {
+                pts_microseconds: vec![
+                    0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
                 ],
             })
         );
