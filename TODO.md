@@ -134,6 +134,12 @@ Last updated: 2026-09-01
   unique; start/end commits match; no tracked changes, invocation/report failures or leftover
   processes were observed. Headless Software decode/`h264_mf` evidence only; cross-hardware,
   live audio, GUI and scanout gates remain open. See `docs/phase0-scenarios.md`.
+- [x] Renew the full 600-second Phase 0 seven-scenario soak at current clean commit `ea234ea`.
+  The authoritative schema-2 wrapper passed 26 complete matrices (182 scenario executions,
+  962 declared work iterations) over 618.843 measured seconds. All 26 child report hashes are
+  unique; start/end commits match; no tracked changes or invocation/report-read failures occurred.
+  This renews headless Software decode/`h264_mf` evidence only; live audio, GUI, packaged playback,
+  physical scanout, and cross-hardware gates remain open. See `docs/phase0-scenarios.md`.
 - [x] Add a clean-commit Phase 0 timeline-foundation runner around the existing release gates.
   The retained schema-1 run at `6576d91` passed ten independent 50,000-clip history trials
   (press/release p95 0.2672/0.7453 ms), wide/detail/playhead CPU p95

@@ -100,12 +100,12 @@ separate nullable role fields. The report recorded `authoritative: true` with
 SHA-256 `bef925939b118aaf7d9c1339cbd6e0cfca1c084b0e7b57a46d24971f0ba1e5d6`.
 Integrated/discrete cross-hardware proof remains open.
 
-The current requalification embeds identical clean start/end source commit
-`773dd92fa053dcb64f720e34ed7a0e759e38c290`. It passed for 607.115 measured matrix seconds,
-excluding 1.186 seconds of setup, with 76 complete matrix runs, 532 scenario executions, and
-2,812 declared work iterations. All seven scenarios passed all 76 runs, every child report had a
+The 2026-09-01 requalification embeds identical clean start/end source commit
+`ea234ea57d5793eedb4e19d3cf0c4ff2764d169b`. It passed for 618.843 measured matrix seconds,
+excluding 1.231 seconds of setup, with 26 complete matrix runs, 182 scenario executions, and
+962 declared work iterations. All seven scenarios passed all 26 runs, every child report had a
 unique SHA-256, and no invocation or report-read failure occurred. The wrapper is authoritative;
-its SHA-256 is `E268A39906A88011C79285E8ACD7B26096FB40347D94A6F92D4D99477ED8F3E6`.
+its SHA-256 is `9FC73AB450535A5917AAF4A86EE307C01D0E258AAA576FDA042F6CC8E32DDFB1`.
 It observed only the headless Software decoder and `h264_mf` encoder in their explicit role fields;
 the listed Intel/NVIDIA adapters were machine inventory, not exercised rendering. Live audio,
 GUI-present, packaged playback, physical scanout, and cross-hardware soak evidence remain open.

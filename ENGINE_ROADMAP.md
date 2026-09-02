@@ -123,11 +123,11 @@ Build the evidence harness before adding engine complexity.
       nullable role fields. The retained report SHA-256 is
       `bef925939b118aaf7d9c1339cbd6e0cfca1c084b0e7b57a46d24971f0ba1e5d6`.
       The current clean-commit requalification at
-      `773dd92fa053dcb64f720e34ed7a0e759e38c290` passed 76 complete matrices over
-      607.115 measured seconds: 532 scenario executions, 2,812 declared work iterations,
-      76 unique child-report hashes, identical clean start/end commits, and no invocation or
+      `ea234ea57d5793eedb4e19d3cf0c4ff2764d169b` passed 26 complete matrices over
+      618.843 measured seconds: 182 scenario executions, 962 declared work iterations,
+      26 unique child-report hashes, identical clean start/end commits, and no invocation or
       report-read failures. The schema-2 wrapper SHA-256 is
-      `E268A39906A88011C79285E8ACD7B26096FB40347D94A6F92D4D99477ED8F3E6`.
+      `9FC73AB450535A5917AAF4A86EE307C01D0E258AAA576FDA042F6CC8E32DDFB1`.
       It renewed headless Software decode/`h264_mf` evidence only; adapter inventory is not
       rendering proof, and live-audio, GUI, packaged-playback, scanout, and cross-hardware gates
       remain open.
