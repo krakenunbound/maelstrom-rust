@@ -94,8 +94,39 @@ qualification claim by itself; the retained result is recorded below.
 
 ## Current authoritative runner checkpoint — 2026-09-01
 
-This checkpoint predates the AV1 extension below; a new clean-tree 12-test run
-is required before claiming AV1 authoritative coverage.
+The schema-1 runner passed from clean commit
+`49653179fe15cb64a783c47c7543e1844ff94d75`. It verified all 42 files in the
+project-built FFmpeg checksum inventory and passed all twelve backend/codec tests:
+D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync against H.264 High, HEVC
+Main 10, and AV1 Main. Every path passed 19 forward/reverse/repeated-final/fresh
+seeks at both 64x48 and 1920x1080, for 456 exact timestamp-and-pixel comparisons
+with no fallback. Before the Rust matrix, all four FFmpeg CLI paths decoded the
+AV1 fixture to the exact alternating frame MD5 sequence published by AOM.
+
+The AV1 fixture is a local-only, deterministic stream-copy derivative of the
+pinned two-frame AOM vector. Its ignored MKV is 516,187 bytes with SHA-256
+`6ADB3B081701F13ED7C5EFDC26F092E08D474AE2D9E7840B6C58A2B937A9EC9C` and
+retains eight packets at a five-second source origin with irregular gaps. The
+repository records provenance, input/output hashes, exact packet timing, and the
+preparation recipe without redistributing either AOM input or the derivative.
+
+Each QSV output size again recorded exactly seven named-decoder reopens. H.264
+measured 18.216 ms mean / 25.900 ms max at 64x48 and 23.915 ms mean / 35.231 ms
+max at 1920x1080. HEVC measured 19.981 ms mean / 27.566 ms max at 64x48 and
+26.472 ms mean / 30.726 ms max at 1920x1080. AV1 measured 17.468 ms mean /
+28.736 ms max at 64x48 and 16.470 ms mean / 24.259 ms max at 1920x1080. These
+host-specific synchronous decoder-recreation spans are diagnostic evidence, not
+GPU execution, end-to-end scrub latency, or a universal no-lag threshold.
+
+The retained local report is 12,612 bytes with SHA-256
+`61F70C226FC992B4770F66E77331F6F4728CCF5BC7D79622E3307ADFC2AB6658`; its
+8,761-byte log SHA-256 is
+`CF271A1059DC7336BADDC2603C4E28CDE7480DFFF28FF3975D93EFAA7FDCFEEC`.
+Optional inventory listed NVIDIA GeForce RTX 3090 and Intel UHD Graphics 770,
+but remains inventory rather than physical-adapter attribution. No editor, GUI
+surface, export path, or physical scanout was exercised.
+
+## Prior authoritative runner checkpoint — 2026-09-01
 
 The expanded schema-1 runner passed from clean commit
 `e7cbf0ce42a5e4f2f624d00efc76f7b5fc9c2bca`. It verified all 42 files in the
@@ -127,7 +158,7 @@ Optional inventory listed NVIDIA GeForce RTX 3090 and Intel UHD Graphics 770,
 but remains inventory rather than physical-adapter attribution. No editor, GUI
 surface, export path, or physical scanout was exercised.
 
-## Prior authoritative runner checkpoint — 2026-08-31
+## Earlier authoritative runner checkpoint — 2026-08-31
 
 The schema-1 runner passed from clean commit
 `a84838e4a708babcd9346b7ac969aab42969f866`. It verified all 42 files in the
@@ -185,10 +216,11 @@ seven-second origin; their hashes are:
 
 ## Verification boundary
 
-The current release workspace passes 861 tests, with 32 opt-in tests ignored. The then-eight
+The current release workspace passes 861 tests, with 36 opt-in tests ignored. The twelve
 hardware tests were run separately through the bounded qualification harness, not inferred
 from ignored results. Strict all-target workspace Clippy and formatting pass.
-All seven deterministic fixture contracts and all seven Phase 0 scenarios pass.
+All seven primary deterministic fixture contracts, the separate local AV1 derivative contract,
+and all seven Phase 0 scenarios pass.
 The missing-required-input negative control fails as intended rather than
 reporting an empty hardware test as successful.
 The independent four-source Full-1080p app gate passes with 161 microseconds
