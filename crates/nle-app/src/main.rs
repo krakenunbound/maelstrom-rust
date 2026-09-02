@@ -1598,9 +1598,14 @@ fn contributing_video_layers_by_priority(
 /// Selects one complete lower-priority physical source group for eviction. Multiple logical
 /// layers may share one coordinator actor, so returning only one layer would not release the
 /// group's hard permit. A group needed by any equal/higher-priority contributor is protected.
+///
+/// Completed groups are preferred: their sessions are no longer serving an in-flight request,
+/// and every member is live rather than already deferred. If no such idle group can release a
+/// permit, retain the established active lower-priority takeover fallback.
 fn lower_priority_monitor_eviction_group(
     sources: &[Option<PreviewSourceRequest>; MONITOR_LAYER_COUNT],
     identities: &[Option<MonitorSourceIdentity>; MONITOR_LAYER_COUNT],
+    in_flight: &[bool; MONITOR_LAYER_COUNT],
     deferred: &[bool; MONITOR_LAYER_COUNT],
     latest_request_ids: &[u64; MONITOR_LAYER_COUNT],
     requester_layer: usize,
@@ -1609,47 +1614,55 @@ fn lower_priority_monitor_eviction_group(
     let Some(requester) = sources[requester_layer] else {
         return [false; MONITOR_LAYER_COUNT];
     };
-    let mut selected_layer = None;
-    let mut selected_rank = (u8::MAX, u64::MAX, usize::MAX);
+    let select_group = |completed_only: bool| {
+        let mut selected_layer = None;
+        let mut selected_rank = (u8::MAX, u64::MAX, usize::MAX);
 
-    for candidate_layer in 0..MONITOR_LAYER_COUNT {
-        let Some(candidate_identity) = identities[candidate_layer].as_ref() else {
-            continue;
-        };
-        if candidate_identity == requester_identity {
-            continue;
-        }
-        if identities[..candidate_layer]
-            .iter()
-            .any(|identity| identity.as_ref() == Some(candidate_identity))
-        {
-            continue;
-        }
-
-        let mut has_live_member = false;
-        let mut group_priority = 0;
-        let mut group_recency = 0;
-        let mut group_top_layer = 0;
-        for layer in 0..MONITOR_LAYER_COUNT {
-            if identities[layer].as_ref() != Some(candidate_identity) {
+        for candidate_layer in 0..MONITOR_LAYER_COUNT {
+            let Some(candidate_identity) = identities[candidate_layer].as_ref() else {
+                continue;
+            };
+            if candidate_identity == requester_identity
+                || identities[..candidate_layer]
+                    .iter()
+                    .any(|identity| identity.as_ref() == Some(candidate_identity))
+            {
                 continue;
             }
-            has_live_member |= !deferred[layer];
-            group_recency = group_recency.max(latest_request_ids[layer]);
-            if let Some(source) = sources[layer] {
-                group_priority = group_priority.max(source.priority);
-                group_top_layer = group_top_layer.max(layer);
+
+            let mut has_live_member = false;
+            let mut all_members_completed = true;
+            let mut group_priority = 0;
+            let mut group_recency = 0;
+            let mut group_top_layer = 0;
+            for layer in 0..MONITOR_LAYER_COUNT {
+                if identities[layer].as_ref() != Some(candidate_identity) {
+                    continue;
+                }
+                has_live_member |= !deferred[layer];
+                all_members_completed &= !in_flight[layer] && !deferred[layer];
+                group_recency = group_recency.max(latest_request_ids[layer]);
+                if let Some(source) = sources[layer] {
+                    group_priority = group_priority.max(source.priority);
+                    group_top_layer = group_top_layer.max(layer);
+                }
+            }
+            if !has_live_member
+                || (completed_only && !all_members_completed)
+                || group_priority >= requester.priority
+            {
+                continue;
+            }
+            let rank = (group_priority, group_recency, group_top_layer);
+            if selected_layer.is_none() || rank < selected_rank {
+                selected_layer = Some(candidate_layer);
+                selected_rank = rank;
             }
         }
-        if !has_live_member || group_priority >= requester.priority {
-            continue;
-        }
-        let rank = (group_priority, group_recency, group_top_layer);
-        if selected_layer.is_none() || rank < selected_rank {
-            selected_layer = Some(candidate_layer);
-            selected_rank = rank;
-        }
-    }
+        selected_layer
+    };
+
+    let selected_layer = select_group(true).or_else(|| select_group(false));
 
     let mut selected = [false; MONITOR_LAYER_COUNT];
     let Some(selected_identity) = selected_layer.and_then(|layer| identities[layer].as_ref())
@@ -7566,6 +7579,7 @@ impl App {
         let selected = lower_priority_monitor_eviction_group(
             &preview.sources,
             &self.monitor_source_identities,
+            &self.monitor_requests_in_flight,
             &self.monitor_request_deferred,
             &self.monitor_latest_request_ids,
             requester_layer,
@@ -12316,6 +12330,7 @@ mod tests {
         let selected = lower_priority_monitor_eviction_group(
             &sources,
             &identities,
+            &[false; MONITOR_LAYER_COUNT],
             &[true, false, false, true],
             &[4, 5, 0, 10],
             3,
@@ -12354,6 +12369,7 @@ mod tests {
         let selected = lower_priority_monitor_eviction_group(
             &sources,
             &identities,
+            &[false; MONITOR_LAYER_COUNT],
             &[false, false, false, true],
             &[4, 0, 5, 10],
             3,
@@ -12397,6 +12413,7 @@ mod tests {
         let selected = lower_priority_monitor_eviction_group(
             &sources,
             &identities,
+            &[false; MONITOR_LAYER_COUNT],
             &[false, false, false, true],
             &[20, 40, 0, 50],
             3,
@@ -12404,6 +12421,89 @@ mod tests {
         );
 
         assert_eq!(selected, [true, false, false, false]);
+    }
+
+    #[test]
+    fn eviction_selection_prefers_a_completed_group_over_an_older_active_group() {
+        let mut active = preview_source(0, 1);
+        active.priority = 1;
+        let mut completed = preview_source(1, 2);
+        completed.priority = 4;
+        let mut requester = preview_source(3, 3);
+        requester.priority = 9;
+        let sources = preview_sources([active, completed, requester]);
+        let active_identity = MonitorSourceIdentity {
+            media_id: 1,
+            path: PathBuf::from("active.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let completed_identity = MonitorSourceIdentity {
+            media_id: 2,
+            path: PathBuf::from("completed.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let requester_identity = MonitorSourceIdentity {
+            media_id: 3,
+            path: PathBuf::from("requester.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let identities = [
+            Some(active_identity),
+            Some(completed_identity),
+            None,
+            Some(requester_identity.clone()),
+        ];
+
+        let selected = lower_priority_monitor_eviction_group(
+            &sources,
+            &identities,
+            &[true, false, false, true],
+            &[false, false, false, true],
+            &[10, 30, 0, 40],
+            3,
+            &requester_identity,
+        );
+
+        assert_eq!(selected, [false, true, false, false]);
+    }
+
+    #[test]
+    fn eviction_selection_falls_back_to_an_active_shared_group_when_no_group_is_completed() {
+        let mut lower = preview_source(0, 1);
+        lower.priority = 3;
+        let mut shared_lower = preview_source(1, 1);
+        shared_lower.priority = 4;
+        let mut requester = preview_source(3, 2);
+        requester.priority = 9;
+        let sources = preview_sources([lower, shared_lower, requester]);
+        let shared_identity = MonitorSourceIdentity {
+            media_id: 1,
+            path: PathBuf::from("active-shared.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let requester_identity = MonitorSourceIdentity {
+            media_id: 2,
+            path: PathBuf::from("requester.mp4"),
+            acceleration: nle_decode::AccelerationPreference::Software,
+        };
+        let identities = [
+            Some(shared_identity.clone()),
+            Some(shared_identity),
+            None,
+            Some(requester_identity.clone()),
+        ];
+
+        let selected = lower_priority_monitor_eviction_group(
+            &sources,
+            &identities,
+            &[true, true, false, true],
+            &[false, false, false, true],
+            &[4, 5, 0, 10],
+            3,
+            &requester_identity,
+        );
+
+        assert_eq!(selected, [true, true, false, false]);
     }
 
     #[test]
@@ -19591,7 +19691,7 @@ mod tests {
         ));
         scenarios.push(phase0_run_scenario(
             "multi_source_pressure_and_idle_retirement",
-            12,
+            16,
             Some(Phase0BackendRole::Decoder),
             || {
                 const SOURCE_COUNT: usize = 12;
@@ -19738,6 +19838,174 @@ mod tests {
                         }
                         drop(decoders);
                     }
+                    // Exercise the production capacity-pressure choice with a fresh two-source
+                    // coordinator: completed source 1 is the oldest idle resident, source 2 is
+                    // newer, and source 3 must retain its exact coordinator-deferred request.
+                    const IDLE_LRU_SOURCE_CAP: usize = 2;
+                    let idle_lru_cache_pool = nle_decode::MonitorFrameCachePool::new(CACHE_CAP_BYTES);
+                    let idle_lru_session_pool = nle_decode::MonitorSessionPool::new(
+                        IDLE_LRU_SOURCE_CAP,
+                        0,
+                    );
+                    let idle_lru_source_coordinator = nle_decode::MonitorSourceCoordinator::new(
+                        IDLE_LRU_SOURCE_CAP,
+                        idle_lru_session_pool.clone(),
+                    );
+                    let idle_lru_decoders: [nle_decode::MonitorDecoder; 3] =
+                        std::array::from_fn(|_| {
+                            nle_decode::MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
+                                || {},
+                                idle_lru_cache_pool.clone(),
+                                idle_lru_source_coordinator.clone(),
+                            )
+                        });
+                    let idle_lru_request = |source_index: usize, request_id: u64| {
+                        nle_decode::DecodeRequest {
+                            project_epoch: 2,
+                            cache_epoch: 1,
+                            request_id,
+                            media_id: (source_index + 1) as u32,
+                            path: copies[source_index].clone(),
+                            source_tick: 300_000,
+                            width: FRAME_WIDTH,
+                            height: FRAME_HEIGHT,
+                            is_scrubbing: false,
+                            prewarm_scrub_workers: false,
+                            scaling_quality: nle_decode::ScalingQuality::Bilinear,
+                            progressive_scrub_frames: false,
+                            source_frame_duration_tick: Some(33_367),
+                            acceleration: nle_decode::AccelerationPreference::Software,
+                        }
+                    };
+                    for (source_index, decoder) in
+                        idle_lru_decoders.iter().enumerate().take(2)
+                    {
+                        let request_id = (source_index + 1) as u64;
+                        decoder
+                            .request(idle_lru_request(source_index, request_id))
+                            .map_err(|error| error.to_string())?;
+                        match phase0_wait_for_monitor_event(decoder, request_id)? {
+                            nle_decode::DecodeEvent::Frame(frame)
+                                if frame.request_id == request_id
+                                    && frame.media_id == (source_index + 1) as u32 => {}
+                            nle_decode::DecodeEvent::Frame(frame) => {
+                                return Err(format!(
+                                    "idle-LRU resident source {source_index} returned request/media {}/{}",
+                                    frame.request_id, frame.media_id,
+                                ));
+                            }
+                            nle_decode::DecodeEvent::Error(error) => {
+                                return Err(format!(
+                                    "idle-LRU resident source {source_index} failed: {}",
+                                    error.message,
+                                ));
+                            }
+                        }
+                    }
+                    let third_request_id = 3;
+                    match idle_lru_decoders[2].request(idle_lru_request(2, third_request_id)) {
+                        Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {}
+                        Ok(()) => {
+                            return Err("idle-LRU third source bypassed the two-source capacity deferral".to_owned());
+                        }
+                        Err(error) => return Err(format!("idle-LRU third source failed unexpectedly: {error}")),
+                    }
+                    let mut older = preview_source(0, 1);
+                    older.priority = 3;
+                    let mut newer = preview_source(1, 2);
+                    newer.priority = 3;
+                    let mut requester = preview_source(2, 3);
+                    requester.priority = 9;
+                    let selection_sources = preview_sources([older, newer, requester]);
+                    let selection_identities = std::array::from_fn(|layer| match layer {
+                        0..=2 => Some(MonitorSourceIdentity {
+                            media_id: (layer + 1) as u32,
+                            path: copies[layer].clone(),
+                            acceleration: nle_decode::AccelerationPreference::Software,
+                        }),
+                        _ => None,
+                    });
+                    let selected = lower_priority_monitor_eviction_group(
+                        &selection_sources,
+                        &selection_identities,
+                        &[false, false, true, false],
+                        &[false, false, true, false],
+                        &[1, 2, third_request_id, 0],
+                        2,
+                        selection_identities[2].as_ref().expect("idle-LRU requester identity"),
+                    );
+                    if selected != [true, false, false, false] {
+                        return Err(format!(
+                            "idle-LRU selection did not choose the oldest completed group: {selected:?}"
+                        ));
+                    }
+                    if !idle_lru_decoders[0]
+                        .defer_live_sessions()
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Err("idle-LRU selected decoder did not yield its live session".to_owned());
+                    }
+                    let retry_deadline = Instant::now() + Duration::from_secs(8);
+                    loop {
+                        match idle_lru_decoders[2].retry_deferred_requests() {
+                            Ok(()) => break,
+                            Err(nle_decode::DecoderClosed::SourceCapacityDeferred)
+                                if Instant::now() < retry_deadline =>
+                            {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(nle_decode::DecoderClosed::SourceCapacityDeferred) => {
+                                return Err("idle-LRU retry did not regain capacity before deadline".to_owned());
+                            }
+                            Err(error) => return Err(format!("idle-LRU retry failed: {error}")),
+                        }
+                    }
+                    match phase0_wait_for_monitor_event(&idle_lru_decoders[2], third_request_id)? {
+                        nle_decode::DecodeEvent::Frame(frame)
+                            if frame.request_id == third_request_id && frame.media_id == 3 => {}
+                        nle_decode::DecodeEvent::Frame(frame) => {
+                            return Err(format!(
+                                "idle-LRU retry changed deferred request identity to request/media {}/{}",
+                                frame.request_id, frame.media_id,
+                            ));
+                        }
+                        nle_decode::DecodeEvent::Error(error) => {
+                            return Err(format!("idle-LRU retry failed to decode: {}", error.message));
+                        }
+                    }
+                    let idle_lru_sessions = idle_lru_session_pool.diagnostics();
+                    let idle_lru_sources = idle_lru_source_coordinator.diagnostics();
+                    if idle_lru_sessions.active_sticky_sessions != IDLE_LRU_SOURCE_CAP
+                        || idle_lru_sources.live_source_groups != IDLE_LRU_SOURCE_CAP
+                        || idle_lru_sources.live_lane_actors != IDLE_LRU_SOURCE_CAP
+                        || idle_lru_sources.retiring_lane_actors != 0
+                    {
+                        return Err(format!(
+                            "idle-LRU newer resident source was not retained with the retried source: sessions={idle_lru_sessions:?} sources={idle_lru_sources:?}"
+                        ));
+                    }
+                    for decoder in &idle_lru_decoders {
+                        decoder.release_live_sessions().map_err(|error| error.to_string())?;
+                    }
+                    let idle_lru_release_deadline = Instant::now() + Duration::from_secs(5);
+                    let (idle_lru_final_sessions, idle_lru_final_sources) = loop {
+                        let sessions = idle_lru_session_pool.diagnostics();
+                        let sources = idle_lru_source_coordinator.diagnostics();
+                        if sessions.active_sticky_sessions == 0
+                            && sources.live_source_groups == 0
+                            && sources.live_lane_actors == 0
+                            && sources.retiring_lane_actors == 0
+                        {
+                            break (sessions, sources);
+                        }
+                        if Instant::now() >= idle_lru_release_deadline {
+                            return Err(format!(
+                                "idle-LRU final ownership did not reach zero: sessions={sessions:?} sources={sources:?}"
+                            ));
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    };
+                    drop(idle_lru_decoders);
                     let cache = cache_pool.diagnostics();
                     let sessions = session_pool.diagnostics();
                     let sources = source_coordinator.diagnostics();
@@ -19761,7 +20029,7 @@ mod tests {
                     Ok((
                         observed_backend,
                         format!(
-                            "source_count={SOURCE_COUNT} batch_count={BATCH_COUNT} lanes_per_batch={LANES_PER_BATCH} frame_bytes={FRAME_BYTES} cache_current_bytes={} cache_peak_bytes={} cache_cap_bytes={} cache_eviction_count={} peak_sessions={peak_sessions} session_cap={} peak_source_groups={peak_groups} source_group_cap={} peak_lane_actors={peak_actors} lane_actor_cap={} idle_release_cycles={idle_release_cycles} final_sessions={} final_source_groups={} final_live_lane_actors={} final_retiring_lane_actors={}",
+                            "source_count={SOURCE_COUNT} batch_count={BATCH_COUNT} lanes_per_batch={LANES_PER_BATCH} frame_bytes={FRAME_BYTES} cache_current_bytes={} cache_peak_bytes={} cache_cap_bytes={} cache_eviction_count={} peak_sessions={peak_sessions} session_cap={} peak_source_groups={peak_groups} source_group_cap={} peak_lane_actors={peak_actors} lane_actor_cap={} idle_release_cycles={idle_release_cycles} idle_lru_reclaims=1 retry_identity_preserved=true newer_resident_owned=true idle_lru_final_ownership=sessions:{} groups:{} live_actors:{} retiring_actors:{} final_sessions={} final_source_groups={} final_live_lane_actors={} final_retiring_lane_actors={}",
                             cache.current_bytes,
                             cache.peak_bytes,
                             cache.capacity_bytes,
@@ -19769,6 +20037,10 @@ mod tests {
                             sessions.session_cap,
                             sources.source_group_cap,
                             sources.lane_actor_cap,
+                            idle_lru_final_sessions.active_sticky_sessions,
+                            idle_lru_final_sources.live_source_groups,
+                            idle_lru_final_sources.live_lane_actors,
+                            idle_lru_final_sources.retiring_lane_actors,
                             sessions.active_sticky_sessions,
                             sources.live_source_groups,
                             sources.live_lane_actors,
