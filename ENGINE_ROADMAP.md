@@ -899,6 +899,15 @@ Extend the data model without putting recursive work on the timeline draw path.
 - [ ] Add constant speed, reverse, freeze frame, and variable speed ramps.
 - [ ] Define deterministic timeline-to-source mapping for ramps and nested sequences.
 - [ ] Add optical-flow/frame-blend hooks while retaining nearest-frame fallback.
+      Hardware optical flow must be capability-gated from the actual processing device, driver,
+      Vulkan extension/features/queues/formats/dimensions, bundled FFmpeg filter inventory, and a
+      bounded session-initialization probe; GPU model-name matching alone is not sufficient.
+      Probe off the UI thread, allow a compatible processing GPU to differ from the display GPU,
+      and re-evaluate after runtime changes, device loss, or driver reset.
+- [ ] Keep hardware interpolation visible but disabled with a specific reason when it is unusable.
+      Availability selection is automatic; applying interpolation remains an explicit user choice.
+      Preserve unavailable saved settings, require an explicit export fallback, and never silently
+      trade playback resolution or sampling quality for interpolation performance.
 - [ ] Add pitch policy for audio retiming: varispeed first, stretch modes later.
 - [ ] Preserve linked A/V semantics, fades, transitions, markers, and source trims through retiming.
 
@@ -908,6 +917,8 @@ Exit gate:
 - [ ] Zoom, pan, scrub, move, trim, and razor remain inside foundation budgets regardless of nested
       content complexity.
 - [ ] Preview/export use the same time mapping for forward, reverse, freeze, and ramp segments.
+- [ ] Supported, unsupported, and mixed-GPU systems; missing filters; initialization failure; device
+      loss; and preview/export interpolation parity are covered before hardware optical flow ships.
 - [ ] Undo/redo remains bounded and does not snapshot entire projects.
 
 ### Phase 7 — Export/render parity
