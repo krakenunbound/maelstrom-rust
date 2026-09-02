@@ -173,6 +173,10 @@ pub enum VideoTransitionKind {
     SlideFromRight,
     SlideFromTop,
     SlideFromBottom,
+    PushFromLeft,
+    PushFromRight,
+    PushFromTop,
+    PushFromBottom,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -9590,8 +9594,17 @@ mod tests {
             VideoTransitionKind::SlideFromRight,
             VideoTransitionKind::SlideFromTop,
             VideoTransitionKind::SlideFromBottom,
+            VideoTransitionKind::PushFromLeft,
+            VideoTransitionKind::PushFromRight,
+            VideoTransitionKind::PushFromTop,
+            VideoTransitionKind::PushFromBottom,
         ];
         for kind in kinds {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            assert_eq!(
+                serde_json::from_str::<VideoTransitionKind>(&serialized).unwrap(),
+                kind
+            );
             let (mut timeline, track, left, right) = adjacent_transition_timeline();
             let id = timeline
                 .add_video_transition_of_kind(track, left, right, Tick(20), 0.25, kind)

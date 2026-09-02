@@ -61,7 +61,7 @@ const DEFAULT_TIMELINE_HEIGHT_FRACTION: f32 = 0.38;
 const DEFAULT_MEDIA_POOL_WIDTH: f32 = 420.0;
 const DEFAULT_RIGHT_SIDEBAR_WIDTH: f32 = 450.0;
 const EDITOR_OUTER_INSET: i8 = 6;
-const VIDEO_TRANSITION_KINDS: [VideoTransitionKind; 12] = [
+const VIDEO_TRANSITION_KINDS: [VideoTransitionKind; 16] = [
     VideoTransitionKind::CrossDissolve,
     VideoTransitionKind::FilmDissolve,
     VideoTransitionKind::DipToBlack,
@@ -74,6 +74,128 @@ const VIDEO_TRANSITION_KINDS: [VideoTransitionKind; 12] = [
     VideoTransitionKind::SlideFromRight,
     VideoTransitionKind::SlideFromTop,
     VideoTransitionKind::SlideFromBottom,
+    VideoTransitionKind::PushFromLeft,
+    VideoTransitionKind::PushFromRight,
+    VideoTransitionKind::PushFromTop,
+    VideoTransitionKind::PushFromBottom,
+];
+type VideoTransitionCatalogItem = (VideoTransitionKind, &'static str, &'static str);
+type VideoTransitionCatalogFamily = (
+    &'static str,
+    &'static str,
+    &'static [VideoTransitionCatalogItem],
+);
+const VIDEO_TRANSITION_CATALOG_FAMILIES: [VideoTransitionCatalogFamily; 5] = [
+    (
+        "Dissolve",
+        "ディゾルブ",
+        &[
+            (
+                VideoTransitionKind::CrossDissolve,
+                "Blend both clips across the cut.",
+                "カットの両側のクリップをブレンドします。",
+            ),
+            (
+                VideoTransitionKind::FilmDissolve,
+                "A softly eased, film-style dissolve.",
+                "やわらかく変化するフィルム風ディゾルブです。",
+            ),
+        ],
+    ),
+    (
+        "Fade",
+        "フェード",
+        &[
+            (
+                VideoTransitionKind::DipToBlack,
+                "Fade out to black, then fade in.",
+                "黒へフェードアウトしてからフェードインします。",
+            ),
+            (
+                VideoTransitionKind::DipToWhite,
+                "Fade out to white, then fade in.",
+                "白へフェードアウトしてからフェードインします。",
+            ),
+        ],
+    ),
+    (
+        "Wipe",
+        "ワイプ",
+        &[
+            (
+                VideoTransitionKind::WipeLeft,
+                "Reveal the incoming clip from the left edge.",
+                "左端から次のクリップを表示します。",
+            ),
+            (
+                VideoTransitionKind::WipeRight,
+                "Reveal the incoming clip from the right edge.",
+                "右端から次のクリップを表示します。",
+            ),
+            (
+                VideoTransitionKind::WipeUp,
+                "Reveal the incoming clip from the top edge.",
+                "上端から次のクリップを表示します。",
+            ),
+            (
+                VideoTransitionKind::WipeDown,
+                "Reveal the incoming clip from the bottom edge.",
+                "下端から次のクリップを表示します。",
+            ),
+        ],
+    ),
+    (
+        "Slide",
+        "スライド",
+        &[
+            (
+                VideoTransitionKind::SlideFromLeft,
+                "Slide the incoming clip in from the left.",
+                "次のクリップを左からスライドインします。",
+            ),
+            (
+                VideoTransitionKind::SlideFromRight,
+                "Slide the incoming clip in from the right.",
+                "次のクリップを右からスライドインします。",
+            ),
+            (
+                VideoTransitionKind::SlideFromTop,
+                "Slide the incoming clip in from the top.",
+                "次のクリップを上からスライドインします。",
+            ),
+            (
+                VideoTransitionKind::SlideFromBottom,
+                "Slide the incoming clip in from the bottom.",
+                "次のクリップを下からスライドインします。",
+            ),
+        ],
+    ),
+    (
+        "Push",
+        "プッシュ",
+        &[
+            (
+                VideoTransitionKind::PushFromLeft,
+                "Push the outgoing clip right as the incoming clip enters from the left.",
+                "次のクリップが左から入り、前のクリップを右へ押し出します。",
+            ),
+            (
+                VideoTransitionKind::PushFromRight,
+                "Push the outgoing clip left as the incoming clip enters from the right.",
+                "次のクリップが右から入り、前のクリップを左へ押し出します。",
+            ),
+            (
+                VideoTransitionKind::PushFromTop,
+                "Push the outgoing clip down as the incoming clip enters from the top.",
+                "次のクリップが上から入り、前のクリップを下へ押し出します。",
+            ),
+            (
+                VideoTransitionKind::PushFromBottom,
+                "Push the outgoing clip up as the incoming clip enters from the bottom.",
+                "次のクリップが下から入り、前のクリップを上へ押し出します。",
+            ),
+        ],
+    ),
 ];
 /// Title, tools, navigator, zoom, status, and a useful minimum track viewport.
 const MIN_COMPLETE_TIMELINE_PANEL_HEIGHT: f32 = 336.0;
@@ -3308,6 +3430,33 @@ impl EditorState {
                         return [outgoing, incoming];
                     }
                 }
+                VideoTransitionKind::PushFromLeft
+                | VideoTransitionKind::PushFromRight
+                | VideoTransitionKind::PushFromTop
+                | VideoTransitionKind::PushFromBottom => {
+                    let progress =
+                        shaped_transition_progress(transition.duration, transition.curve, progress);
+                    let (incoming_offset, outgoing_offset) =
+                        push_transition_offsets(transition.kind, progress);
+                    let outgoing = self
+                        .timeline
+                        .clip(transition.left_clip)
+                        .and_then(|clip| self.playback_target_for_clip(clip, 1.0, 0.0, 0.0))
+                        .map(|mut target| {
+                            target.transition_offset = outgoing_offset;
+                            target
+                        });
+                    let incoming = self.timeline.clip(transition.right_clip).and_then(|clip| {
+                        self.playback_target_for_clip(clip, 1.0, 0.0, 0.0)
+                            .map(|mut target| {
+                                target.transition_offset = incoming_offset;
+                                target
+                            })
+                    });
+                    if outgoing.is_some() || incoming.is_some() {
+                        return [outgoing, incoming];
+                    }
+                }
             }
         }
 
@@ -4232,7 +4381,11 @@ impl EditorState {
             | VideoTransitionKind::SlideFromLeft
             | VideoTransitionKind::SlideFromRight
             | VideoTransitionKind::SlideFromTop
-            | VideoTransitionKind::SlideFromBottom => self
+            | VideoTransitionKind::SlideFromBottom
+            | VideoTransitionKind::PushFromLeft
+            | VideoTransitionKind::PushFromRight
+            | VideoTransitionKind::PushFromTop
+            | VideoTransitionKind::PushFromBottom => self
                 .transition_handle_capacity(left_clip, right_clip)?
                 .0
                 .min(shared_clip_capacity),
@@ -9515,7 +9668,8 @@ fn transition_catalog_item(
     ui: &mut Ui,
     state: &mut EditorState,
     kind: VideoTransitionKind,
-    description: &'static str,
+    english_description: &'static str,
+    japanese_description: &'static str,
 ) {
     let label = video_transition_kind_label(state.language, kind);
     let response = ui
@@ -9527,7 +9681,7 @@ fn transition_catalog_item(
             )
             .sense(Sense::click_and_drag()),
         )
-        .on_hover_text(description)
+        .on_hover_text(t(state.language, english_description, japanese_description))
         .on_hover_cursor(egui::CursorIcon::Grab);
     response.dnd_set_drag_payload(TransitionDragPayload { kind });
     if response.drag_started() || response.dragged() || response.is_pointer_button_down_on() {
@@ -9597,26 +9751,9 @@ fn transition_details(ui: &mut Ui, state: &mut EditorState) {
                     "隣接するビデオクリップ間のカットにドロップします。右クリックで選択クリップに適用できます。",
                 ));
                 ui.add_space(4.0);
-                transition_catalog_family(ui, state, "Dissolve", "ディゾルブ", &[
-                    (VideoTransitionKind::CrossDissolve, "Blend both clips across the cut."),
-                    (VideoTransitionKind::FilmDissolve, "A softly eased, film-style dissolve."),
-                ]);
-                transition_catalog_family(ui, state, "Fade", "フェード", &[
-                    (VideoTransitionKind::DipToBlack, "Fade out to black, then fade in."),
-                    (VideoTransitionKind::DipToWhite, "Fade out to white, then fade in."),
-                ]);
-                transition_catalog_family(ui, state, "Wipe", "ワイプ", &[
-                    (VideoTransitionKind::WipeLeft, "Reveal the incoming clip from the left edge."),
-                    (VideoTransitionKind::WipeRight, "Reveal the incoming clip from the right edge."),
-                    (VideoTransitionKind::WipeUp, "Reveal the incoming clip from the top edge."),
-                    (VideoTransitionKind::WipeDown, "Reveal the incoming clip from the bottom edge."),
-                ]);
-                transition_catalog_family(ui, state, "Slide", "スライド", &[
-                    (VideoTransitionKind::SlideFromLeft, "Slide the incoming clip in from the left."),
-                    (VideoTransitionKind::SlideFromRight, "Slide the incoming clip in from the right."),
-                    (VideoTransitionKind::SlideFromTop, "Slide the incoming clip in from the top."),
-                    (VideoTransitionKind::SlideFromBottom, "Slide the incoming clip in from the bottom."),
-                ]);
+                for &(english, japanese, items) in &VIDEO_TRANSITION_CATALOG_FAMILIES {
+                    transition_catalog_family(ui, state, english, japanese, items);
+                }
             });
     });
     ui.separator();
@@ -9663,6 +9800,21 @@ fn video_transition_kind_label(language: Language, kind: VideoTransitionKind) ->
         VideoTransitionKind::SlideFromRight => t(language, "Slide From Right", "右からスライド"),
         VideoTransitionKind::SlideFromTop => t(language, "Slide From Top", "上からスライド"),
         VideoTransitionKind::SlideFromBottom => t(language, "Slide From Bottom", "下からスライド"),
+        VideoTransitionKind::PushFromLeft => t(language, "Push From Left", "左からプッシュ"),
+        VideoTransitionKind::PushFromRight => t(language, "Push From Right", "右からプッシュ"),
+        VideoTransitionKind::PushFromTop => t(language, "Push From Top", "上からプッシュ"),
+        VideoTransitionKind::PushFromBottom => t(language, "Push From Bottom", "下からプッシュ"),
+    }
+}
+
+fn push_transition_offsets(kind: VideoTransitionKind, progress: f32) -> ((f32, f32), (f32, f32)) {
+    let progress = progress.clamp(0.0, 1.0);
+    match kind {
+        VideoTransitionKind::PushFromLeft => ((progress - 1.0, 0.0), (progress, 0.0)),
+        VideoTransitionKind::PushFromRight => ((1.0 - progress, 0.0), (-progress, 0.0)),
+        VideoTransitionKind::PushFromTop => ((0.0, progress - 1.0), (0.0, progress)),
+        VideoTransitionKind::PushFromBottom => ((0.0, 1.0 - progress), (0.0, -progress)),
+        _ => unreachable!("push offsets require a Push transition kind"),
     }
 }
 
@@ -9675,13 +9827,13 @@ fn transition_catalog_family(
     state: &mut EditorState,
     english: &'static str,
     japanese: &'static str,
-    items: &[(VideoTransitionKind, &'static str)],
+    items: &[VideoTransitionCatalogItem],
 ) {
     egui::CollapsingHeader::new(t(state.language, english, japanese))
         .default_open(matches!(english, "Dissolve" | "Fade"))
         .show(ui, |ui| {
-            for &(kind, description) in items {
-                transition_catalog_item(ui, state, kind, description);
+            for &(kind, english_description, japanese_description) in items {
+                transition_catalog_item(ui, state, kind, english_description, japanese_description);
             }
         });
 }
@@ -9709,6 +9861,13 @@ fn transition_timeline_colors(kind: VideoTransitionKind, selected: bool) -> (Col
         | VideoTransitionKind::SlideFromBottom => (
             Color32::from_rgba_unmultiplied(91, 60, 137, 188),
             Color32::from_rgb(206, 175, 248),
+        ),
+        VideoTransitionKind::PushFromLeft
+        | VideoTransitionKind::PushFromRight
+        | VideoTransitionKind::PushFromTop
+        | VideoTransitionKind::PushFromBottom => (
+            Color32::from_rgba_unmultiplied(142, 77, 35, 192),
+            Color32::from_rgb(255, 202, 132),
         ),
     };
     if selected {
@@ -12659,6 +12818,45 @@ fn timeline_with_canvas_presentation(
                             StrokeKind::Inside,
                         );
                     }
+                    VideoTransitionKind::PushFromLeft
+                    | VideoTransitionKind::PushFromRight
+                    | VideoTransitionKind::PushFromTop
+                    | VideoTransitionKind::PushFromBottom => {
+                        let center = transition_rect.center();
+                        let inset = 4.0;
+                        let wing = 3.0;
+                        let (tail, tip, wing_a, wing_b) = match transition.kind {
+                            VideoTransitionKind::PushFromLeft => (
+                                Pos2::new(transition_rect.left() + inset, center.y),
+                                Pos2::new(transition_rect.right() - inset, center.y),
+                                Pos2::new(transition_rect.right() - inset - wing, center.y - wing),
+                                Pos2::new(transition_rect.right() - inset - wing, center.y + wing),
+                            ),
+                            VideoTransitionKind::PushFromRight => (
+                                Pos2::new(transition_rect.right() - inset, center.y),
+                                Pos2::new(transition_rect.left() + inset, center.y),
+                                Pos2::new(transition_rect.left() + inset + wing, center.y - wing),
+                                Pos2::new(transition_rect.left() + inset + wing, center.y + wing),
+                            ),
+                            VideoTransitionKind::PushFromTop => (
+                                Pos2::new(center.x, transition_rect.top() + inset),
+                                Pos2::new(center.x, transition_rect.bottom() - inset),
+                                Pos2::new(center.x - wing, transition_rect.bottom() - inset - wing),
+                                Pos2::new(center.x + wing, transition_rect.bottom() - inset - wing),
+                            ),
+                            VideoTransitionKind::PushFromBottom => (
+                                Pos2::new(center.x, transition_rect.bottom() - inset),
+                                Pos2::new(center.x, transition_rect.top() + inset),
+                                Pos2::new(center.x - wing, transition_rect.top() + inset + wing),
+                                Pos2::new(center.x + wing, transition_rect.top() + inset + wing),
+                            ),
+                            _ => unreachable!(),
+                        };
+                        let stroke = Stroke::new(1.4, Color32::from_rgb(255, 238, 211));
+                        track_painter.line_segment([tail, tip], stroke);
+                        track_painter.line_segment([tip, wing_a], stroke);
+                        track_painter.line_segment([tip, wing_b], stroke);
+                    }
                 }
                 if hover_pointer.is_some_and(|point| transition_rect.contains(point)) {
                     hit_video_transition = Some((transition.left_clip, transition.right_clip));
@@ -13928,56 +14126,19 @@ fn timeline_context_transition_edge_menu(
     clip_id: ClipId,
     edge: FadeEdge,
 ) {
-    for (english, japanese, kinds) in [
-        (
-            "Dissolve",
-            "ディゾルブ",
-            &[
-                VideoTransitionKind::CrossDissolve,
-                VideoTransitionKind::FilmDissolve,
-            ][..],
-        ),
-        (
-            "Fade",
-            "フェード",
-            &[
-                VideoTransitionKind::DipToBlack,
-                VideoTransitionKind::DipToWhite,
-            ][..],
-        ),
-        (
-            "Wipe",
-            "ワイプ",
-            &[
-                VideoTransitionKind::WipeLeft,
-                VideoTransitionKind::WipeRight,
-                VideoTransitionKind::WipeUp,
-                VideoTransitionKind::WipeDown,
-            ][..],
-        ),
-        (
-            "Slide",
-            "スライド",
-            &[
-                VideoTransitionKind::SlideFromLeft,
-                VideoTransitionKind::SlideFromRight,
-                VideoTransitionKind::SlideFromTop,
-                VideoTransitionKind::SlideFromBottom,
-            ][..],
-        ),
-    ] {
+    for &(english, japanese, kinds) in &VIDEO_TRANSITION_CATALOG_FAMILIES {
         ui.menu_button(t(state.language, english, japanese), |ui| {
-            for kind in kinds {
-                let available = state.can_add_video_transition(clip_id, edge, *kind);
+            for &(kind, _, _) in kinds {
+                let available = state.can_add_video_transition(clip_id, edge, kind);
                 if ui
                     .add_enabled(
                         available,
-                        egui::Button::new(video_transition_kind_label(state.language, *kind)),
+                        egui::Button::new(video_transition_kind_label(state.language, kind)),
                     )
                     .clicked()
                 {
                     state.selected_timeline_clip = Some(clip_id);
-                    state.add_video_transition(edge, *kind);
+                    state.add_video_transition(edge, kind);
                     ui.close();
                 }
             }
@@ -21208,6 +21369,143 @@ mod tests {
     }
 
     #[test]
+    fn push_preview_moves_both_continuous_sources_in_each_direction() {
+        for (kind, expected_at_start, expected_at_mid, expected_at_end) in [
+            (
+                VideoTransitionKind::PushFromLeft,
+                ((-1.0, 0.0), (0.0, 0.0)),
+                ((-0.5, 0.0), (0.5, 0.0)),
+                ((0.0, 0.0), (1.0, 0.0)),
+            ),
+            (
+                VideoTransitionKind::PushFromRight,
+                ((1.0, 0.0), (0.0, 0.0)),
+                ((0.5, 0.0), (-0.5, 0.0)),
+                ((0.0, 0.0), (-1.0, 0.0)),
+            ),
+            (
+                VideoTransitionKind::PushFromTop,
+                ((0.0, -1.0), (0.0, 0.0)),
+                ((0.0, -0.5), (0.0, 0.5)),
+                ((0.0, 0.0), (0.0, 1.0)),
+            ),
+            (
+                VideoTransitionKind::PushFromBottom,
+                ((0.0, 1.0), (0.0, 0.0)),
+                ((0.0, 0.5), (0.0, -0.5)),
+                ((0.0, 0.0), (0.0, -1.0)),
+            ),
+        ] {
+            assert_eq!(push_transition_offsets(kind, 0.0), expected_at_start);
+            assert_eq!(push_transition_offsets(kind, 0.5), expected_at_mid);
+            assert_eq!(push_transition_offsets(kind, 1.0), expected_at_end);
+
+            let mut editor = EditorState::new(Language::English, "Push transition preview");
+            editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
+            editor.media[0].duration = Some(Tick(10_000_000));
+            editor.media[1].duration = Some(Tick(10_000_000));
+            let track = editor
+                .timeline
+                .tracks
+                .iter()
+                .find(|track| track.kind == TrackKind::Video)
+                .unwrap()
+                .id;
+            let left = editor
+                .timeline
+                .insert_clip(
+                    track,
+                    TimelineMediaId(1),
+                    Tick(0),
+                    Tick(2_000_000),
+                    Tick(1_000_000),
+                )
+                .unwrap();
+            let right = editor
+                .timeline
+                .insert_clip(
+                    track,
+                    TimelineMediaId(2),
+                    Tick(2_000_000),
+                    Tick(2_000_000),
+                    Tick(1_000_000),
+                )
+                .unwrap();
+            let transition = editor
+                .timeline
+                .add_video_transition_of_kind(track, left, right, Tick(1_000_000), 0.0, kind)
+                .unwrap();
+
+            for (playhead, expected_progress) in [
+                (Tick(1_500_000), 0.0),
+                (Tick(2_000_000), 0.5),
+                (Tick(2_499_999), 0.999_999),
+            ] {
+                editor.set_playhead(playhead);
+                let targets = editor.playback_targets().collect::<Vec<_>>();
+                assert_eq!(targets.len(), 2, "{kind:?} at {playhead:?}");
+                assert_eq!(
+                    (targets[0].clip_id, targets[0].source_tick),
+                    (left, Tick(1_000_000 + playhead.0)),
+                    "{kind:?} keeps the outgoing source advancing"
+                );
+                assert_eq!(
+                    (targets[1].clip_id, targets[1].source_tick),
+                    (right, Tick(playhead.0 - 1_000_000)),
+                    "{kind:?} keeps the incoming source advancing"
+                );
+                let (incoming_offset, outgoing_offset) =
+                    push_transition_offsets(kind, expected_progress);
+                assert_eq!(targets[0].transition_offset, outgoing_offset);
+                assert_eq!(targets[1].transition_offset, incoming_offset);
+            }
+            assert_eq!(
+                editor
+                    .timeline
+                    .transition_progress(transition, Tick(2_500_000)),
+                None,
+                "the transition has a half-open end"
+            );
+        }
+    }
+
+    #[test]
+    fn transition_catalog_covers_each_kind_once_with_bilingual_push_labels() {
+        let push_family = VIDEO_TRANSITION_CATALOG_FAMILIES
+            .iter()
+            .find(|(english, japanese, _)| *english == "Push" && *japanese == "プッシュ")
+            .expect("a nested bilingual Push family");
+        assert_eq!(push_family.2.len(), 4);
+        let catalog_kinds = VIDEO_TRANSITION_CATALOG_FAMILIES
+            .iter()
+            .flat_map(|(_, _, items)| items.iter().map(|(kind, _, _)| *kind))
+            .collect::<Vec<_>>();
+        assert_eq!(catalog_kinds, VIDEO_TRANSITION_KINDS);
+        for kind in VIDEO_TRANSITION_KINDS {
+            assert_eq!(
+                catalog_kinds
+                    .iter()
+                    .filter(|candidate| **candidate == kind)
+                    .count(),
+                1,
+                "{kind:?} must be catalogued exactly once"
+            );
+        }
+        assert_eq!(
+            video_transition_kind_label(Language::English, VideoTransitionKind::PushFromLeft),
+            "Push From Left"
+        );
+        assert_eq!(
+            video_transition_kind_label(Language::Japanese, VideoTransitionKind::PushFromLeft),
+            "左からプッシュ"
+        );
+        assert_ne!(
+            transition_timeline_colors(VideoTransitionKind::PushFromLeft, false),
+            transition_timeline_colors(VideoTransitionKind::SlideFromLeft, false)
+        );
+    }
+
+    #[test]
     fn dip_to_black_uses_one_trimmed_source_per_side_and_reaches_black_at_the_cut() {
         let mut editor = EditorState::new(Language::English, "Dip to black preview");
         editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
@@ -21514,6 +21812,23 @@ mod tests {
         assert!(editor.undo_timeline());
         assert!(editor.timeline.transitions().is_empty());
 
+        assert_eq!(
+            editor.transition_drop_target_at(cut, VideoTransitionKind::PushFromRight),
+            Some((video, left, right))
+        );
+        assert!(editor.add_video_transition_at_cut(
+            video,
+            left,
+            right,
+            VideoTransitionKind::PushFromRight
+        ));
+        assert_eq!(
+            editor.timeline.transitions()[0].kind,
+            VideoTransitionKind::PushFromRight
+        );
+        assert!(editor.undo_timeline());
+        assert!(editor.timeline.transitions().is_empty());
+
         // Gaps, audio rows, and occupied cuts are rejected before any model mutation.
         assert!(
             editor
@@ -21549,6 +21864,11 @@ mod tests {
         assert!(
             editor
                 .transition_drop_target_at(cut, VideoTransitionKind::CrossDissolve)
+                .is_none()
+        );
+        assert!(
+            editor
+                .transition_drop_target_at(cut, VideoTransitionKind::PushFromLeft)
                 .is_none()
         );
 

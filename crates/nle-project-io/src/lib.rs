@@ -501,64 +501,83 @@ mod tests {
     }
 
     #[test]
-    fn version_six_round_trips_native_dip_to_black() {
-        let root = test_root("transition-v6");
-        let path = root.join("Transition.nleproj");
-        let mut editor = EditorState::new(Language::English, "Transition");
-        editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
-        let track = editor
-            .timeline
-            .tracks
-            .iter()
-            .find(|track| track.kind == TrackKind::Video)
-            .unwrap()
-            .id;
-        let left = editor
-            .timeline
-            .insert_clip(
-                track,
-                TimelineMediaId(1),
-                Tick(0),
-                Tick(2_000_000),
-                Tick(1_000_000),
-            )
-            .unwrap();
-        let right = editor
-            .timeline
-            .insert_clip(
-                track,
-                TimelineMediaId(2),
-                Tick(2_000_000),
-                Tick(2_000_000),
-                Tick(1_000_000),
-            )
-            .unwrap();
-        editor
-            .timeline
-            .add_video_transition_of_kind(
-                track,
-                left,
-                right,
-                Tick(1_000_000),
-                0.35,
-                VideoTransitionKind::DipToBlack,
-            )
-            .unwrap();
-        let document = document_for_path(
-            &path,
-            "Transition",
-            editor.snapshot(),
-            ProjectSettings::default(),
-        );
-        write_document(&path, &document).unwrap();
-        let restored = read_document(&path).unwrap().unwrap();
-        assert_eq!(restored.version, PROJECT_DOCUMENT_VERSION);
-        assert_eq!(restored.snapshot.timeline.transitions.len(), 1);
-        let transition = &restored.snapshot.timeline.transitions[0];
-        assert_eq!((transition.left_clip, transition.right_clip), (left, right));
-        assert_eq!(transition.duration, Tick(1_000_000));
-        assert_eq!(transition.curve, 0.35);
-        assert_eq!(transition.kind, VideoTransitionKind::DipToBlack);
+    fn video_transition_kinds_round_trip_with_their_cut_settings() {
+        let kinds = [
+            VideoTransitionKind::CrossDissolve,
+            VideoTransitionKind::FilmDissolve,
+            VideoTransitionKind::DipToBlack,
+            VideoTransitionKind::DipToWhite,
+            VideoTransitionKind::WipeLeft,
+            VideoTransitionKind::WipeRight,
+            VideoTransitionKind::WipeUp,
+            VideoTransitionKind::WipeDown,
+            VideoTransitionKind::SlideFromLeft,
+            VideoTransitionKind::SlideFromRight,
+            VideoTransitionKind::SlideFromTop,
+            VideoTransitionKind::SlideFromBottom,
+            VideoTransitionKind::PushFromLeft,
+            VideoTransitionKind::PushFromRight,
+            VideoTransitionKind::PushFromTop,
+            VideoTransitionKind::PushFromBottom,
+        ];
+        let root = test_root("video-transition-kinds");
+        fs::create_dir_all(&root).unwrap();
+
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let path = root.join(format!("Transition-{index}.nleproj"));
+            let mut editor = EditorState::new(Language::English, "Transition");
+            editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
+            let track = editor
+                .timeline
+                .tracks
+                .iter()
+                .find(|track| track.kind == TrackKind::Video)
+                .unwrap()
+                .id;
+            let left = editor
+                .timeline
+                .insert_clip(
+                    track,
+                    TimelineMediaId(1),
+                    Tick(0),
+                    Tick(2_000_000),
+                    Tick(1_000_000),
+                )
+                .unwrap();
+            let right = editor
+                .timeline
+                .insert_clip(
+                    track,
+                    TimelineMediaId(2),
+                    Tick(2_000_000),
+                    Tick(2_000_000),
+                    Tick(1_000_000),
+                )
+                .unwrap();
+            let duration = Tick(1_000_000 + index as i64);
+            let curve = 0.05 * (index as f32 + 1.0);
+            editor
+                .timeline
+                .add_video_transition_of_kind(track, left, right, duration, curve, kind)
+                .unwrap();
+            let document = document_for_path(
+                &path,
+                "Transition",
+                editor.snapshot(),
+                ProjectSettings::default(),
+            );
+            write_document(&path, &document).unwrap();
+
+            let restored = read_document(&path).unwrap().unwrap();
+            assert_eq!(restored.version, PROJECT_DOCUMENT_VERSION);
+            assert_eq!(restored.snapshot.timeline.transitions.len(), 1);
+            let transition = &restored.snapshot.timeline.transitions[0];
+            assert_eq!(transition.kind, kind);
+            assert_eq!((transition.left_clip, transition.right_clip), (left, right));
+            assert_eq!(transition.duration, duration);
+            assert_eq!(transition.curve, curve);
+        }
+
         fs::remove_dir_all(root).unwrap();
     }
 

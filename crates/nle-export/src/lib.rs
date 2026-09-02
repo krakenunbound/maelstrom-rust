@@ -158,6 +158,8 @@ struct VideoClipPlan {
     transition_head: Tick,
     incoming_opacity: Option<TransitionOpacity>,
     incoming_slide: Option<TransitionSlide>,
+    incoming_push: Option<TransitionPush>,
+    outgoing_push: Option<TransitionPush>,
     outgoing_matte: Option<DipMatte>,
 }
 
@@ -239,6 +241,8 @@ struct ClipTransitionPlan {
     tail: Tick,
     incoming_opacity: Option<TransitionOpacity>,
     incoming_slide: Option<TransitionSlide>,
+    incoming_push: Option<TransitionPush>,
+    outgoing_push: Option<TransitionPush>,
     outgoing_matte: Option<DipMatte>,
     has_outgoing_transition: bool,
     validation_transition: Option<VideoTransition>,
@@ -270,6 +274,12 @@ enum WipeEdge {
 
 #[derive(Clone, Debug)]
 struct TransitionSlide {
+    edge: WipeEdge,
+    fade: Fade,
+}
+
+#[derive(Clone, Debug)]
+struct TransitionPush {
     edge: WipeEdge,
     fade: Fade,
 }
@@ -337,11 +347,30 @@ fn plan_video_transitions(
             | VideoTransitionKind::SlideFromLeft
             | VideoTransitionKind::SlideFromRight
             | VideoTransitionKind::SlideFromTop
-            | VideoTransitionKind::SlideFromBottom => {
+            | VideoTransitionKind::SlideFromBottom
+            | VideoTransitionKind::PushFromLeft
+            | VideoTransitionKind::PushFromRight
+            | VideoTransitionKind::PushFromTop
+            | VideoTransitionKind::PushFromBottom => {
                 outgoing.tail = Tick(outgoing.tail.0.checked_add(right_half).ok_or_else(|| {
                     transition_error(transition, "outgoing input duration overflows")
                 })?);
                 outgoing.validation_transition = Some(transition.clone());
+                if matches!(
+                    transition.kind,
+                    VideoTransitionKind::PushFromLeft
+                        | VideoTransitionKind::PushFromRight
+                        | VideoTransitionKind::PushFromTop
+                        | VideoTransitionKind::PushFromBottom
+                ) {
+                    outgoing.outgoing_push = Some(TransitionPush {
+                        edge: wipe_edge(transition.kind).expect("push transition has a push edge"),
+                        fade: Fade {
+                            duration: transition.duration,
+                            curve: transition.curve,
+                        },
+                    });
+                }
             }
             VideoTransitionKind::DipToBlack | VideoTransitionKind::DipToWhite => {
                 outgoing.outgoing_matte = Some(DipMatte {
@@ -431,6 +460,22 @@ fn plan_video_transitions(
                 });
                 incoming.validation_transition = Some(transition.clone());
             }
+            VideoTransitionKind::PushFromLeft
+            | VideoTransitionKind::PushFromRight
+            | VideoTransitionKind::PushFromTop
+            | VideoTransitionKind::PushFromBottom => {
+                incoming.head = Tick(incoming.head.0.checked_add(left_half).ok_or_else(|| {
+                    transition_error(transition, "incoming input duration overflows")
+                })?);
+                incoming.incoming_push = Some(TransitionPush {
+                    edge: wipe_edge(transition.kind).expect("push transition has a push edge"),
+                    fade: Fade {
+                        duration: transition.duration,
+                        curve: transition.curve,
+                    },
+                });
+                incoming.validation_transition = Some(transition.clone());
+            }
             VideoTransitionKind::DipToBlack | VideoTransitionKind::DipToWhite => {
                 incoming.incoming_opacity = Some(TransitionOpacity::IncomingDip(Fade {
                     duration: Tick(right_half),
@@ -487,14 +532,18 @@ fn plan_video_transitions(
 
 fn wipe_edge(kind: VideoTransitionKind) -> Option<WipeEdge> {
     match kind {
-        VideoTransitionKind::WipeLeft | VideoTransitionKind::SlideFromLeft => Some(WipeEdge::Left),
-        VideoTransitionKind::WipeRight | VideoTransitionKind::SlideFromRight => {
-            Some(WipeEdge::Right)
-        }
-        VideoTransitionKind::WipeUp | VideoTransitionKind::SlideFromTop => Some(WipeEdge::Top),
-        VideoTransitionKind::WipeDown | VideoTransitionKind::SlideFromBottom => {
-            Some(WipeEdge::Bottom)
-        }
+        VideoTransitionKind::WipeLeft
+        | VideoTransitionKind::SlideFromLeft
+        | VideoTransitionKind::PushFromLeft => Some(WipeEdge::Left),
+        VideoTransitionKind::WipeRight
+        | VideoTransitionKind::SlideFromRight
+        | VideoTransitionKind::PushFromRight => Some(WipeEdge::Right),
+        VideoTransitionKind::WipeUp
+        | VideoTransitionKind::SlideFromTop
+        | VideoTransitionKind::PushFromTop => Some(WipeEdge::Top),
+        VideoTransitionKind::WipeDown
+        | VideoTransitionKind::SlideFromBottom
+        | VideoTransitionKind::PushFromBottom => Some(WipeEdge::Bottom),
         VideoTransitionKind::CrossDissolve
         | VideoTransitionKind::FilmDissolve
         | VideoTransitionKind::DipToBlack
@@ -989,6 +1038,8 @@ impl ExportPlan {
                     transition_head: transition.head,
                     incoming_opacity: transition.incoming_opacity,
                     incoming_slide: transition.incoming_slide,
+                    incoming_push: transition.incoming_push,
+                    outgoing_push: transition.outgoing_push,
                     outgoing_matte: transition.outgoing_matte,
                 });
             }
@@ -2229,19 +2280,48 @@ fn transition_overlay_position(
     center_x: f32,
     center_y: f32,
 ) -> (String, String) {
-    let x = format!("{center_x:.3}-overlay_w/2");
-    let y = format!("{center_y:.3}-overlay_h/2");
-    let Some(slide) = &video.incoming_slide else {
-        return (x, y);
-    };
-    let time = format!("(t-{})", tick_seconds(video.timeline_start));
-    let progress = fade_expression(slide.fade, &time, false, slide.fade.duration, false);
-    match slide.edge {
-        WipeEdge::Left => (format!("{x}-overlay_w*(1-({progress}))"), y),
-        WipeEdge::Right => (format!("{x}+overlay_w*(1-({progress}))"), y),
-        WipeEdge::Top => (x, format!("{y}-overlay_h*(1-({progress}))")),
-        WipeEdge::Bottom => (x, format!("{y}+overlay_h*(1-({progress}))")),
+    let mut x = format!("{center_x:.3}-overlay_w/2");
+    let mut y = format!("{center_y:.3}-overlay_h/2");
+    if let Some(slide) = &video.incoming_slide {
+        let time = format!("(t-{})", tick_seconds(video.timeline_start));
+        let progress = fade_expression(slide.fade, &time, false, slide.fade.duration, false);
+        match slide.edge {
+            WipeEdge::Left => x = format!("{x}-overlay_w*(1-({progress}))"),
+            WipeEdge::Right => x = format!("{x}+overlay_w*(1-({progress}))"),
+            WipeEdge::Top => y = format!("{y}-overlay_h*(1-({progress}))"),
+            WipeEdge::Bottom => y = format!("{y}+overlay_h*(1-({progress}))"),
+        }
     }
+    transition_push_overlay_position(video, x, y)
+}
+
+fn transition_push_overlay_position(
+    video: &VideoClipPlan,
+    mut x: String,
+    mut y: String,
+) -> (String, String) {
+    if let Some(push) = &video.incoming_push {
+        let time = format!("(t-{})", tick_seconds(video.timeline_start));
+        let progress = fade_expression(push.fade, &time, false, push.fade.duration, false);
+        match push.edge {
+            WipeEdge::Left => x = format!("{x}+overlay_w*(({progress})-1)"),
+            WipeEdge::Right => x = format!("{x}+overlay_w*(1-({progress}))"),
+            WipeEdge::Top => y = format!("{y}+overlay_h*(({progress})-1)"),
+            WipeEdge::Bottom => y = format!("{y}+overlay_h*(1-({progress}))"),
+        }
+    }
+    if let Some(push) = &video.outgoing_push {
+        let start = Tick(video.timeline_end.0 - push.fade.duration.0);
+        let time = format!("(t-{})", tick_seconds(start));
+        let progress = fade_expression(push.fade, &time, false, push.fade.duration, false);
+        match push.edge {
+            WipeEdge::Left => x = format!("{x}+overlay_w*({progress})"),
+            WipeEdge::Right => x = format!("{x}-overlay_w*({progress})"),
+            WipeEdge::Top => y = format!("{y}+overlay_h*({progress})"),
+            WipeEdge::Bottom => y = format!("{y}-overlay_h*({progress})"),
+        }
+    }
+    (x, y)
 }
 
 fn dip_matte_filter(width: u32, height: u32, fps: &str, matte: &DipMatte, label: &str) -> String {
@@ -3905,21 +3985,53 @@ mod tests {
     #[test]
     fn every_video_transition_kind_lowers_to_a_distinct_export_behavior() {
         let expected = [
-            (VideoTransitionKind::CrossDissolve, "alpha(X\\,Y)*"),
-            (VideoTransitionKind::FilmDissolve, "pow((if("),
-            (VideoTransitionKind::DipToBlack, "color=c=black"),
-            (VideoTransitionKind::DipToWhite, "color=c=white"),
-            (VideoTransitionKind::WipeLeft, "if(lte((X+0.5)/W\\,"),
-            (VideoTransitionKind::WipeRight, "if(gte((X+0.5)/W\\,"),
-            (VideoTransitionKind::WipeUp, "if(lte((Y+0.5)/H\\,"),
-            (VideoTransitionKind::WipeDown, "if(gte((Y+0.5)/H\\,"),
-            (VideoTransitionKind::SlideFromLeft, "overlay_w*(1-(if("),
-            (VideoTransitionKind::SlideFromRight, "overlay_w*(1-(if("),
-            (VideoTransitionKind::SlideFromTop, "overlay_h*(1-(if("),
-            (VideoTransitionKind::SlideFromBottom, "overlay_h*(1-(if("),
+            (VideoTransitionKind::CrossDissolve, "alpha(X\\,Y)*", None),
+            (VideoTransitionKind::FilmDissolve, "pow((if(", None),
+            (VideoTransitionKind::DipToBlack, "color=c=black", None),
+            (VideoTransitionKind::DipToWhite, "color=c=white", None),
+            (VideoTransitionKind::WipeLeft, "if(lte((X+0.5)/W\\,", None),
+            (VideoTransitionKind::WipeRight, "if(gte((X+0.5)/W\\,", None),
+            (VideoTransitionKind::WipeUp, "if(lte((Y+0.5)/H\\,", None),
+            (VideoTransitionKind::WipeDown, "if(gte((Y+0.5)/H\\,", None),
+            (
+                VideoTransitionKind::SlideFromLeft,
+                "overlay_w*(1-(if(",
+                None,
+            ),
+            (
+                VideoTransitionKind::SlideFromRight,
+                "overlay_w*(1-(if(",
+                None,
+            ),
+            (VideoTransitionKind::SlideFromTop, "overlay_h*(1-(if(", None),
+            (
+                VideoTransitionKind::SlideFromBottom,
+                "overlay_h*(1-(if(",
+                None,
+            ),
+            (
+                VideoTransitionKind::PushFromLeft,
+                "overlay_w*((if(",
+                Some("overlay_w*(if("),
+            ),
+            (
+                VideoTransitionKind::PushFromRight,
+                "overlay_w*(1-(if(",
+                Some("-overlay_w*(if("),
+            ),
+            (
+                VideoTransitionKind::PushFromTop,
+                "overlay_h*((if(",
+                Some("overlay_h*(if("),
+            ),
+            (
+                VideoTransitionKind::PushFromBottom,
+                "overlay_h*(1-(if(",
+                Some("-overlay_h*(if("),
+            ),
         ];
 
-        for (kind, marker) in expected {
+        for (kind, marker, outgoing_marker) in expected {
             let mut editor = EditorState::new(Language::English, "Transition kinds");
             editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
             let track = editor
@@ -3958,6 +4070,9 @@ mod tests {
             let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
             let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
             assert!(graph.contains(marker), "{kind:?}: {graph}");
+            if let Some(outgoing_marker) = outgoing_marker {
+                assert!(graph.contains(outgoing_marker), "{kind:?}: {graph}");
+            }
             assert!(graph.contains("2*0.750000"), "{kind:?}: {graph}");
             if matches!(kind, VideoTransitionKind::FilmDissolve) {
                 assert!(graph.contains("0.650000"), "{graph}");
@@ -4045,6 +4160,92 @@ mod tests {
             Some(TransitionOpacity::IncomingDip(_))
         ));
         assert!(middle.outgoing_matte.is_none());
+    }
+
+    #[test]
+    fn incoming_slide_and_outgoing_push_both_lower_for_the_middle_clip() {
+        let mut editor = EditorState::new(Language::English, "Slide then Push");
+        editor.add_media_paths([
+            PathBuf::from("left.mp4"),
+            PathBuf::from("middle.mp4"),
+            PathBuf::from("right.mp4"),
+        ]);
+        let track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        let left = editor
+            .timeline
+            .insert_clip(track, MediaId(1), Tick(0), Tick(2_000_000), Tick(1_000_000))
+            .unwrap();
+        let middle = editor
+            .timeline
+            .insert_clip(
+                track,
+                MediaId(2),
+                Tick(2_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        let right = editor
+            .timeline
+            .insert_clip(
+                track,
+                MediaId(3),
+                Tick(4_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        editor
+            .timeline
+            .add_video_transition_of_kind(
+                track,
+                left,
+                middle,
+                Tick(1_000_000),
+                0.0,
+                VideoTransitionKind::SlideFromLeft,
+            )
+            .unwrap();
+        editor
+            .timeline
+            .add_video_transition_of_kind(
+                track,
+                middle,
+                right,
+                Tick(1_000_000),
+                0.0,
+                VideoTransitionKind::PushFromLeft,
+            )
+            .unwrap();
+        let mut snapshot = editor.snapshot();
+        for media in &mut snapshot.media {
+            media.duration = Some(Tick(5_000_000));
+        }
+        let request = ExportRequest {
+            snapshot,
+            ..request(&editor)
+        };
+        let plan = ExportPlan::from_request_with_probe(&request, probe).unwrap();
+        let middle = &plan.video_tracks[0].clips[1];
+        assert!(middle.incoming_slide.is_some());
+        assert!(middle.outgoing_push.is_some());
+
+        let (center_x, center_y) = quad_center(middle.quad);
+        let (x, y) = transition_overlay_position(middle, center_x, center_y);
+        assert!(x.contains("-overlay_w*(1-"), "incoming Slide missing: {x}");
+        assert!(x.contains("+overlay_w*("), "outgoing Push missing: {x}");
+        assert!(x.contains("(t-1.500000)"), "incoming timing missing: {x}");
+        assert!(x.contains("(t-3.500000)"), "outgoing timing missing: {x}");
+        assert_eq!(y, "540.000-overlay_h/2");
+
+        let (_, graph) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        assert!(graph.contains(&format!("x='{x}'")), "{graph}");
     }
 
     #[test]
@@ -6684,6 +6885,10 @@ mod tests {
             VideoTransitionKind::DipToWhite,
             VideoTransitionKind::WipeLeft,
             VideoTransitionKind::SlideFromLeft,
+            VideoTransitionKind::PushFromLeft,
+            VideoTransitionKind::PushFromRight,
+            VideoTransitionKind::PushFromTop,
+            VideoTransitionKind::PushFromBottom,
         ] {
             let mut editor = EditorState::new(Language::English, "Real transition families");
             editor.add_media_paths([red.clone(), blue.clone()]);
@@ -6749,6 +6954,48 @@ mod tests {
             );
             assert!(render.is_ok(), "{kind:?}: {render:?}");
             assert!(output.metadata().is_ok_and(|metadata| metadata.len() > 0));
+            if let Some((blue_at, red_at)) = match kind {
+                VideoTransitionKind::PushFromLeft => Some(((16, 18), (56, 18))),
+                VideoTransitionKind::PushFromRight => Some(((48, 18), (8, 18))),
+                VideoTransitionKind::PushFromTop => Some(((32, 7), (32, 31))),
+                VideoTransitionKind::PushFromBottom => Some(((32, 29), (32, 5))),
+                _ => None,
+            } {
+                let sample = |(x, y): (u32, u32)| -> [u8; 3] {
+                    let frame = Command::new(&ffmpeg)
+                        .args(["-hide_banner", "-loglevel", "error", "-ss", "1.000", "-i"])
+                        .arg(&output)
+                        .args([
+                            "-vf",
+                            &format!("format=rgb24,crop=1:1:{x}:{y}"),
+                            "-frames:v",
+                            "1",
+                            "-f",
+                            "rawvideo",
+                            "-pix_fmt",
+                            "rgb24",
+                            "pipe:1",
+                        ])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        frame.status.success(),
+                        "{kind:?}: {}",
+                        String::from_utf8_lossy(&frame.stderr)
+                    );
+                    frame.stdout[..3].try_into().unwrap()
+                };
+                let blue = sample(blue_at);
+                let red = sample(red_at);
+                assert!(
+                    blue[2] > 140 && blue[0] < 90,
+                    "{kind:?} incoming sample {blue_at:?} was not blue: {blue:?}"
+                );
+                assert!(
+                    red[0] > 140 && red[2] < 90,
+                    "{kind:?} outgoing sample {red_at:?} was not red: {red:?}"
+                );
+            }
             let _ = fs::remove_file(filter);
             let _ = fs::remove_file(output);
         }

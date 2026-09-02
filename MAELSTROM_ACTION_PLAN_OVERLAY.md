@@ -153,7 +153,8 @@ Finish holes. Do not replace working crates.
 - Linux package script (same crates, LGPL `.so`)
 - Additional sampling/performance qualification beyond the implemented nearest / bilinear /
   bicubic choices
-- More transitions (wipe, push, dip to white)
+- Further transition polish and full stacked-track pixel/performance qualification; Dip to White,
+  Wipe, Slide, and true Push families are implemented in the native catalog.
 
 ### Do not redo
 

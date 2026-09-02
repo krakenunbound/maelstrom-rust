@@ -486,8 +486,13 @@ Last updated: 2026-09-01
   1. Export now avoids zero-degree rotation loss and forces RGB video/matte/title overlays instead
   of FFmpeg's hidden 4:2:0 default. Evidence: `docs/phase3-effect-parity.md`.
 - [ ] Complete preview/export parity for effects, transitions, titles, and color processing.
-- [ ] Add the remaining roadmap transitions, title tooling, Rec.709 color pipeline, LUT validation,
-  and non-blocking scopes.
+- [x] Add the remaining roadmap transition families: Dip to White, four-direction Wipe and Slide,
+  plus true four-direction Push that moves both sources. Preserve existing Slide project behavior;
+  provide nested EN/JA Effects/context menus, drag/drop, undo, all-kind persistence, and matching
+  preview/export motion. Real FFmpeg midpoint samples cover every Push direction, including a
+  mixed incoming Slide/outgoing Push regression. See `docs/video-transitions.md`.
+- [ ] Add the remaining title tooling, Rec.709 color pipeline, LUT validation, and non-blocking
+  scopes.
 - [ ] Continue the professional audio engine: buses, routing, automation, meters, callback-safe DSP,
   channel layouts, shuttle audio, and loudness analysis.
 - [ ] Add multiple sequences, nesting, speed/remap, relink/consolidate, and project interchange in

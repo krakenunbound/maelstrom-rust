@@ -833,7 +833,13 @@ Build these on the compositor/effect graph rather than as timeline exceptions.
 - [x] Add native cross dissolve with matching continuously advancing preview and export sources.
 - [x] Add native dip to black without source-handle requirements, with matching preview/export
       half-window opacity and true black at the cut.
-- [ ] Add dip to white, wipe, and push.
+- [x] Add dip to white, four-direction wipe, and a distinct four-direction Push family. Push moves
+      both continuously advancing sources while the earlier Slide family keeps its incoming-only
+      behavior and saved names. The nested EN/JA Effects catalog, context menus, drag/drop, undo,
+      source-handle validation, all-kind persistence, deterministic preview formulas, export graph,
+      and all-direction real FFmpeg midpoint samples agree. Mixed incoming Slide/outgoing Push on
+      one clip is covered explicitly. This is headless transition-family evidence, not the full
+      Phase 4 pixel/parity/performance exit gate. See `docs/video-transitions.md`.
 - [x] Add native equal-power audio crossfades with source-handle validation, independently editable
       start/end edges, sample-accurate live gains, and matching export envelopes.
 - [x] Make cross-dissolve duration and curve directly editable and independently undoable.
@@ -1040,7 +1046,7 @@ Exit gate:
 - [ ] Masks and bypass
 - [x] Native cross dissolve with preview/export parity
 - [x] Native dip to black with preview/export parity
-- [ ] Additional video transition types
+- [x] Additional video transition types (Dip to White, Wipe, Slide, and true Push families)
 - [x] Native audio crossfades with preview/export parity
 - [ ] English/Japanese titles
 - [ ] SDR color pipeline
