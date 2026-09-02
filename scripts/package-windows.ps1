@@ -390,7 +390,7 @@ try {
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
     }
-    if ($surfaceSubmission.schema_version -ne 8) {
+    if ($surfaceSubmission.schema_version -ne 9) {
         throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     $observationScope = $surfaceSubmission.observation_scope
@@ -448,7 +448,7 @@ try {
             $surfaceSubmission.display_refresh_millihertz -lt 1)) {
         throw 'Surface submission probe returned incomplete performance environment metadata.'
     }
-    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'hardware_transfer', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {
+    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'hardware_transfer', 'scaler', 'rgba_copy_letterbox', 'worker_request', 'named_decoder_reopen')) {
         $stage = $surfaceSubmission.decoder_stage_timings.$stageName
         if ($null -eq $stage) { throw "Surface submission probe omitted decoder stage $stageName." }
         foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {

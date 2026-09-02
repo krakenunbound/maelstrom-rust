@@ -630,12 +630,39 @@ fn assert_windows_hardware_vfr_output_matches_cli_reference(
         );
         let fresh_timings = DecoderStageTimingAccumulators::default();
         decode_and_check(&mut fresh_monitor, &request, &fresh_timings);
+        assert_eq!(
+            fresh_timings.snapshot().named_decoder_reopen.samples,
+            0,
+            "{label} fresh monitor named decoder reopen samples"
+        );
         cases += 1;
     }
     if requires_cpu_frame_transfer(requested_backend) {
         assert!(
             timings.snapshot().hardware_transfer.samples > 0,
             "{label} reusable monitor did not transfer a hardware frame"
+        );
+    }
+    let named_decoder_reopen = timings.snapshot().named_decoder_reopen;
+    if requested_backend == DecodeBackend::IntelQuickSync {
+        assert_eq!(
+            named_decoder_reopen.samples, 7,
+            "{label} reusable QSV monitor named decoder reopen samples"
+        );
+        eprintln!(
+            "{label} {} {}x{}: named decoder reopen: {} samples, total {:.3} ms, mean {:.3} ms, max {:.3} ms",
+            requested_backend.display_name(),
+            output_size.0,
+            output_size.1,
+            named_decoder_reopen.samples,
+            named_decoder_reopen.total_ms(),
+            named_decoder_reopen.mean_ms(),
+            named_decoder_reopen.max_ms(),
+        );
+    } else {
+        assert_eq!(
+            named_decoder_reopen.samples, 0,
+            "{label} non-QSV reusable monitor named decoder reopen samples"
         );
     }
     assert_eq!(cases, 19, "{label} hardware parity case count");

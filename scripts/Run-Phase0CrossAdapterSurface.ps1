@@ -59,7 +59,8 @@ function Assert-TimingStage {
     param(
         [Parameter(Mandatory = $true)]$Stage,
         [Parameter(Mandatory = $true)][string]$Context,
-        [Parameter(Mandatory = $true)][string[]]$Properties
+        [Parameter(Mandatory = $true)][string[]]$Properties,
+        [switch]$AllowZeroSamples
     )
     if ($null -eq $Stage) { throw "$Context is missing." }
     foreach ($property in $Properties) {
@@ -68,7 +69,17 @@ function Assert-TimingStage {
             throw "$Context has an invalid $property value."
         }
     }
-    if ([int]$Stage.samples -lt 1) { throw "$Context was not exercised." }
+    if (-not (Test-JsonUnsignedInteger $Stage.samples)) {
+        throw "$Context has an invalid samples value."
+    }
+    if ([uint64]$Stage.samples -eq 0) {
+        if (-not $AllowZeroSamples) { throw "$Context was not exercised." }
+        foreach ($property in $Properties | Where-Object { $_ -ne 'samples' }) {
+            if ([double]$Stage.$property -ne 0) {
+                throw "$Context reported $property without samples."
+            }
+        }
+    }
 }
 
 function Stop-TrackedProcessTree {
@@ -241,7 +252,7 @@ try {
         $latestSurface = $null
         $prefix = $adapterClass.ToLowerInvariant()
         $startupPath = Join-Path $artifactRoot "$prefix-startup.json"
-        $surfacePath = Join-Path $artifactRoot "$prefix-surface-schema8.json"
+        $surfacePath = Join-Path $artifactRoot "$prefix-surface-schema9.json"
         $mediaReportPath = Join-Path $artifactRoot "$prefix-media-acceptance.json"
         $exportPath = Join-Path $artifactRoot "$prefix-cancelled-export.mp4"
         Remove-Item -LiteralPath $startupPath, $surfacePath, $mediaReportPath, $exportPath -Force -ErrorAction SilentlyContinue
@@ -290,13 +301,13 @@ try {
             }
             $reportedDecoderBackends = @($surface.decoder_backends | ForEach-Object { [string]$_ } |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            if ($surface.schema_version -ne 8 -or $surface.samples -lt 120 -or
+            if ($surface.schema_version -ne 9 -or $surface.samples -lt 120 -or
                 $surface.renderer_device_type -ne $adapterClass -or $surface.renderer_backend -ne 'Dx12' -or
                 [string]::IsNullOrWhiteSpace([string]$surface.renderer_gpu_name) -or
                 $reportedDecoderBackends.Count -lt 1 -or
                 [string]::IsNullOrWhiteSpace([string]$surface.encoder_backend) -or
                 $surface.encoder_backend -eq 'not_observed') {
-                throw "$adapterClass surface report omitted required schema-8 renderer/media evidence."
+                throw "$adapterClass surface report omitted required schema-9 renderer/media evidence."
             }
             $observationScope = $surface.observation_scope
             if ($null -eq $observationScope -or
@@ -319,6 +330,8 @@ try {
                 $failureStage = "decoder.$stageName"
                 Assert-TimingStage -Stage $surface.decoder_stage_timings.$stageName -Context "$adapterClass decoder stage $stageName" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms')
             }
+            $failureStage = 'decoder.named_decoder_reopen'
+            Assert-TimingStage -Stage $surface.decoder_stage_timings.named_decoder_reopen -Context "$adapterClass decoder stage named_decoder_reopen" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms') -AllowZeroSamples
             $failureComponent = 'viewer'
             $currentAffectedCodecs = @('mpeg4')
             foreach ($stageName in @('upload_cpu', 'compositor_encode_cpu')) {
@@ -506,7 +519,7 @@ try {
             $combined = [ordered]@{
                 schema_version = 2
                 status = $qualificationStatus
-                scope = 'packaged_editor_full_surface_schema8'
+                scope = 'packaged_editor_full_surface_schema9'
                 executable_path = $resolvedExecutable
                 executable_sha256 = $executableHash
                 physical_scanout_observed = $false

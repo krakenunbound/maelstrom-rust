@@ -423,6 +423,9 @@ pub struct MonitorDecoderStageTimings {
     pub cache_lookup: MonitorStageTiming,
     pub demux_packet: MonitorStageTiming,
     pub decoder_calls: MonitorStageTiming,
+    /// Named hardware-decoder reopen attempts performed for QSV reverse seeks.
+    /// This measures the synchronous reopen boundary, including failures, not GPU completion.
+    pub named_decoder_reopen: MonitorStageTiming,
     pub hardware_transfer: MonitorStageTiming,
     pub scaler: MonitorStageTiming,
     /// Includes final shared-buffer allocation, row copies, and letterbox initialization.
@@ -435,6 +438,7 @@ impl MonitorDecoderStageTimings {
         self.cache_lookup.merge(other.cache_lookup);
         self.demux_packet.merge(other.demux_packet);
         self.decoder_calls.merge(other.decoder_calls);
+        self.named_decoder_reopen.merge(other.named_decoder_reopen);
         self.hardware_transfer.merge(other.hardware_transfer);
         self.scaler.merge(other.scaler);
         self.rgba_copy_letterbox.merge(other.rgba_copy_letterbox);
@@ -507,6 +511,7 @@ struct DecoderStageTimingAccumulators {
     cache_lookup: AtomicStageTiming,
     demux_packet: AtomicStageTiming,
     decoder_calls: AtomicStageTiming,
+    named_decoder_reopen: AtomicStageTiming,
     hardware_transfer: AtomicStageTiming,
     scaler: AtomicStageTiming,
     rgba_copy_letterbox: AtomicStageTiming,
@@ -529,6 +534,7 @@ impl DecoderStageTimingAccumulators {
             cache_lookup: self.cache_lookup.snapshot(),
             demux_packet: self.demux_packet.snapshot(),
             decoder_calls: self.decoder_calls.snapshot(),
+            named_decoder_reopen: self.named_decoder_reopen.snapshot(),
             hardware_transfer: self.hardware_transfer.snapshot(),
             scaler: self.scaler.snapshot(),
             rgba_copy_letterbox: self.rgba_copy_letterbox.snapshot(),
@@ -3242,6 +3248,9 @@ impl StickyMonitor {
                 // from the preceding frame. Reopening only this fallback decoder gives the
                 // reverse request a fresh surface queue; native Windows and CUVID keep the
                 // cheaper proven flush path.
+                // The timer deliberately covers the complete synchronous reopen attempt,
+                // including an error return, and remains separate from decoder_calls.
+                let _timer = StageTimer::new(&stage_timings.named_decoder_reopen);
                 self.reopen_named_decoder()?;
             } else {
                 let _timer = StageTimer::new(&stage_timings.decoder_calls);

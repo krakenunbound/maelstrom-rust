@@ -31,12 +31,13 @@ Last updated: 2026-09-01
   pass, including 19 exact Software/CLI pixel seeks and bidirectional preview floor/hold mapping.
   The complete seven-scenario Phase 0 runner passes without launching the editor. See
   `docs/media-fixtures.md`, `docs/codec-color-qualification.md`, and `docs/phase0-scenarios.md`.
-- [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 8 now
+- [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 9 now
   distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
-  from physical scanout, which remains explicitly false. Package and cross-adapter validators reject
-  missing, contradictory, or overstated scope. The preceding Intel/NVIDIA schema-7 runs remain
-  historical evidence; a fresh schema-8 windowed run still requires explicit editor-launch
-  permission. See `docs/performance-reports.md`.
+  from physical scanout, which remains explicitly false, and carries the optional named-decoder
+  reopen timing stage. Package and cross-adapter validators reject missing, contradictory, or
+  overstated scope. The preceding Intel/NVIDIA schema-7 runs remain historical evidence; schema 8
+  was not requalified before being superseded. A fresh schema-9 windowed run still requires explicit
+  editor-launch permission. See `docs/performance-reports.md`.
 - [x] Close the Phase 2 integrated Auto-preview gate without lowering the user's selected quality.
   A schema-1 headless app test uses two independent real 1920x1080 sources, observes Auto Full
   640x360, applies four disclosed controller-pressure samples through the production completion

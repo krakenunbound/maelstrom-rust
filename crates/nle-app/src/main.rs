@@ -2447,6 +2447,7 @@ struct DecoderStageTimingsReport {
     scaler: DecoderStageTimingReport,
     rgba_copy_letterbox: DecoderStageTimingReport,
     worker_request: DecoderStageTimingReport,
+    named_decoder_reopen: DecoderStageTimingReport,
 }
 
 impl From<nle_decode::MonitorDecoderStageTimings> for DecoderStageTimingsReport {
@@ -2459,6 +2460,7 @@ impl From<nle_decode::MonitorDecoderStageTimings> for DecoderStageTimingsReport 
             scaler: timings.scaler.into(),
             rgba_copy_letterbox: timings.rgba_copy_letterbox.into(),
             worker_request: timings.worker_request.into(),
+            named_decoder_reopen: timings.named_decoder_reopen.into(),
         }
     }
 }
@@ -3017,7 +3019,7 @@ impl SurfaceSubmissionProbe {
             return false;
         };
         let report = SurfaceSubmissionReport {
-            schema_version: 8,
+            schema_version: 9,
             samples: metrics.samples,
             observation_scope: SurfaceObservationScope::from_samples(
                 metrics.samples,
@@ -10938,6 +10940,11 @@ mod tests {
                 monitor_cache_cap_bytes: 512 * 1024 * 1024,
                 display_refresh_millihertz: Some(60_000),
                 decoder_stage_timings: nle_decode::MonitorDecoderStageTimings {
+                    named_decoder_reopen: nle_decode::MonitorStageTiming {
+                        samples: 3,
+                        total_nanos: 7_000_000,
+                        max_nanos: 4_000_000,
+                    },
                     worker_request: nle_decode::MonitorStageTiming {
                         samples: 2,
                         total_nanos: 5_000_000,
@@ -10989,7 +10996,7 @@ mod tests {
             })
         );
         let report = report_rx.try_recv().expect("surface submission report");
-        assert_eq!(report.schema_version, 8);
+        assert_eq!(report.schema_version, 9);
         assert_eq!(report.samples, FRAME_TIME_SAMPLE_COUNT);
         assert_eq!(report.cpu_p95_ms, 2.0);
         assert_eq!(report.surface_submission_interval_p95_ms, 16.0);

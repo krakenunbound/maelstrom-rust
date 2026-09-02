@@ -165,8 +165,28 @@ try {
             Add-Log $log $text
             $proof64 = [regex]::IsMatch($text, '(?m)^' + [regex]::Escape($test.label) + ' 64x48: 8 VFR boundaries, 19 exact CLI-reference seek cases$')
             $proof1080 = [regex]::IsMatch($text, '(?m)^' + [regex]::Escape($test.label) + ' 1920x1080: 8 VFR boundaries, 19 exact CLI-reference seek cases$')
-            $passed = $exitCode -eq 0 -and $proof64 -and $proof1080 -and $text -match 'test result: ok\. 1 passed; 0 failed;'
-            $runResults += [ordered]@{ test = $test.name; backend = $test.backend; codec = $test.codec; exit_code = $exitCode; passed = $passed; output_proves_64x48 = $proof64; output_proves_1920x1080 = $proof1080; vfr_boundaries = if ($passed) { 8 } else { $null }; exact_cases_per_size = if ($passed) { 19 } else { $null } }
+            $namedDecoderReopen = $null
+            $proofNamedDecoderReopen = $true
+            if ($test.backend -eq 'Intel Quick Sync') {
+                $proofPattern = '(?m)^' + [regex]::Escape($test.label) + ' (?<width>64|1920)x(?<height>48|1080): named decoder reopen: (?<samples>\d+) samples, total (?<total>\d+\.\d{3}) ms, mean (?<mean>\d+\.\d{3}) ms, max (?<max>\d+\.\d{3}) ms$'
+                $proofMatches = [regex]::Matches($text, $proofPattern)
+                $proofNamedDecoderReopen = $proofMatches.Count -eq 2
+                $namedDecoderReopen = @()
+                foreach ($proofMatch in $proofMatches) {
+                    $samples = [UInt64]$proofMatch.Groups['samples'].Value
+                    $proofNamedDecoderReopen = $proofNamedDecoderReopen -and $samples -eq 7
+                    $namedDecoderReopen += [ordered]@{
+                        output_size = @([int]$proofMatch.Groups['width'].Value, [int]$proofMatch.Groups['height'].Value)
+                        samples = $samples
+                        total_ms = [double]::Parse($proofMatch.Groups['total'].Value, [Globalization.CultureInfo]::InvariantCulture)
+                        mean_ms = [double]::Parse($proofMatch.Groups['mean'].Value, [Globalization.CultureInfo]::InvariantCulture)
+                        max_ms = [double]::Parse($proofMatch.Groups['max'].Value, [Globalization.CultureInfo]::InvariantCulture)
+                    }
+                }
+                $proofNamedDecoderReopen = $proofNamedDecoderReopen -and @($namedDecoderReopen | Where-Object { $_.output_size[0] -eq 64 -and $_.output_size[1] -eq 48 }).Count -eq 1 -and @($namedDecoderReopen | Where-Object { $_.output_size[0] -eq 1920 -and $_.output_size[1] -eq 1080 }).Count -eq 1
+            }
+            $passed = $exitCode -eq 0 -and $proof64 -and $proof1080 -and $proofNamedDecoderReopen -and $text -match 'test result: ok\. 1 passed; 0 failed;'
+            $runResults += [ordered]@{ test = $test.name; backend = $test.backend; codec = $test.codec; exit_code = $exitCode; passed = $passed; output_proves_64x48 = $proof64; output_proves_1920x1080 = $proof1080; output_proves_named_decoder_reopen = $proofNamedDecoderReopen; named_decoder_reopen = $namedDecoderReopen; vfr_boundaries = if ($passed) { 8 } else { $null }; exact_cases_per_size = if ($passed) { 19 } else { $null } }
             if (-not $passed) { throw "Hardware VFR test did not meet its exact-output contract: $($test.name)" }
         }
     } finally { Pop-Location }

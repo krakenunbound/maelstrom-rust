@@ -190,6 +190,7 @@ struct DecoderLayerStageTimings {
     scaler: DecoderStageTiming,
     rgba_copy_letterbox: DecoderStageTiming,
     worker_request: DecoderStageTiming,
+    named_decoder_reopen: DecoderStageTiming,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
@@ -220,6 +221,7 @@ impl DecoderLayerStageTimings {
             scaler: timings.scaler.into(),
             rgba_copy_letterbox: timings.rgba_copy_letterbox.into(),
             worker_request: timings.worker_request.into(),
+            named_decoder_reopen: timings.named_decoder_reopen.into(),
         }
     }
 }
@@ -1350,6 +1352,11 @@ mod tests {
                 total_nanos: 20,
                 max_nanos: 21,
             },
+            named_decoder_reopen: nle_decode::MonitorStageTiming {
+                samples: 22,
+                total_nanos: 23,
+                max_nanos: 24,
+            },
         };
 
         let value = serde_json::to_value(DecoderLayerStageTimings::from_snapshot(2, snapshot))
@@ -1363,6 +1370,7 @@ mod tests {
             ("scaler", [13, 14, 15]),
             ("rgba_copy_letterbox", [16, 17, 18]),
             ("worker_request", [19, 20, 21]),
+            ("named_decoder_reopen", [22, 23, 24]),
         ] {
             assert_eq!(value[stage]["samples"], counters[0]);
             assert_eq!(value[stage]["total_nanos"], counters[1]);

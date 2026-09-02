@@ -1,6 +1,6 @@
 # Performance reports
 
-Maelstrom's existing surface-submission probe writes a schema-version 7 JSON report when
+Maelstrom's existing surface-submission probe writes a schema-version 9 JSON report when
 `MAELSTROM_SURFACE_SUBMISSION_REPORT` names an output file. Frame/submission and bounded viewer
 timing samples measure a fixed 120-frame window; decoder-worker and audio timing aggregates are
 cumulative at publication. Report serialization and disk IO remain on the existing one-shot,
@@ -19,6 +19,10 @@ The report records:
   demux packet retrieval, decoder send/receive/flush calls, hardware-to-CPU transfer, scaler
   work, RGBA copy plus letterbox, and whole worker request. Each stage has sample count, total,
   mean, and maximum milliseconds. Software decode legitimately reports zero transfer samples.
+  `named_decoder_reopen` separately measures synchronous named hardware-decoder reopen attempts;
+  zero samples are valid for software, native Windows hardware decode, CUVID, and QSV sessions
+  that never reverse-seek. It includes failed reopen attempts and does not measure GPU completion
+  or end-to-end scrub latency.
   Since the single-allocation packing checkpoint, RGBA packing includes the final shared-buffer
   allocation. Earlier reports excluded the last Vec-to-Arc allocation/copy; do not compare those
   historical stage spans directly. See `monitor-rgba-packing.md` for the paired measurement.
@@ -87,7 +91,8 @@ GPU rows display p95/maximum values; every observed row includes its sample coun
 shows active contributing video layers and selected-to-resolved preview quality. A compositor CPU
 snapshot uses a non-blocking lock attempt, so diagnostics never wait for the render callback.
 Unsupported GPU timestamp queries, a busy callback snapshot, and stages with no samples display as
-unavailable rather than a fabricated zero. This live view does not change the schema-8 report or
+unavailable rather than a fabricated zero. The sparse named-decoder-reopen stage remains report-only
+and is not added to the compact live HUD. This live view does not change the schema-9 report or
 its qualification role.
 
 Facts unavailable through a supported platform API are serialized as JSON `null`; zero and
@@ -163,7 +168,7 @@ The runner enforces CPU p95 at or below 8 ms and GPU-pass p95 at or below the 33
 budget. It deliberately records `physical_scanout_observed: false` and
 `app_auto_preview_observed: false`, and is limited to
 `scope: "headless_transformed_multilayer_viewer_compositor_with_post_measurement_state_scenarios"`:
-it does not replace the schema-8
+it does not replace the schema-9
 surface report or establish app Auto resolution, presentation, DWM composition, physical scanout,
 or end-to-end display latency.
 
@@ -221,7 +226,7 @@ The opt-in full-surface runner complements the headless compositor proof. It lau
 packaged editor path once on a compatible DX12 `IntegratedGpu` and once on a compatible DX12
 `DiscreteGpu`, using the ordinary window surface, media import, native viewer upload, audio
 callback, and cancelled Quick Export acceptance path. Each run must produce a complete
-schema-version 7 report with exercised decoder, viewer, GPU, audio, and runtime-diagnostic fields
+schema-version 9 report with exercised decoder, viewer, GPU, audio, and runtime-diagnostic fields
 while retaining the foundation CPU and surface-cadence limits. Normal editor startup remains
 unchanged; the adapter-class override exists only through the explicit
 `MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS` qualification seam and fails rather than falling back to a
@@ -236,11 +241,13 @@ Run it only against the full absolute packaged path:
 
 The ignored `artifacts/phase0-cross-adapter-surface` directory retains the most recent surface
 reports, startup reports, media-acceptance reports, and a schema-version 2 wrapper containing the
-exact executable hash plus every completed child-report hash. Surface schema 8 adds a nested
+exact executable hash plus every completed child-report hash. Surface schema 9 retains the nested
 `observation_scope`: submission, present-call CPU, and completed GPU submissions are independently
 reported, while `physical_scanout_observed` remains false until supported instrumentation exists.
-The preceding retained cross-adapter evidence is schema 7 and therefore requires a fresh explicitly
-authorized editor run before it can qualify schema 8. A pass has `failure: null`. Once the
+It also requires the additive `named_decoder_reopen` stage, without requiring nonzero samples in an
+ordinary smoke run. The preceding retained cross-adapter evidence is schema 7; schema 8 was never
+requalified before schema 9 superseded it. A fresh explicitly authorized editor run is therefore
+required before the current surface contract can be qualified. A pass has `failure: null`. Once the
 report destination has been validated and the exclusive run lock acquired, the runner attempts to
 atomically publish `status: "failed"` and one structured `failure` object before returning a
 nonzero result. A unique same-directory temporary file prevents stale fixed-temp collisions. That
