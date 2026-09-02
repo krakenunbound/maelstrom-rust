@@ -3,15 +3,14 @@
 `scripts/Run-Phase0Scenarios.ps1` runs the finite, ignored native Rust scenario
 matrix. It does not launch the Maelstrom GUI executable.
 
-The runner requires an explicit absolute FFmpeg 8.1 bundle path. It generates
-and validates the tracked fixture contract, then passes the generated two-second
-MP4 through `MAELSTROM_PHASE0_MEDIA` and the exact absolute reordered TS path through
-`MAELSTROM_REORDERED_VFR_TEST_MEDIA`. It also routes the generated shifted/reordered MPEG-4 MP4
-through `MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA`. Before the seven-scenario matrix, focused
-Cargo tests gate waveform timestamp-origin normalization, software decode against independent CLI
-pixels, and app preview floor/hold addressing across the reordered TS, shifted/reordered MP4, and
-shifted 10-bit MOV fixtures. The JSON report is
-written atomically to the ignored `artifacts/phase0-scenarios/` directory.
+The runner requires an explicit absolute FFmpeg 8.1 bundle path. It generates and validates the
+tracked fixture contract, validates/rebuilds the separately pinned local-only AOM AV1 fixture, then
+passes exact absolute fixture paths through environment variables. Before the seven-scenario matrix,
+focused Cargo tests gate waveform timestamp-origin normalization, software or qualified named decode
+against independent CLI pixels, app preview floor/hold addressing, and source-identity export across
+the reordered TS, shifted/reordered MPEG-4, shifted 10-bit MOV, and shifted AV1 fixtures. AV1 uses
+`MAELSTROM_AV1_VFR_TEST_MEDIA`; the runner restores it with every other altered variable. The JSON
+report is written atomically to the ignored `artifacts/phase0-scenarios/` directory.
 
 ```powershell
 .\scripts\Run-Phase0Scenarios.ps1 -FfmpegRoot 'H:\Maelstrom Rust\.deps\ffmpeg-project-8.1'

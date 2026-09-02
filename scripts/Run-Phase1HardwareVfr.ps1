@@ -78,7 +78,7 @@ function Assert-PinnedFfmpegBundle([string]$BundleRoot) {
 }
 
 function Assert-Av1CliReferencePixels([string]$FfmpegPath, [string]$FixturePath) {
-    $expectedMd5 = @('1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc', '1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc', '1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc', '1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc')
+    $expectedMd5 = @('f7d06010d13a06455848d5d394c7bea9', 'f06f017fab7485af4a65eb38eabf440f', '5f826aa41f82d4e87575fae50a6a8ae1', '98f48f68b5cb6ff99be50524c7b89bca', 'f4a695c3a38213e8e6e59af55badb099', '692d78e599f28282e0dcf177f37c0622', 'f743e671cc74ab32ce97e3f0d48f3dd0', '67a15a5ce3cfe028c770eccf045b38f7')
     $paths = @(
         [ordered]@{ label = 'D3D11VA'; decoder = 'av1'; hwaccel = 'd3d11va' },
         [ordered]@{ label = 'DXVA2'; decoder = 'av1'; hwaccel = 'dxva2' },
@@ -119,7 +119,7 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedReportPath), $art
 $fixtureContracts = @(
     [ordered]@{ codec = 'h264'; path = (Join-Path $fixtureRoot 'codec-vfr-h264-bt709-1080p-hardware.mp4'); sha256 = '503B39F6C101F8395B49AD424711357DC317C2CAEFCFCC9E5F795A0D46CDCAA6' },
     [ordered]@{ codec = 'hevc_main10'; path = (Join-Path $fixtureRoot 'codec-vfr-hevc-main10-bt709-1080p-hardware.mp4'); sha256 = '1AF892D8C40634E354A05FD80A446298C5501914D2E39ECD641D792B6538C486' },
-    [ordered]@{ codec = 'av1_main'; path = (Join-Path $repoRoot 'artifacts\media-fixtures\vfr-av1-aom-shifted.mkv'); sha256 = '6ADB3B081701F13ED7C5EFDC26F092E08D474AE2D9E7840B6C58A2B937A9EC9C' }
+    [ordered]@{ codec = 'av1_main'; path = (Join-Path $repoRoot 'artifacts\media-fixtures\vfr-av1-aom-shifted.mkv'); sha256 = 'B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21' }
 )
 $tests = @(
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_d3d11va_h264_vfr_scrub_matches_independent_cli_reference'; backend = 'D3D11VA'; codec = 'h264'; label = 'D3D11VA supplied H.264 VFR Windows D3D11VA' },

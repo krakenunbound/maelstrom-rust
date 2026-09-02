@@ -1,7 +1,7 @@
 //! Source-frame identity, not codec/color quality: preserve the production export graph while
 //! substituting the redistributable MPEG-4 encoder, as in the existing five-color VFR test.
 use super::*;
-use crate::audio_boundary_tests::run_ffmpeg_bounded;
+use crate::audio_boundary_tests::{run_ffmpeg_bounded, try_run_ffmpeg_bounded};
 use nle_timeline::MediaId;
 use nle_ui_core::{EditorState, Language, ProjectFrameRate, SourceFrameTimeIndex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +13,7 @@ struct ShiftedVfrFixture {
     codec: &'static str,
     origin: i64,
     pix_fmt: &'static str,
+    size: [u32; 2],
     local_pts: &'static [i64],
     source_duration: i64,
     exclusive_tail: (i64, u64),
@@ -27,35 +28,125 @@ impl Drop for TempFiles {
     }
 }
 
-fn decode_rgb(ffmpeg: &Path, source: &Path, raw: &Path, stderr: &Path) -> Vec<Vec<u8>> {
-    run_ffmpeg_bounded(
-        ffmpeg,
-        &[
-            "-hide_banner".into(),
-            "-loglevel".into(),
-            "error".into(),
-            "-y".into(),
-            "-i".into(),
-            source.to_string_lossy().into_owned(),
-            "-fps_mode".into(),
-            "passthrough".into(),
-            "-an".into(),
-            "-f".into(),
-            "rawvideo".into(),
-            "-pix_fmt".into(),
-            "rgb24".into(),
-            raw.to_string_lossy().into_owned(),
-        ],
-        stderr,
-    );
+fn decode_rgb(
+    ffmpeg: &Path,
+    source: &Path,
+    raw: &Path,
+    stderr: &Path,
+    size: [u32; 2],
+    decoder: Option<&str>,
+) -> Vec<Vec<u8>> {
+    let mut args = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+    ];
+    if let Some(decoder) = decoder {
+        args.extend(["-c:v".into(), decoder.into()]);
+    }
+    args.extend([
+        "-i".into(),
+        source.to_string_lossy().into_owned(),
+        "-fps_mode".into(),
+        "passthrough".into(),
+        "-an".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "rgb24".into(),
+        raw.to_string_lossy().into_owned(),
+    ]);
+    run_ffmpeg_bounded(ffmpeg, &args, stderr);
     let bytes = fs::read(raw).expect("read independently decoded RGB frames");
-    const FRAME_BYTES: usize = 320 * 180 * 3;
+    let frame_bytes = size[0] as usize * size[1] as usize * 3;
     assert!(!bytes.is_empty());
-    assert_eq!(bytes.len() % FRAME_BYTES, 0);
+    assert_eq!(bytes.len() % frame_bytes, 0);
     bytes
-        .chunks_exact(FRAME_BYTES)
+        .chunks_exact(frame_bytes)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn av1_reference_decoder(
+    ffprobe: &Path,
+    source: &Path,
+    timestamps: &Path,
+    stderr: &Path,
+) -> String {
+    let mut failures = Vec::new();
+    for decoder in ["av1_cuvid", "av1_qsv", "av1"] {
+        let _ = fs::remove_file(timestamps);
+        let args = [
+            "-v".into(),
+            "error".into(),
+            "-c:v".into(),
+            decoder.into(),
+            "-select_streams".into(),
+            "v:0".into(),
+            "-show_entries".into(),
+            "frame=best_effort_timestamp_time".into(),
+            "-of".into(),
+            "csv=p=0".into(),
+            "-o".into(),
+            timestamps.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        match try_run_ffmpeg_bounded(ffprobe, &args, stderr) {
+            Ok(()) if fs::metadata(timestamps).is_ok_and(|metadata| metadata.len() > 0) => {
+                return decoder.to_owned();
+            }
+            Ok(()) => failures.push(format!("{decoder}: no decoded frame timestamps")),
+            Err(error) => failures.push(format!("{decoder}: {error}")),
+        }
+    }
+    panic!(
+        "no independent AV1 decoder produced frame timestamps ({})",
+        failures.join("; ")
+    );
+}
+
+fn run_identity_export(
+    ffmpeg: &Path,
+    request: &ExportRequest,
+    plan: &ExportPlan,
+    filter: &Path,
+    output: &Path,
+    stderr: &Path,
+    av1: bool,
+) {
+    let candidates = if av1 {
+        av1_input_decoder_candidates(plan)
+    } else {
+        vec![Av1InputDecoder::Default]
+    };
+    let mut failures = Vec::new();
+    for decoder in candidates {
+        let (mut args, graph) = build_ffmpeg_job_with_title_assets_and_input_decoder(
+            request,
+            plan,
+            H264Encoder::OpenH264,
+            &[],
+            decoder,
+        )
+        .unwrap();
+        let encoder = args.iter().rposition(|arg| arg == "-c:v").unwrap();
+        args[encoder + 1] = "mpeg4".into();
+        let script = args.iter().position(|arg| arg == "FILTER_SCRIPT").unwrap();
+        args[script] = filter.to_string_lossy().into_owned();
+        fs::write(filter, graph).unwrap();
+        let _ = fs::remove_file(output);
+        match try_run_ffmpeg_bounded(ffmpeg, &args, stderr) {
+            Ok(()) => return,
+            Err(error) => failures.push(format!("{}: {error}", decoder.name())),
+        }
+    }
+    let label = if av1 {
+        "all identity-export AV1 decoder candidates failed"
+    } else {
+        "identity export failed"
+    };
+    panic!("{label} ({})", failures.join("; "));
 }
 
 fn shifted_vfr_export_matches_preview(fixture: &ShiftedVfrFixture) {
@@ -108,8 +199,8 @@ fn shifted_vfr_export_matches_preview(fixture: &ShiftedVfrFixture) {
     let metadata = fs::read_to_string(properties).unwrap();
     for required in [
         format!("codec_name={}", fixture.codec),
-        "width=320".into(),
-        "height=180".into(),
+        format!("width={}", fixture.size[0]),
+        format!("height={}", fixture.size[1]),
         format!("pix_fmt={}", fixture.pix_fmt),
         format!(
             "start_time={}.{:06}",
@@ -122,30 +213,42 @@ fn shifted_vfr_export_matches_preview(fixture: &ShiftedVfrFixture) {
             "fixture contract: {metadata}"
         );
     }
-    run_ffmpeg_bounded(
-        &ffprobe,
-        &[
-            "-v".into(),
-            "error".into(),
-            "-select_streams".into(),
-            "v:0".into(),
-            "-show_entries".into(),
-            "frame=best_effort_timestamp_time".into(),
-            "-of".into(),
-            "csv=p=0".into(),
-            "-o".into(),
-            timestamps.to_string_lossy().into_owned(),
-            source.to_string_lossy().into_owned(),
-        ],
-        stderr,
-    );
+    let reference_decoder = (fixture.codec == "av1")
+        .then(|| av1_reference_decoder(&ffprobe, &source, timestamps, stderr));
+    if reference_decoder.is_none() {
+        run_ffmpeg_bounded(
+            &ffprobe,
+            &[
+                "-v".into(),
+                "error".into(),
+                "-select_streams".into(),
+                "v:0".into(),
+                "-show_entries".into(),
+                "frame=best_effort_timestamp_time".into(),
+                "-of".into(),
+                "csv=p=0".into(),
+                "-o".into(),
+                timestamps.to_string_lossy().into_owned(),
+                source.to_string_lossy().into_owned(),
+            ],
+            stderr,
+        );
+    }
     let pts: Vec<i64> = fs::read_to_string(timestamps)
         .unwrap()
         .lines()
         .map(|line| (line.parse::<f64>().unwrap() * 1_000_000.0).round() as i64 - fixture.origin)
         .collect();
     assert_eq!(pts, fixture.local_pts);
-    let references = decode_rgb(&ffmpeg, &source, raw, stderr);
+    // AV1 references use FFmpeg's explicitly named native decoder, not packet order/timing.
+    let references = decode_rgb(
+        &ffmpeg,
+        &source,
+        raw,
+        stderr,
+        fixture.size,
+        reference_decoder.as_deref(),
+    );
     assert_eq!(references.len(), pts.len());
 
     for fps in [[30, 1], [30_000, 1_001]] {
@@ -216,7 +319,7 @@ fn shifted_vfr_export_matches_preview(fixture: &ShiftedVfrFixture) {
                 snapshot: editor.snapshot(),
                 settings: ProjectSettings {
                     fps,
-                    size: [320, 180],
+                    size: fixture.size,
                 },
                 output: output.clone(),
                 ffmpeg: ffmpeg.clone(),
@@ -224,15 +327,16 @@ fn shifted_vfr_export_matches_preview(fixture: &ShiftedVfrFixture) {
             };
             let plan = ExportPlan::from_request(&request).unwrap();
             assert_eq!(plan.duration, Tick(frame_tick(frame_count)));
-            let (mut args, graph) =
-                build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
-            let encoder = args.iter().position(|arg| arg == "-c:v").unwrap();
-            args[encoder + 1] = "mpeg4".into();
-            let script = args.iter().position(|arg| arg == "FILTER_SCRIPT").unwrap();
-            args[script] = filter.to_string_lossy().into_owned();
-            fs::write(filter, graph).unwrap();
-            run_ffmpeg_bounded(&ffmpeg, &args, stderr);
-            let frames = decode_rgb(&ffmpeg, output, raw, stderr);
+            run_identity_export(
+                &ffmpeg,
+                &request,
+                &plan,
+                filter,
+                output,
+                stderr,
+                fixture.codec == "av1",
+            );
+            let frames = decode_rgb(&ffmpeg, output, raw, stderr, fixture.size, None);
             run_ffmpeg_bounded(
                 &ffprobe,
                 &[
@@ -312,6 +416,7 @@ fn supplied_prores_vfr_export_matches_preview_source_identity() {
         codec: "prores",
         origin: 7_000_000,
         pix_fmt: "yuv422p10le",
+        size: [320, 180],
         local_pts: &[
             0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
         ],
@@ -328,6 +433,7 @@ fn supplied_dnxhr_vfr_export_matches_preview_source_identity() {
         codec: "dnxhd",
         origin: 7_000_000,
         pix_fmt: "yuv422p10le",
+        size: [320, 180],
         local_pts: &[
             0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
         ],
@@ -344,11 +450,30 @@ fn supplied_shifted_reordered_mpeg4_vfr_export_matches_preview_source_identity()
         codec: "mpeg4",
         origin: 3_000_000,
         pix_fmt: "yuv420p",
+        size: [320, 180],
         local_pts: &[
             0, 33_333, 100_000, 133_333, 200_000, 266_667, 366_667, 400_000,
         ],
         source_duration: 433_333,
         exclusive_tail: (266_667, 3),
+        final_frame_source_in: 400_000,
+    });
+}
+
+#[test]
+fn supplied_av1_vfr_export_matches_preview_source_identity() {
+    shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
+        variable: "MAELSTROM_AV1_VFR_TEST_MEDIA",
+        codec: "av1",
+        origin: 5_000_000,
+        pix_fmt: "yuv420p",
+        size: [352, 288],
+        local_pts: &[
+            0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+        ],
+        source_duration: 433_000,
+        // At 30 fps this selects whole project frames through the 367 ms source frame.
+        exclusive_tail: (267_000, 4),
         final_frame_source_in: 400_000,
     });
 }

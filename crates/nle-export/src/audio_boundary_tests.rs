@@ -48,8 +48,13 @@ fn unique_temp_path(name: &str, extension: &str) -> PathBuf {
     ))
 }
 
-pub(super) fn run_ffmpeg_bounded(ffmpeg: &Path, args: &[String], stderr: &Path) {
-    let stderr_file = File::create(stderr).expect("create FFmpeg stderr capture");
+pub(super) fn try_run_ffmpeg_bounded(
+    ffmpeg: &Path,
+    args: &[String],
+    stderr: &Path,
+) -> Result<(), String> {
+    let stderr_file = File::create(stderr)
+        .map_err(|error| format!("could not create FFmpeg stderr capture: {error}"))?;
     let mut child = BoundedChild(Some(
         Command::new(ffmpeg)
             .args(args)
@@ -57,7 +62,7 @@ pub(super) fn run_ffmpeg_bounded(ffmpeg: &Path, args: &[String], stderr: &Path) 
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file))
             .spawn()
-            .expect("start bundled FFmpeg"),
+            .map_err(|error| format!("could not start bundled FFmpeg: {error}"))?,
     ));
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -66,23 +71,29 @@ pub(super) fn run_ffmpeg_bounded(ffmpeg: &Path, args: &[String], stderr: &Path) 
             .as_mut()
             .expect("FFmpeg child must remain owned until it exits")
             .try_wait()
-            .expect("poll FFmpeg")
+            .map_err(|error| format!("could not poll FFmpeg: {error}"))?
         {
             child.0.take();
-            assert!(
-                status.success(),
-                "FFmpeg failed: {}",
-                fs::read_to_string(stderr).unwrap_or_default()
-            );
-            return;
+            return status.success().then_some(()).ok_or_else(|| {
+                format!(
+                    "FFmpeg failed: {}",
+                    fs::read_to_string(stderr).unwrap_or_default()
+                )
+            });
         }
         if Instant::now() >= deadline {
-            panic!(
+            return Err(format!(
                 "FFmpeg exceeded the 10-second audio-boundary watchdog: {}",
                 fs::read_to_string(stderr).unwrap_or_default()
-            );
+            ));
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+pub(super) fn run_ffmpeg_bounded(ffmpeg: &Path, args: &[String], stderr: &Path) {
+    if let Err(error) = try_run_ffmpeg_bounded(ffmpeg, args, stderr) {
+        panic!("{error}");
     }
 }
 

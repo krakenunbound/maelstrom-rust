@@ -4,8 +4,8 @@
   "artifact_root": "artifacts/media-fixtures",
   "output": {
     "path": "vfr-av1-aom-shifted.mkv",
-    "sha256": "6ADB3B081701F13ED7C5EFDC26F092E08D474AE2D9E7840B6C58A2B937A9EC9C",
-    "byte_size": 516187,
+    "sha256": "B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21",
+    "byte_size": 306777,
     "container": "matroska,webm",
     "start_time": "5.000000",
     "duration": "5.433000",
@@ -17,44 +17,53 @@
       "height": 288,
       "has_b_frames": 0,
       "time_base": "1/1000",
-      "r_frame_rate": "30/1",
-      "avg_frame_rate": "30/1"
+      "r_frame_rate": "30000/1001",
+      "avg_frame_rate": "3/1"
     },
     "packets": [
       { "pts": 5000, "dts": 5000, "duration": 33, "flags": "K__" },
-      { "pts": 5033, "dts": 5033, "duration": 33, "flags": "___" },
+      { "pts": 5033, "dts": 5033, "duration": 33, "flags": "K__" },
       { "pts": 5100, "dts": 5100, "duration": 33, "flags": "K__" },
-      { "pts": 5133, "dts": 5133, "duration": 33, "flags": "___" },
+      { "pts": 5133, "dts": 5133, "duration": 33, "flags": "K__" },
       { "pts": 5200, "dts": 5200, "duration": 33, "flags": "K__" },
-      { "pts": 5267, "dts": 5267, "duration": 33, "flags": "___" },
+      { "pts": 5267, "dts": 5267, "duration": 33, "flags": "K__" },
       { "pts": 5367, "dts": 5367, "duration": 33, "flags": "K__" },
-      { "pts": 5400, "dts": 5400, "duration": 33, "flags": "___" }
+      { "pts": 5400, "dts": 5400, "duration": 33, "flags": "K__" }
     ]
   },
   "inputs": [
     {
-      "path": "aom-av1-1-b8-00-quantizer-00.ivf",
-      "url": "https://storage.googleapis.com/aom-test-data/av1-1-b8-00-quantizer-00.ivf",
-      "sha1": "C2E1EC9936B95254187A359E94AA32A9F3DAD1B7",
-      "sha256": "6382DBD2BEFBBC93D4EA283586F4FB43FEA5F1C52400E3D2C5281A46B1104C00",
-      "byte_size": 128943
+      "path": "aom-av1-1-b8-02-allintra.ivf",
+      "url": "https://storage.googleapis.com/aom-test-data/av1-1-b8-02-allintra.ivf",
+      "sha1": "A9F7EA6312A533CC6426A6145EDD190D45813C37",
+      "sha256": "5FCD265FD9F9BDD0D3179340B4C4532F1422CA5E5D97741C7481B84CB5DC122F",
+      "byte_size": 1488725
     },
     {
-      "path": "aom-av1-1-b8-00-quantizer-00.ivf.md5",
-      "url": "https://storage.googleapis.com/aom-test-data/av1-1-b8-00-quantizer-00.ivf.md5",
-      "sha1": "26CD2A0321D01D9DB5F6DACE8B43A40CD5B9D58D",
-      "sha256": "DCBB3AF4E9A062825D7D1901CB1CF40DB911C3A3B9FFCD02AD3CD77881D0B98F",
-      "byte_size": 162,
-      "frame_md5": ["1998867ce2f47e15728862d6b55de0b4", "48e9c8687a16b488ba1f7c49cb1f78fc"]
+      "path": "aom-av1-1-b8-02-allintra.ivf.md5",
+      "url": "https://storage.googleapis.com/aom-test-data/av1-1-b8-02-allintra.ivf.md5",
+      "sha1": "8FD8F789CFEE1069D20F3E2C241F5CAD7292239E",
+      "sha256": "CC4BD1C999FCD160C4D5215228B38157A534583004261A9CCDDB1C718F49729D",
+      "byte_size": 3003,
+      "frame_md5": [
+        "f7d06010d13a06455848d5d394c7bea9",
+        "f06f017fab7485af4a65eb38eabf440f",
+        "5f826aa41f82d4e87575fae50a6a8ae1",
+        "98f48f68b5cb6ff99be50524c7b89bca",
+        "f4a695c3a38213e8e6e59af55badb099",
+        "692d78e599f28282e0dcf177f37c0622",
+        "f743e671cc74ab32ce97e3f0d48f3dd0",
+        "67a15a5ce3cfe028c770eccf045b38f7"
+      ]
     }
   ],
   "recipe": {
     "ffmpeg_root": ".deps/ffmpeg-project-8.1",
-    "stream_loop": 3,
+    "source_frames": "first 8 of 39 all-intra frames",
     "stream_copy": true,
     "bitstream_filter": "setts with time_base=1/1000 and prescale=1",
     "ffmpeg_options": ["-fflags +bitexact", "-flags:v +bitexact", "-map_metadata -1"]
   },
-  "upstream_checksum_manifest": "https://aomedia.googlesource.com/aom/+/refs/heads/av1-normative/test/test-data.sha1",
+  "upstream_checksum_manifest": "https://aomedia.googlesource.com/aom/+/a40ed1ea9e4ecc3df58a5bccb76623f2c94ae727/test/test-data.sha1",
   "redistribution": "local-only AOM test inputs and derived artifact; this repository does not redistribute either and makes no licensing claim"
 }

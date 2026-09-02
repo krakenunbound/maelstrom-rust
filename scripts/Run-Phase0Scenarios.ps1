@@ -58,6 +58,7 @@ $reorderedVfrPath = Join-Path $fixtureRoot 'vfr-reordered-mpeg2.ts'
 $shiftedReorderedVfrPath = Join-Path $fixtureRoot 'vfr-reordered-shifted-mpeg4.mp4'
 $proresVfrPath = Join-Path $fixtureRoot 'vfr-prores-10bit-shifted.mov'
 $dnxhrVfrPath = Join-Path $fixtureRoot 'vfr-dnxhr-10bit-shifted.mov'
+$av1VfrPath = Join-Path $fixtureRoot 'vfr-av1-aom-shifted.mkv'
 $libclangRoot = if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
     Join-Path $repoRoot '.deps\libclang-bindgen'
 } else {
@@ -73,6 +74,7 @@ $savedReorderedVfrMedia = $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA
 $savedShiftedReorderedVfrMedia = $env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA
 $savedProresVfrMedia = $env:MAELSTROM_PRORES_VFR_TEST_MEDIA
 $savedDnxhrVfrMedia = $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA
+$savedAv1VfrMedia = $env:MAELSTROM_AV1_VFR_TEST_MEDIA
 $savedReport = $env:MAELSTROM_PHASE0_REPORT
 $savedArtifactRoot = $env:MAELSTROM_PHASE0_ARTIFACT_ROOT
 $repoLocationPushed = $false
@@ -82,6 +84,7 @@ try {
     if (-not $SkipFixtureValidation) {
         & (Join-Path $PSScriptRoot 'Generate-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath
         & (Join-Path $PSScriptRoot 'Test-MediaFixtures.ps1') -FfmpegRoot $ffmpegRootPath -ArtifactRoot $fixtureRoot
+        & (Join-Path $PSScriptRoot 'Prepare-Av1VfrFixture.ps1')
     }
     if (-not (Test-Path -LiteralPath $mediaPath -PathType Leaf)) { throw "Missing generated Phase 0 media fixture: $mediaPath" }
     if (-not (Test-Path -LiteralPath $reorderedVfrPath -PathType Leaf)) { throw "Missing generated reordered VFR fixture: $reorderedVfrPath" }
@@ -89,6 +92,7 @@ try {
     $shiftedReorderedVfrPath = (Resolve-Path -LiteralPath $shiftedReorderedVfrPath -ErrorAction Stop).Path
     $proresVfrPath = (Resolve-Path -LiteralPath $proresVfrPath -ErrorAction Stop).Path
     $dnxhrVfrPath = (Resolve-Path -LiteralPath $dnxhrVfrPath -ErrorAction Stop).Path
+    $av1VfrPath = (Resolve-Path -LiteralPath $av1VfrPath -ErrorAction Stop).Path
 
     Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $resolvedArtifactRoot 'phase0-cancelled.mp4') -Force -ErrorAction SilentlyContinue
@@ -100,6 +104,7 @@ try {
     $env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA = $shiftedReorderedVfrPath
     $env:MAELSTROM_PRORES_VFR_TEST_MEDIA = $proresVfrPath
     $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA = $dnxhrVfrPath
+    $env:MAELSTROM_AV1_VFR_TEST_MEDIA = $av1VfrPath
     $env:MAELSTROM_PHASE0_REPORT = $resolvedReportPath
     $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $resolvedArtifactRoot
     Push-Location -LiteralPath $repoRoot
@@ -208,6 +213,7 @@ finally {
     if ($null -eq $savedShiftedReorderedVfrMedia) { Remove-Item Env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA = $savedShiftedReorderedVfrMedia }
     if ($null -eq $savedProresVfrMedia) { Remove-Item Env:MAELSTROM_PRORES_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PRORES_VFR_TEST_MEDIA = $savedProresVfrMedia }
     if ($null -eq $savedDnxhrVfrMedia) { Remove-Item Env:MAELSTROM_DNXHR_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA = $savedDnxhrVfrMedia }
+    if ($null -eq $savedAv1VfrMedia) { Remove-Item Env:MAELSTROM_AV1_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_AV1_VFR_TEST_MEDIA = $savedAv1VfrMedia }
     if ($null -eq $savedReport) { Remove-Item Env:MAELSTROM_PHASE0_REPORT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_REPORT = $savedReport }
     if ($null -eq $savedArtifactRoot) { Remove-Item Env:MAELSTROM_PHASE0_ARTIFACT_ROOT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_ARTIFACT_ROOT = $savedArtifactRoot }
     if ($null -ne $phase0Mutex) { $phase0Mutex.ReleaseMutex(); $phase0Mutex.Dispose() }

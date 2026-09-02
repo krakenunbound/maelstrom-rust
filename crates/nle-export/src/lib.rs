@@ -138,6 +138,7 @@ impl Drop for ExportJob {
 struct MediaProbe {
     source_size: Option<PixelSize>,
     has_audio: bool,
+    video_is_av1: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +148,7 @@ struct VideoClipPlan {
     effects: CompiledVideoEffectGraph,
     path: PathBuf,
     is_still: bool,
+    video_is_av1: bool,
     source_size: PixelSize,
     quad: CompositeQuad,
     input_source_in: Tick,
@@ -904,7 +906,8 @@ impl ExportPlan {
                     .cloned()
                     .ok_or_else(|| format!("clip {} references missing media", clip.id.0))?;
                 let is_still = classify_path(&path) == MediaKind::Image;
-                let source_size = media_probe(&path)?
+                let media_probe = media_probe(&path)?;
+                let source_size = media_probe
                     .source_size
                     .ok_or_else(|| format!("clip {} has no decodable video stream", clip.id.0))?;
                 let quad = plan_composition(CompositionRequest {
@@ -972,6 +975,7 @@ impl ExportPlan {
                     effects,
                     path,
                     is_still,
+                    video_is_av1: media_probe.video_is_av1,
                     source_size,
                     quad,
                     input_source_in: if is_still {
@@ -1212,35 +1216,121 @@ fn run_export_attempts_with_assets(
         request.encoders.clone()
     };
     let mut errors = Vec::new();
-    for encoder in encoders {
-        if cancel.load(Ordering::Acquire) {
-            return Err("export cancelled".to_owned());
-        }
-        let filter_path = filter_script_path(&request.output, encoder);
-        let (args, filter) =
-            build_ffmpeg_job_with_title_assets(request, plan, encoder, title_assets)?;
-        if let Err(error) = fs::write(&filter_path, filter) {
+    for decoder in av1_input_decoder_candidates(plan) {
+        for encoder in &encoders {
+            if cancel.load(Ordering::Acquire) {
+                return Err("export cancelled".to_owned());
+            }
+            let filter_path = filter_script_path(&request.output, *encoder);
+            let (args, filter) = build_ffmpeg_job_with_title_assets_and_input_decoder(
+                request,
+                plan,
+                *encoder,
+                title_assets,
+                decoder,
+            )?;
+            if let Err(error) = fs::write(&filter_path, filter) {
+                let _ = fs::remove_file(&filter_path);
+                return Err(format!("could not write export filter: {error}"));
+            }
+            let result = run_child_with_encoder(
+                &request.ffmpeg,
+                &args,
+                &filter_path,
+                Some(*encoder),
+                plan.duration,
+                cancel,
+                events,
+                notify,
+            );
             let _ = fs::remove_file(&filter_path);
-            return Err(format!("could not write export filter: {error}"));
-        }
-        let result = run_child_with_encoder(
-            &request.ffmpeg,
-            &args,
-            &filter_path,
-            Some(encoder),
-            plan.duration,
-            cancel,
-            events,
-            notify,
-        );
-        let _ = fs::remove_file(&filter_path);
-        match result {
-            Ok(()) => return Ok(()),
-            Err(error) if cancel.load(Ordering::Acquire) => return Err(error),
-            Err(error) => errors.push(format!("{}: {error}", encoder.ffmpeg_name())),
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if cancel.load(Ordering::Acquire) => return Err(error),
+                Err(error) => errors.push(export_attempt_failure(decoder, *encoder, &error)),
+            }
         }
     }
-    Err(format!("all H.264 encoders failed ({})", errors.join("; ")))
+    let label = if plan_has_av1_video(plan) {
+        "all AV1 input-decoder/H.264 encoder attempts failed"
+    } else {
+        "all H.264 encoders failed"
+    };
+    Err(format!("{label} ({})", errors.join("; ")))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Av1InputDecoder {
+    Default,
+    D3d11va,
+    Dxva2,
+    Cuvid,
+    Qsv,
+}
+
+impl Av1InputDecoder {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::D3d11va => "d3d11va",
+            Self::Dxva2 => "dxva2",
+            Self::Cuvid => "av1_cuvid",
+            Self::Qsv => "av1_qsv",
+        }
+    }
+
+    fn input_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Default => &[],
+            Self::D3d11va => &["-hwaccel", "d3d11va", "-c:v", "av1"],
+            Self::Dxva2 => &["-hwaccel", "dxva2", "-c:v", "av1"],
+            Self::Cuvid => &["-c:v", "av1_cuvid"],
+            Self::Qsv => &["-c:v", "av1_qsv"],
+        }
+    }
+}
+
+fn av1_input_decoder_candidates(plan: &ExportPlan) -> Vec<Av1InputDecoder> {
+    if !plan_has_av1_video(plan) {
+        return vec![Av1InputDecoder::Default];
+    }
+    #[cfg(windows)]
+    {
+        vec![
+            Av1InputDecoder::D3d11va,
+            Av1InputDecoder::Dxva2,
+            Av1InputDecoder::Cuvid,
+            Av1InputDecoder::Qsv,
+            Av1InputDecoder::Default,
+        ]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            Av1InputDecoder::Cuvid,
+            Av1InputDecoder::Qsv,
+            Av1InputDecoder::Default,
+        ]
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        vec![Av1InputDecoder::Default]
+    }
+}
+
+fn plan_has_av1_video(plan: &ExportPlan) -> bool {
+    plan.video_tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .any(|video| video.video_is_av1 && !video.is_still)
+}
+
+fn export_attempt_failure(decoder: Av1InputDecoder, encoder: H264Encoder, error: &str) -> String {
+    format!(
+        "{} input / {} encoder: {error}",
+        decoder.name(),
+        encoder.ffmpeg_name()
+    )
 }
 
 fn default_h264_encoders() -> Vec<H264Encoder> {
@@ -1269,11 +1359,28 @@ fn build_ffmpeg_job_with_title_assets(
     encoder: H264Encoder,
     title_assets: &[TitleAsset],
 ) -> Result<(Vec<String>, String), String> {
+    build_ffmpeg_job_with_title_assets_and_input_decoder(
+        request,
+        plan,
+        encoder,
+        title_assets,
+        Av1InputDecoder::Default,
+    )
+}
+
+fn build_ffmpeg_job_with_title_assets_and_input_decoder(
+    request: &ExportRequest,
+    plan: &ExportPlan,
+    encoder: H264Encoder,
+    title_assets: &[TitleAsset],
+    av1_decoder: Av1InputDecoder,
+) -> Result<(Vec<String>, String), String> {
     build_ffmpeg_job_with_title_assets_and_delivery(
         request,
         plan,
         title_assets,
         VideoDelivery::H264(encoder),
+        av1_decoder,
     )
 }
 
@@ -1301,6 +1408,7 @@ fn build_ffmpeg_job_with_title_assets_and_delivery(
     plan: &ExportPlan,
     title_assets: &[TitleAsset],
     delivery: VideoDelivery,
+    av1_decoder: Av1InputDecoder,
 ) -> Result<(Vec<String>, String), String> {
     if title_assets.len() != plan.titles.len() {
         return Err("title export assets do not match the planned titles".to_owned());
@@ -1343,9 +1451,11 @@ fn build_ffmpeg_job_with_title_assets_and_delivery(
                     // Preserve decoder keyframe preroll and let the graph apply the exact
                     // planned range. This keeps VFR frame selection aligned with preview.
                     "-noaccurate_seek".to_owned(),
-                    "-i".to_owned(),
-                    video.path.to_string_lossy().into_owned(),
                 ]);
+                if video.video_is_av1 {
+                    args.extend(av1_decoder.input_args().iter().map(|arg| (*arg).to_owned()));
+                }
+                args.extend(["-i".to_owned(), video.path.to_string_lossy().into_owned()]);
             }
             video_inputs.push(input_index);
             input_index += 1;
@@ -1532,6 +1642,7 @@ pub fn qualification_render_frame_rgba(
             &plan,
             &title_assets,
             VideoDelivery::RawRgbaFrame { timeline_tick },
+            Av1InputDecoder::Default,
         )?;
         let filter_path = write_qualification_filter(&request.output, &filter)?;
         let result = run_qualification_frame(&request.ffmpeg, &args, &filter_path, expected_bytes);
@@ -2299,21 +2410,29 @@ fn probe_media(ffprobe: &Path, path: &Path) -> Result<MediaProbe, String> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=width,height,codec_name",
             "-of",
-            "csv=p=0",
+            "default=noprint_wrappers=1",
         ])
         .arg(path)
         .output()
         .map_err(|error| format!("could not launch {}: {error}", ffprobe.display()))?;
     let source_size = if video.status.success() {
-        let values = String::from_utf8_lossy(&video.stdout)
-            .trim()
-            .split(',')
-            .filter_map(|value| value.parse::<u32>().ok())
-            .collect::<Vec<_>>();
-        (values.len() == 2 && values[0] > 0 && values[1] > 0)
-            .then(|| PixelSize::new(values[0], values[1]))
+        let video_stdout = String::from_utf8_lossy(&video.stdout);
+        let value = |name| {
+            video_stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+        };
+        match (value("width="), value("height=")) {
+            (Some(width), Some(height)) => match (width.parse::<u32>(), height.parse::<u32>()) {
+                (Ok(width), Ok(height)) if width > 0 && height > 0 => {
+                    Some(PixelSize::new(width, height))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     } else {
         None
     };
@@ -2334,6 +2453,11 @@ fn probe_media(ffprobe: &Path, path: &Path) -> Result<MediaProbe, String> {
     Ok(MediaProbe {
         source_size,
         has_audio: audio.status.success() && !audio.stdout.is_empty(),
+        video_is_av1: video.status.success()
+            && String::from_utf8_lossy(&video.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix("codec_name="))
+                .is_some_and(|codec| codec.eq_ignore_ascii_case("av1")),
     })
 }
 
@@ -2622,7 +2746,129 @@ mod tests {
         Ok(MediaProbe {
             source_size: Some(PixelSize::new(640, 360)),
             has_audio: true,
+            ..Default::default()
         })
+    }
+
+    fn single_video_plan(video_is_av1: bool) -> (ExportRequest, ExportPlan) {
+        let mut editor = EditorState::new(Language::English, "AV1 input");
+        editor.add_media_paths([PathBuf::from("input.mov")]);
+        assert!(editor.add_selected_to_timeline());
+        let request = request(&editor);
+        let plan = ExportPlan::from_request_with_probe(&request, |_| {
+            Ok(MediaProbe {
+                source_size: Some(PixelSize::new(640, 360)),
+                has_audio: true,
+                video_is_av1,
+            })
+        })
+        .unwrap();
+        (request, plan)
+    }
+
+    #[test]
+    fn av1_decoder_candidates_are_capability_ordered() {
+        let (_, av1_plan) = single_video_plan(true);
+        #[cfg(windows)]
+        assert_eq!(
+            av1_input_decoder_candidates(&av1_plan),
+            vec![
+                Av1InputDecoder::D3d11va,
+                Av1InputDecoder::Dxva2,
+                Av1InputDecoder::Cuvid,
+                Av1InputDecoder::Qsv,
+                Av1InputDecoder::Default,
+            ]
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            av1_input_decoder_candidates(&av1_plan),
+            vec![
+                Av1InputDecoder::Cuvid,
+                Av1InputDecoder::Qsv,
+                Av1InputDecoder::Default,
+            ]
+        );
+        #[cfg(not(any(windows, target_os = "linux")))]
+        assert_eq!(
+            av1_input_decoder_candidates(&av1_plan),
+            vec![Av1InputDecoder::Default]
+        );
+
+        let (_, non_av1_plan) = single_video_plan(false);
+        assert_eq!(
+            av1_input_decoder_candidates(&non_av1_plan),
+            vec![Av1InputDecoder::Default]
+        );
+    }
+
+    #[test]
+    fn av1_decoder_input_options_precede_only_av1_input() {
+        let (request, plan) = single_video_plan(true);
+        let (args, _) = build_ffmpeg_job_with_title_assets_and_input_decoder(
+            &request,
+            &plan,
+            H264Encoder::OpenH264,
+            &[],
+            Av1InputDecoder::Cuvid,
+        )
+        .unwrap();
+        let input = args.iter().position(|arg| arg == "input.mov").unwrap();
+        assert_eq!(&args[input - 3..input], ["-c:v", "av1_cuvid", "-i"]);
+    }
+
+    #[test]
+    fn non_av1_input_arguments_ignore_decoder_candidate() {
+        let (request, plan) = single_video_plan(false);
+        let (default_args, _) = build_ffmpeg_job(&request, &plan, H264Encoder::OpenH264).unwrap();
+        let (candidate_args, _) = build_ffmpeg_job_with_title_assets_and_input_decoder(
+            &request,
+            &plan,
+            H264Encoder::OpenH264,
+            &[],
+            Av1InputDecoder::Cuvid,
+        )
+        .unwrap();
+        assert_eq!(candidate_args, default_args);
+    }
+
+    #[test]
+    fn av1_still_input_does_not_expand_retries_or_receive_video_decoder_options() {
+        let (request, mut plan) = single_video_plan(true);
+        plan.video_tracks[0].clips[0].is_still = true;
+        assert_eq!(
+            av1_input_decoder_candidates(&plan),
+            vec![Av1InputDecoder::Default]
+        );
+        let (default_args, _) = build_ffmpeg_job_with_title_assets_and_input_decoder(
+            &request,
+            &plan,
+            H264Encoder::OpenH264,
+            &[],
+            Av1InputDecoder::Default,
+        )
+        .unwrap();
+        let (candidate_args, _) = build_ffmpeg_job_with_title_assets_and_input_decoder(
+            &request,
+            &plan,
+            H264Encoder::OpenH264,
+            &[],
+            Av1InputDecoder::Cuvid,
+        )
+        .unwrap();
+        assert_eq!(candidate_args, default_args);
+    }
+
+    #[test]
+    fn export_attempt_failures_identify_decoder_and_encoder() {
+        assert_eq!(
+            export_attempt_failure(
+                Av1InputDecoder::Dxva2,
+                H264Encoder::OpenH264,
+                "decoder unavailable"
+            ),
+            "dxva2 input / libopenh264 encoder: decoder unavailable"
+        );
     }
 
     #[cfg(feature = "qualification")]
@@ -2640,6 +2886,7 @@ mod tests {
             VideoDelivery::RawRgbaFrame {
                 timeline_tick: Tick(500_000),
             },
+            Av1InputDecoder::Default,
         )
         .unwrap();
         assert!(graph.contains("format=rgba,trim=start=0.500000,setpts=PTS-STARTPTS"));
@@ -4868,6 +5115,7 @@ mod tests {
             Ok(MediaProbe {
                 source_size: Some(PixelSize::new(320, 180)),
                 has_audio: true,
+                ..Default::default()
             })
         })
         .unwrap();
@@ -6604,6 +6852,7 @@ mod tests {
                     PixelSize::new(80, 80)
                 }),
                 has_audio: false,
+                ..Default::default()
             })
         })
         .unwrap();

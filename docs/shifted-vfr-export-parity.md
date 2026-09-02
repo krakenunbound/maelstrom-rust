@@ -1,5 +1,29 @@
 # Shifted VFR export source identity
 
+## AV1 input-decoder parity follow-up — 2026-09-01
+
+The local 352x288 AOM AV1 Main fixture adds ten head/trim/slip/exclusive-tail/final-frame cases at
+30/1 and 30000/1001. All 46 exported frames resolve to the same eight decoded source identities as
+preview. Combined with ProRes, DNxHR, and shifted/reordered MPEG-4, the production-graph gate now
+covers 40 cases and 178 exported frames.
+
+The fixture now stream-copies the first eight visually distinct all-intra frames from AOM's pinned
+39-frame `av1-1-b8-02-allintra.ivf` vector. An earlier four-quantizer prototype had eight different
+decoded MD5 values but only two underlying pictures, so lossy output could not distinguish source
+selection reliably; that weak fixture was replaced rather than relaxing the identity assertion.
+
+Production export probes the selected video stream's codec name. AV1 inputs retry bounded Windows
+D3D11VA, DXVA2, NVIDIA CUVID, Intel QSV, then default decode; Linux retries CUVID, QSV, then default.
+Decoder options are scoped only to AV1 video inputs, while non-AV1 command lines remain unchanged.
+Every attempt retains the existing cancellation/reaping path, and terminal diagnostics identify both
+input decoder and output encoder. The identity test selects a usable named AV1 decoder for independent
+decoded-frame timestamps and pixels, then exercises the production input builders while retaining the
+existing test-only MPEG-4 output substitution.
+
+This closes one local AV1 preview/export timing and source-selection gap. It does not prove AV1
+encoder output, arbitrary camera streams, physical-adapter attribution, HDR/color fidelity, or
+cross-machine performance.
+
 The existing export graph passes 20 new local source-time cases for the generated
 ProRes Standard and DNxHR HQX MOV fixtures. No production defect was found in these
 cases, and no production timing, decoder, quality, or runtime setting was changed.

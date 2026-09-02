@@ -69,8 +69,8 @@ fixtures; it never creates, downloads, or overwrites them. It runs six native
 D3D11VA/DXVA2 and six named CUVID/QSV H.264/HEVC/AV1 ignored tests serially in
 release mode. Before Rust tests, it decodes the AV1 source through D3D11VA,
 DXVA2, CUVID, and QSV FFmpeg CLI paths to yuv420p `framemd5`; every path must
-match the repeated official AOM sequence
-`1998867ce2f47e15728862d6b55de0b4,48e9c8687a16b488ba1f7c49cb1f78fc` x4. Each
+  match the eight distinct official AOM frame MD5 values pinned in
+  `fixtures/media/av1-vfr-fixture.json`. Each
 backend/codec must emit separate 64x48 and 1920x1080 `8 VFR boundaries, 19 exact
 CLI-reference seek cases` evidence. A local mutex serializes invocations. For a
 valid writable report destination, it independently attempts the capped log and
@@ -93,7 +93,7 @@ points; untracked and ignored evidence is deliberately excluded from that source
 state. This is a reproducible harness contract, not a fresh authoritative
 qualification claim by itself; the retained result is recorded below.
 
-## Current authoritative runner checkpoint — 2026-09-01
+## Previous authoritative runner checkpoint — 2026-09-01
 
 The schema-1 runner passed from clean commit
 `49653179fe15cb64a783c47c7543e1844ff94d75`. It verified all 42 files in the
@@ -104,12 +104,13 @@ seeks at both 64x48 and 1920x1080, for 456 exact timestamp-and-pixel comparisons
 with no fallback. Before the Rust matrix, all four FFmpeg CLI paths decoded the
 AV1 fixture to the exact alternating frame MD5 sequence published by AOM.
 
-The AV1 fixture is a local-only, deterministic stream-copy derivative of the
-pinned two-frame AOM vector. Its ignored MKV is 516,187 bytes with SHA-256
+This checkpoint used the earlier local-only, deterministic stream-copy derivative of the
+pinned two-frame AOM vector. Its ignored MKV was 516,187 bytes with SHA-256
 `6ADB3B081701F13ED7C5EFDC26F092E08D474AE2D9E7840B6C58A2B937A9EC9C` and
 retains eight packets at a five-second source origin with irregular gaps. The
 repository records provenance, input/output hashes, exact packet timing, and the
-preparation recipe without redistributing either AOM input or the derivative.
+preparation recipe without redistributing either AOM input or the derivative. The stronger
+eight-picture fixture now in the contract requires a fresh clean-source wrapper checkpoint.
 
 Each QSV output size again recorded exactly seven named-decoder reopens. H.264
 measured 18.216 ms mean / 25.900 ms max at 64x48 and 23.915 ms mean / 35.231 ms
@@ -217,10 +218,10 @@ seven-second origin; their hashes are:
 
 ## Verification boundary
 
-The current release workspace passes 861 tests, with 36 opt-in tests ignored. The twelve
+The current release workspace passes 904 tests (868 executed, 36 opt-in tests ignored). The twelve
 hardware tests were run separately through the bounded qualification harness, not inferred
 from ignored results. Strict all-target workspace Clippy and formatting pass.
-All seven primary deterministic fixture contracts, the separate local AV1 derivative contract,
+All eight primary deterministic fixture contracts, the separate local AV1 derivative contract,
 and all seven Phase 0 scenarios pass.
 The missing-required-input negative control fails as intended rather than
 reporting an empty hardware test as successful.

@@ -48,14 +48,20 @@ function Assert-Input([object]$FixtureInput) {
     return $path
 }
 
-$seedPath = Assert-Input $contract.inputs[0]
-$md5Path = Assert-Input $contract.inputs[1]
-$md5Lines = @(Get-Content -LiteralPath $md5Path | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-if ($md5Lines.Count -ne $contract.inputs[1].frame_md5.Count) { throw 'Unexpected AOM frame-MD5 line count.' }
-for ($index = 0; $index -lt $md5Lines.Count; $index++) {
+$inputPaths = @{}
+foreach ($fixtureInput in $contract.inputs) { $inputPaths[$fixtureInput.path] = Assert-Input $fixtureInput }
+$ivfInputs = @($contract.inputs | Where-Object { $_.path -like '*.ivf' })
+$md5Inputs = @($contract.inputs | Where-Object { $_.path -like '*.ivf.md5' })
+if ($ivfInputs.Count -ne 1 -or $md5Inputs.Count -ne 1 -or $contract.inputs.Count -ne 2) { throw 'Expected one pinned AOM IVF input and its MD5 manifest.' }
+$md5Lines = @(Get-Content -LiteralPath $inputPaths[$md5Inputs[0].path] | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($md5Lines.Count -lt $md5Inputs[0].frame_md5.Count) { throw "AOM MD5 manifest does not contain the required source frames." }
+$referenceFrameMd5 = @()
+for ($index = 0; $index -lt $md5Inputs[0].frame_md5.Count; $index++) {
     $actualMd5 = ($md5Lines[$index] -split '\s+')[0]
-    Assert-Equal $actualMd5 $contract.inputs[1].frame_md5[$index] "AOM frame MD5 $index"
+    Assert-Equal $actualMd5 $md5Inputs[0].frame_md5[$index] "AOM frame MD5 $index"
+    $referenceFrameMd5 += $actualMd5
 }
+if ($referenceFrameMd5.Count -ne 8 -or @($referenceFrameMd5 | Select-Object -Unique).Count -ne 8) { throw 'Expected eight distinct official AOM frame MD5 values.' }
 
 $pts = @($contract.output.packets | ForEach-Object { [int]$_.pts })
 $timestampExpression = [string]$pts[$pts.Count - 1]
@@ -66,7 +72,7 @@ $setts = "setts=pts='$timestampExpression':dts='$timestampExpression':duration=3
 $outputPath = Join-Path $artifactRoot $contract.output.path
 $temporaryOutputPath = Join-Path $artifactRoot ('.' + [IO.Path]::GetFileNameWithoutExtension($outputPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp.mkv')
 try {
-    & $ffmpeg -hide_banner -loglevel error -nostdin -y -stream_loop 3 -i $seedPath -map 0:v:0 -frames:v 8 -c:v copy -bsf:v $setts -fflags +bitexact -flags:v +bitexact -map_metadata -1 $temporaryOutputPath
+    & $ffmpeg -hide_banner -loglevel error -nostdin -y -i $inputPaths[$ivfInputs[0].path] -map 0:v:0 -frames:v 8 -c:v copy -bsf:v $setts -fflags +bitexact -flags:v +bitexact -map_metadata -1 $temporaryOutputPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryOutputPath -PathType Leaf)) { throw "FFmpeg failed to create the temporary AV1 VFR fixture." }
 
     Assert-Equal (Get-Item -LiteralPath $temporaryOutputPath).Length $contract.output.byte_size 'Output size'

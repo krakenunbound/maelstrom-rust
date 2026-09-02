@@ -35,6 +35,13 @@ Last updated: 2026-09-01
   The local AOM-derived fixture publishes all eight normalized boundaries and the app proves
   bidirectional floor/hold routing. This is local named-decoder evidence, not arbitrary AV1 or
   physical-adapter conformance. See `docs/media-fixtures.md`.
+- [x] Preserve shifted AV1 VFR source identity through export. The selected video codec is probed,
+  AV1 inputs retry bounded D3D11VA/DXVA2/CUVID/QSV/default decoder paths without changing non-AV1
+  jobs, and failures name both decoder and encoder. Ten head/trim/slip/tail/final-frame cases at
+  30 and 30000/1001 fps match preview across 46 exported frames. The local fixture now uses eight
+  distinct official AOM all-intra pictures rather than weak quantizer variants. Phase 0, waveform,
+  app routing, and all four Windows AV1 hardware seek paths pass locally. Clean-source hardware
+  wrapper evidence remains to be refreshed. See `docs/shifted-vfr-export-parity.md`.
 - [x] Persist the user's per-media proxy enable choice without persisting derived media. Project
   schema 9 stores one defaulted boolean; v1–v8 migrate disabled, while export and duplicate preserve
   intent. Reopen keeps original routing until current cache validation succeeds, and explicit

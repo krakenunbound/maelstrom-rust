@@ -62,19 +62,22 @@ assert a license. Record acquisition source, license/permission, and intended co
 the local corpus. Do not add any file without redistribution permission to Git.
 
 `Test-MediaFixtures.ps1 -ManifestOnly` is the fast schema/path/uniqueness validation used when
-FFmpeg is unavailable. The Phase 0 measurement gate remains incomplete: it additionally gates the
-reordered fixture's waveform/decode/preview source-time path and the two generated
-10-bit MOV decode/preview paths, but does not prove export behavior or broad real-media coverage.
+FFmpeg is unavailable. The Phase 0 measurement gate remains incomplete: it gates the reordered
+fixture's waveform/decode/preview source-time path, the two generated 10-bit MOV paths, and
+source-identity export across those fixtures plus the local AV1 fixture. It does not prove broad
+real-media, display, or cross-machine coverage.
 
 ## Local AOM AV1 shifted-VFR fixture
 
 `fixtures/media/av1-vfr-fixture.json` is a separate, reproducible contract for a local-only AV1
-fixture. It records the official AOM checksum-manifest URL as provenance and pins the test-data URLs,
-input hashes/sizes, the two published frame
-MD5 values, and the derived `vfr-av1-aom-shifted.mkv` hash, size, stream metadata, and all eight
-packet PTS/DTS/duration/flag values. The script stream-copies the two-packet IVF input four times,
-then uses `setts` (`time_base=1/1000`, `prescale=1`) to assign PTS/DTS of 5000, 5033, 5100, 5133,
-5200, 5267, 5367, and 5400 ms. It does not decode and does not need a GPU.
+fixture. It records AOM checksum manifest commit `a40ed1ea9e4ecc3df58a5bccb76623f2c94ae727`
+as immutable provenance and pins the official 39-frame
+`av1-1-b8-02-allintra.ivf` test vector and MD5 manifest by URL, SHA-1, SHA-256, and size. The first
+eight published frame MD5 values are distinct. The derived `vfr-av1-aom-shifted.mkv` is 306,777
+bytes with SHA-256 `B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21`.
+The script stream-copies the first eight all-intra frames, then uses `setts`
+(`time_base=1/1000`, `prescale=1`) to assign PTS/DTS of 5000, 5033, 5100, 5133, 5200, 5267, 5367,
+and 5400 ms. It does not decode and does not need a GPU.
 
 The AOM inputs and resulting MKV stay only in ignored `artifacts/media-fixtures`; this repository
 does not redistribute them and makes no licensing claim. Obtain and use the source under its own
@@ -85,8 +88,9 @@ the normal bounded decoded-frame scan runs first, then AV1 alone retries the pro
 order (`av1_cuvid`, then `av1_qsv`) when the bundled default decoder produces no usable frames.
 No packet-to-frame assumption is used. The resulting local presentation index is
 0/33/100/133/200/267/367/400 ms, and app preview routing is checked at every boundary in both
-directions. This proves the local fixture and usable named decoder on this host, not arbitrary AV1
-conformance or physical-adapter identity.
+directions. The export gate also checks head, trim, slip, exclusive-tail, and final-frame identity at
+30/1 and 30000/1001. This proves the local fixture and usable decoder paths on this host, not
+arbitrary AV1 conformance or physical-adapter identity.
 
 With already acquired local inputs, run:
 
