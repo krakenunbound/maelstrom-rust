@@ -5,15 +5,17 @@ architecture, performance, and exit-gate specification. `MAELSTROM_ACTION_PLAN_O
 supplemental sequencing and constraints. If this list conflicts with either document, follow the
 roadmap and correct this file.
 
-Last updated: 2026-08-31
+Last updated: 2026-09-01
 
 ## Current stopping point
 
-- [x] Make Windows hardware-VFR qualification reproducible without launching the editor. The
-  schema-1 runner at clean commit `a84838e` verifies the complete 42-file pinned FFmpeg bundle,
-  then passes all four D3D11VA/DXVA2 H.264/HEVC Main 10 cases at 64x48 and 1920x1080: 152 exact
-  timestamp-and-pixel comparisons with no fallback. Its adapter list is inventory only, not proof
-  that both physical GPUs decoded the clips. See `docs/hardware-decode-parity.md`.
+- [x] Expand reproducible Windows hardware-VFR qualification to native and named decoder paths
+  without launching the editor. The schema-1 runner at clean commit `ccc6285` verifies the complete
+  42-file pinned FFmpeg bundle, then passes D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync for
+  H.264 and HEVC Main 10 at 64x48 and 1920x1080: 304 exact timestamp-and-pixel comparisons with no
+  fallback. QSV reverse seeks reopen only that named decoder because a flush retained stale surface
+  pixels; correctness now passes, while reopen latency remains unqualified. Adapter inventory is not
+  physical-device proof. See `docs/hardware-decode-parity.md`.
 - [x] Persist the user's per-media proxy enable choice without persisting derived media. Project
   schema 9 stores one defaulted boolean; v1–v8 migrate disabled, while export and duplicate preserve
   intent. Reopen keeps original routing until current cache validation succeeds, and explicit
@@ -402,8 +404,9 @@ Last updated: 2026-08-31
   a three-second stream origin, B-frame packet reordering, and exact waveform/decode/app local-time
   checks. Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 also have exact local Software
   timing/pixel evidence. ProRes/DNxHR and shifted/reordered MPEG-4 now also pass 30
-  export-graph source-identity cases with a test MPEG-4 encoder. AV1, broader camera sources,
-  hardware/color parity and production-encoder conformance remain open.
+  export-graph source-identity cases with a test MPEG-4 encoder. Named CUVID/QSV H.264 and HEVC now
+  join D3D11VA/DXVA2 in the exact local hardware matrix. AV1, broader camera sources, QSV reverse
+  performance, cross-machine hardware/color parity, and production-encoder conformance remain open.
 
 ## Phase 2 implementation queue
 

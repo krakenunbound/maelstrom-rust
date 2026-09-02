@@ -29,13 +29,15 @@ cross-platform bit-exact guarantee.
   with patterned luma and sharp chroma edges. Native and downscaled outputs must
   match exactly in both quality modes. Removing only the production flag change
   reproduces the native-size failure; restoring it passes.
-- Four opt-in tests explicitly open D3D11VA or DXVA2. Unsupported hardware,
-  missing input, software fallback, absent hardware transfer, or pixel/timestamp
+- Eight opt-in tests explicitly open D3D11VA, DXVA2, NVIDIA CUVID, or Intel Quick
+  Sync. Unsupported hardware, missing input, software fallback, or pixel/timestamp
   mismatch fails; none is counted as a software success.
 - Each codec/backend runs 19 forward/reverse/repeated-final/fresh-seek cases at
-  64x48 and 19 at native 1920x1080: **152 exact comparisons** in the local matrix.
-  Every decoded frame must increment hardware-transfer samples, retain the
-  requested backend without fallback, and preserve request/target identity.
+  64x48 and 19 at native 1920x1080: **304 exact comparisons** in the local matrix.
+  D3D11VA/DXVA2 frames must increment hardware-transfer samples. Named CUVID/QSV
+  decoders expose CPU-readable frames and must use that distinct production path.
+  Every case retains the requested backend without fallback and preserves
+  request/target identity.
   This real-hardware matrix uses high-quality bicubic; bilinear layout parity
   is covered by the separate GPU-free regression, not claimed as hardware proof.
 - Independent sequential FFmpeg software decoding supplies all RGBA bytes.
@@ -47,19 +49,20 @@ cross-platform bit-exact guarantee.
   timestamps, 16:9 dimensions at most 1920x1080, H.264 or HEVC Main 10. This is
   finite qualification, not arbitrary-file conformance.
 
-The test helper opens the requested hardware device with the production helper
-and the system's default adapter. D3D11VA and DXVA2 are **two backend APIs**, not
-proof that both installed physical GPUs decoded these samples. CUVID, QSV decode,
-VideoToolbox, AV1, HDR, export parity, and broader source/reference-machine coverage
-remain open. No editor launch or physical presentation measurement occurred.
+The test helper uses the production native-device or named-decoder opener while
+forcing the requested backend. D3D11VA and DXVA2 are backend APIs against the
+default adapter; CUVID and QSV prove named decoder paths on this host. None proves
+which physical adapter serviced a request on a multi-device system. VideoToolbox,
+AV1, HDR, export parity, and broader source/reference-machine coverage remain open.
+No editor launch or physical presentation measurement occurred.
 
 ## Reproduction
 
 The bounded Phase 1 qualification wrapper reuses the two existing hardware VFR
 fixtures; it never creates or overwrites them. It runs the four D3D11VA/DXVA2
-H.264/HEVC ignored tests serially in release mode, requires each backend/codec's
-separate 64x48 and 1920x1080 `8 VFR boundaries, 19 exact CLI-reference seek
-cases` evidence, and serializes concurrent invocations with a local mutex. For a
+and four named CUVID/QSV H.264/HEVC ignored tests serially in release mode. Each
+backend/codec must emit separate 64x48 and 1920x1080 `8 VFR boundaries, 19 exact
+CLI-reference seek cases` evidence. A local mutex serializes invocations. For a
 valid writable report destination, it independently attempts the capped log and
 an atomic schema-versioned report on pass or operational/test failure; a log-write
 failure is recorded in the report. Invalid or unwritable report destinations
@@ -73,14 +76,41 @@ The report and a UTF-8 capped-at-1,048,576-byte log are retained in ignored
 `artifacts/phase1-hardware-vfr/`. Add `-IncludeAdapterInventory` only to record
 an inventory-only list of adapters; it is not proof of physical-GPU coverage.
 The report records source state, local FFmpeg identity, documented fixture hashes
-and observed sizes, the four backend/codec results, and `exact_cases_total: 152` only when
-all four tests meet the output contract. `authoritative` is true only for a pass
+and observed sizes, the eight backend/codec results, and `exact_cases_total: 304` only when
+all eight tests meet the output contract. `authoritative` is true only for a pass
 whose non-null start/end commits match and whose tracked source is clean at both
 points; untracked and ignored evidence is deliberately excluded from that source
 state. This is a reproducible harness contract, not a fresh authoritative
-qualification result.
+qualification claim by itself; the retained result is recorded below.
 
-## Authoritative runner checkpoint — 2026-08-31
+## Current authoritative runner checkpoint — 2026-09-01
+
+The expanded schema-1 runner passed from clean commit
+`ccc6285d246e7e2c4e54d4e625775912dbbaeb76`. It verified all 42 files in the
+project-built FFmpeg checksum inventory and passed all eight backend/codec tests:
+D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync against H.264 High and HEVC
+Main 10, each at 64x48 and native 1920x1080. The result contains 304 exact
+timestamp-and-pixel comparisons and rejects software fallback.
+
+The first QSV qualification exposed a reverse-only correctness defect: after a
+decoder flush, QSV could report the requested timestamp while retaining pixels
+from the preceding surface. A fresh monitor at the same target and sequential
+QSV decoding were exact. Maelstrom now supplies the packet time base and reopens
+only the named QSV decoder on backward seeks, clearing its asynchronous surface
+queue. Both codecs now pass the complete forward/reverse/repeated-final/fresh
+matrix. Native Windows and CUVID keep the cheaper proven flush path. The reopen
+is synchronous and has not received a separate latency gate, so this is a
+correctness result rather than a no-lag QSV reverse-scrub claim.
+
+The retained local report is 6,127 bytes with SHA-256
+`FECEAB07DD5735511DEFF23E0EBF492B8A1DEB5B55B66FF85A4C424A2DB2DD4A`; its
+5,338-byte log SHA-256 is
+`8D6BF9354B2DE8D2794BFF322FD623AAC8E13437C07943477D5A69B99DAA9E2E`.
+Optional inventory listed NVIDIA GeForce RTX 3090 and Intel UHD Graphics 770,
+but remains inventory rather than physical-adapter attribution. No editor, GUI
+surface, export path, or physical scanout was exercised.
+
+## Prior authoritative runner checkpoint — 2026-08-31
 
 The schema-1 runner passed from clean commit
 `a84838e4a708babcd9346b7ac969aab42969f866`. It verified all 42 files in the
@@ -138,8 +168,8 @@ seven-second origin; their hashes are:
 
 ## Verification boundary
 
-The release workspace passes 744 tests, with 21 opt-in tests ignored. The four
-hardware tests and full-HD timing diagnostic were run separately, not inferred
+The current release workspace passes 861 tests, with 32 opt-in tests ignored. The eight
+hardware tests were run separately through the bounded qualification harness, not inferred
 from ignored results. Strict all-target workspace Clippy and formatting pass.
 All seven deterministic fixture contracts and all seven Phase 0 scenarios pass.
 The missing-required-input negative control fails as intended rather than

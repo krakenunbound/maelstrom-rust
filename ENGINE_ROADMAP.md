@@ -416,6 +416,15 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       paths on the default adapter; this does not prove both inventoried physical GPUs, GUI
       presentation, scanout, export hardware parity, or broader machines. The retained schema-1
       report SHA-256 is `D97439E5AC4821F7B11E05D52BEE5EEEE6B45886F76B1364E876DEF89452737B`.
+      A later clean-commit qualification at
+      `ccc6285d246e7e2c4e54d4e625775912dbbaeb76` expands the same harness to NVIDIA CUVID and
+      Intel Quick Sync named decoders. All eight H.264/HEVC Main 10 backend cases pass at 64x48
+      and 1920x1080, totaling 304 exact timestamp-and-pixel comparisons with no fallback. QSV
+      initially paired a reverse-seek timestamp with pixels retained across decoder flush; only
+      that named decoder now reopens for backward seeks. This proves local correctness, not QSV
+      reopen latency, physical-adapter identity, GUI presentation, export parity, or other hosts.
+      The retained report SHA-256 is
+      `FECEAB07DD5735511DEFF23E0EBF492B8A1DEB5B55B66FF85A4C424A2DB2DD4A`.
 - [x] Correct frame-declared YUV matrix/range conversion in the monitor. A generated DNxHR HQX
       fixture exposed BT.709 frames being interpreted as BT.601 (4,644 differing RGBA bytes in a
       64x48 frame, maximum channel error 41). The corrected software path passes exact independent
