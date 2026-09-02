@@ -29,38 +29,47 @@ cross-platform bit-exact guarantee.
   with patterned luma and sharp chroma edges. Native and downscaled outputs must
   match exactly in both quality modes. Removing only the production flag change
   reproduces the native-size failure; restoring it passes.
-- Eight opt-in tests explicitly open D3D11VA, DXVA2, NVIDIA CUVID, or Intel Quick
+- Twelve opt-in tests explicitly open D3D11VA, DXVA2, NVIDIA CUVID, or Intel Quick
   Sync. Unsupported hardware, missing input, software fallback, or pixel/timestamp
   mismatch fails; none is counted as a software success.
 - Each codec/backend runs 19 forward/reverse/repeated-final/fresh-seek cases at
-  64x48 and 19 at native 1920x1080: **304 exact comparisons** in the local matrix.
+  64x48 and 19 at 1920x1080: **456 exact comparisons** in the local matrix.
   D3D11VA/DXVA2 frames must increment hardware-transfer samples. Named CUVID/QSV
   decoders expose CPU-readable frames and must use that distinct production path.
   Every case retains the requested backend without fallback and preserves
   request/target identity.
   This real-hardware matrix uses high-quality bicubic; bilinear layout parity
   is covered by the separate GPU-free regression, not claimed as hardware proof.
-- Independent sequential FFmpeg software decoding supplies all RGBA bytes.
+- Independent sequential FFmpeg decoding supplies all RGBA bytes. H.264/HEVC use
+  software decode; AV1 uses an explicitly selected opposite named hardware decoder
+  (`av1_qsv` for CUVID actual, `av1_cuvid` for QSV/native actual), so the known
+  failing default AV1 decoder is never mistaken for a reference.
   References explicitly use bicubic plus accurate conversion to describe the
   corrected color policy, not the former layout-dependent default. FFprobe
-  supplies presentation timestamps. The existing one-microsecond rounding
+  supplies presentation timestamps; AV1 uses packet PTS because its frame
+  best-effort timestamps are unavailable through the default decoder. The existing one-microsecond rounding
   tolerance applies only to timestamps; pixel tolerance remains zero.
 - Fixture bounds are eight frames, positive shifted origin, irregular increasing
-  timestamps, 16:9 dimensions at most 1920x1080, H.264 or HEVC Main 10. This is
+  timestamps, 16:9 H.264/HEVC sources at most 1920x1080, plus the 352x288 AV1
+  Main yuv420p AOM source. AV1 retains the 1920x1080 large-output gate. This is
   finite qualification, not arbitrary-file conformance.
 
 The test helper uses the production native-device or named-decoder opener while
 forcing the requested backend. D3D11VA and DXVA2 are backend APIs against the
 default adapter; CUVID and QSV prove named decoder paths on this host. None proves
 which physical adapter serviced a request on a multi-device system. VideoToolbox,
-AV1, HDR, export parity, and broader source/reference-machine coverage remain open.
+HDR, export parity, and broader source/reference-machine coverage remain open.
 No editor launch or physical presentation measurement occurred.
 
 ## Reproduction
 
-The bounded Phase 1 qualification wrapper reuses the two existing hardware VFR
-fixtures; it never creates or overwrites them. It runs the four D3D11VA/DXVA2
-and four named CUVID/QSV H.264/HEVC ignored tests serially in release mode. Each
+The bounded Phase 1 qualification wrapper reuses the three existing hardware VFR
+fixtures; it never creates, downloads, or overwrites them. It runs six native
+D3D11VA/DXVA2 and six named CUVID/QSV H.264/HEVC/AV1 ignored tests serially in
+release mode. Before Rust tests, it decodes the AV1 source through D3D11VA,
+DXVA2, CUVID, and QSV FFmpeg CLI paths to yuv420p `framemd5`; every path must
+match the repeated official AOM sequence
+`1998867ce2f47e15728862d6b55de0b4,48e9c8687a16b488ba1f7c49cb1f78fc` x4. Each
 backend/codec must emit separate 64x48 and 1920x1080 `8 VFR boundaries, 19 exact
 CLI-reference seek cases` evidence. A local mutex serializes invocations. For a
 valid writable report destination, it independently attempts the capped log and
@@ -76,14 +85,17 @@ The report and a UTF-8 capped-at-1,048,576-byte log are retained in ignored
 `artifacts/phase1-hardware-vfr/`. Add `-IncludeAdapterInventory` only to record
 an inventory-only list of adapters; it is not proof of physical-GPU coverage.
 The report records source state, local FFmpeg identity, documented fixture hashes
-and observed sizes, the eight backend/codec results, and `exact_cases_total: 304` only when
-all eight tests meet the output contract. `authoritative` is true only for a pass
+and observed sizes, the twelve backend/codec results, AV1 CLI pixel-preflight evidence,
+and `exact_cases_total: 456` only when all twelve tests meet the output contract. `authoritative` is true only for a pass
 whose non-null start/end commits match and whose tracked source is clean at both
 points; untracked and ignored evidence is deliberately excluded from that source
 state. This is a reproducible harness contract, not a fresh authoritative
 qualification claim by itself; the retained result is recorded below.
 
 ## Current authoritative runner checkpoint — 2026-09-01
+
+This checkpoint predates the AV1 extension below; a new clean-tree 12-test run
+is required before claiming AV1 authoritative coverage.
 
 The expanded schema-1 runner passed from clean commit
 `e7cbf0ce42a5e4f2f624d00efc76f7b5fc9c2bca`. It verified all 42 files in the
@@ -173,7 +185,7 @@ seven-second origin; their hashes are:
 
 ## Verification boundary
 
-The current release workspace passes 861 tests, with 32 opt-in tests ignored. The eight
+The current release workspace passes 861 tests, with 32 opt-in tests ignored. The then-eight
 hardware tests were run separately through the bounded qualification harness, not inferred
 from ignored results. Strict all-target workspace Clippy and formatting pass.
 All seven deterministic fixture contracts and all seven Phase 0 scenarios pass.

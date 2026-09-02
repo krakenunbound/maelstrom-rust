@@ -77,6 +77,32 @@ function Assert-PinnedFfmpegBundle([string]$BundleRoot) {
     return [ordered]@{ path = $ffmpeg; ffprobe_path = $ffprobe; version_line = ($configuration -split "`r?`n")[0]; sha256 = (Get-FileHash -LiteralPath $ffmpeg -Algorithm SHA256).Hash; manifest_path = $buildManifest; checksums_path = $buildChecksums; verified_checksum_file_count = $verifiedFiles; shared_bundle_verified = $true }
 }
 
+function Assert-Av1CliReferencePixels([string]$FfmpegPath, [string]$FixturePath) {
+    $expectedMd5 = @('1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc', '1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc', '1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc', '1998867ce2f47e15728862d6b55de0b4', '48e9c8687a16b488ba1f7c49cb1f78fc')
+    $paths = @(
+        [ordered]@{ label = 'D3D11VA'; decoder = 'av1'; hwaccel = 'd3d11va' },
+        [ordered]@{ label = 'DXVA2'; decoder = 'av1'; hwaccel = 'dxva2' },
+        [ordered]@{ label = 'NVIDIA CUVID'; decoder = 'av1_cuvid'; hwaccel = $null },
+        [ordered]@{ label = 'Intel Quick Sync'; decoder = 'av1_qsv'; hwaccel = $null }
+    )
+    $evidence = @()
+    foreach ($path in $paths) {
+        $arguments = @('-v', 'error', '-nostdin')
+        if ($null -ne $path.hwaccel) { $arguments += @('-hwaccel', $path.hwaccel) }
+        $arguments += @('-c:v', $path.decoder, '-i', $FixturePath, '-map', '0:v:0', '-an', '-frames:v', '8', '-pix_fmt', 'yuv420p', '-f', 'framemd5', '-')
+        $output = & $FfmpegPath @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        $md5 = @($output | ForEach-Object {
+            $line = $_.ToString()
+            if ($line -match '(?i),\s*([0-9a-f]{32})$') { $Matches[1].ToLowerInvariant() }
+        })
+        $matchesOfficialReference = $exitCode -eq 0 -and $md5.Count -eq $expectedMd5.Count -and ([string]::Join(',', $expectedMd5) -ceq [string]::Join(',', $md5))
+        $evidence += [ordered]@{ label = $path.label; decoder = $path.decoder; hwaccel = $path.hwaccel; exit_code = $exitCode; frame_md5 = $md5; matches_official_aom_reference = $matchesOfficialReference }
+        if (-not $matchesOfficialReference) { throw "AV1 FFmpeg CLI pixel preflight did not match the official AOM reference: $($path.label) ($($path.decoder))." }
+    }
+    return $evidence
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $cargo = 'C:\Users\The Kraken\.cargo\bin\cargo.exe'
 $git = 'D:\PythonStuff\Git\cmd\git.exe'
@@ -92,7 +118,8 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedReportPath), $art
 
 $fixtureContracts = @(
     [ordered]@{ codec = 'h264'; path = (Join-Path $fixtureRoot 'codec-vfr-h264-bt709-1080p-hardware.mp4'); sha256 = '503B39F6C101F8395B49AD424711357DC317C2CAEFCFCC9E5F795A0D46CDCAA6' },
-    [ordered]@{ codec = 'hevc_main10'; path = (Join-Path $fixtureRoot 'codec-vfr-hevc-main10-bt709-1080p-hardware.mp4'); sha256 = '1AF892D8C40634E354A05FD80A446298C5501914D2E39ECD641D792B6538C486' }
+    [ordered]@{ codec = 'hevc_main10'; path = (Join-Path $fixtureRoot 'codec-vfr-hevc-main10-bt709-1080p-hardware.mp4'); sha256 = '1AF892D8C40634E354A05FD80A446298C5501914D2E39ECD641D792B6538C486' },
+    [ordered]@{ codec = 'av1_main'; path = (Join-Path $repoRoot 'artifacts\media-fixtures\vfr-av1-aom-shifted.mkv'); sha256 = '6ADB3B081701F13ED7C5EFDC26F092E08D474AE2D9E7840B6C58A2B937A9EC9C' }
 )
 $tests = @(
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_d3d11va_h264_vfr_scrub_matches_independent_cli_reference'; backend = 'D3D11VA'; codec = 'h264'; label = 'D3D11VA supplied H.264 VFR Windows D3D11VA' },
@@ -102,11 +129,15 @@ $tests = @(
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_d3d11va_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'D3D11VA'; codec = 'hevc_main10'; label = 'D3D11VA supplied HEVC VFR Windows D3D11VA' },
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_dxva2_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'DXVA2'; codec = 'hevc_main10'; label = 'DXVA2 supplied HEVC VFR Windows DXVA2' },
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_cuvid_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'NVIDIA CUVID'; codec = 'hevc_main10'; label = 'CUVID supplied HEVC VFR NVIDIA CUVID' },
-    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_qsv_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'Intel Quick Sync'; codec = 'hevc_main10'; label = 'QSV supplied HEVC VFR Intel Quick Sync' }
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_qsv_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'Intel Quick Sync'; codec = 'hevc_main10'; label = 'QSV supplied HEVC VFR Intel Quick Sync' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_d3d11va_av1_vfr_scrub_matches_independent_cli_reference'; backend = 'D3D11VA'; codec = 'av1_main'; label = 'D3D11VA supplied AV1 VFR Windows D3D11VA' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_dxva2_av1_vfr_scrub_matches_independent_cli_reference'; backend = 'DXVA2'; codec = 'av1_main'; label = 'DXVA2 supplied AV1 VFR Windows DXVA2' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_cuvid_av1_vfr_scrub_matches_independent_cli_reference'; backend = 'NVIDIA CUVID'; codec = 'av1_main'; label = 'CUVID supplied AV1 VFR NVIDIA CUVID' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_qsv_av1_vfr_scrub_matches_independent_cli_reference'; backend = 'Intel Quick Sync'; codec = 'av1_main'; label = 'QSV supplied AV1 VFR Intel Quick Sync' }
 )
 
 $saved = @{}
-foreach ($name in @('PATH', 'FFMPEG_DIR', 'LIBCLANG_PATH', 'MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA', 'MAELSTROM_HEVC_VFR_TEST_MEDIA')) {
+foreach ($name in @('PATH', 'FFMPEG_DIR', 'LIBCLANG_PATH', 'MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA', 'MAELSTROM_HEVC_VFR_TEST_MEDIA', 'MAELSTROM_AV1_VFR_TEST_MEDIA')) {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 $failure = $null
@@ -118,6 +149,7 @@ $sourceEnd = $null
 $sourceTrackedDirtyAtStart = $null
 $sourceTrackedDirtyAtEnd = $null
 $ffmpegIdentity = $null
+$av1CliPixelEvidence = $null
 $adapterInventory = $null
 $startedUtc = [DateTime]::UtcNow.ToString('o')
 $runMutex = [Threading.Mutex]::new($false, 'Local\MaelstromRustPhase1HardwareVfrLock')
@@ -147,6 +179,7 @@ try {
         if ($actualHash -cne $fixture.sha256) { throw "Fixture SHA-256 does not match the documented contract: $($fixture.path)" }
         $fixtureEvidence += [ordered]@{ codec = $fixture.codec; path = $fixture.path; size_bytes = [int64]$item.Length; sha256 = $actualHash; documented_sha256 = $fixture.sha256; reused_existing = $true }
     }
+    $av1CliPixelEvidence = Assert-Av1CliReferencePixels $ffmpegIdentity.path $fixtureContracts[2].path
     if ($IncludeAdapterInventory) {
         $adapterInventory = @(Get-CimInstance Win32_VideoController | ForEach-Object { [ordered]@{ name = $_.Name; driver_version = $_.DriverVersion; pnp_device_id = $_.PNPDeviceID } })
     }
@@ -155,6 +188,7 @@ try {
     $env:PATH = (Join-Path $ffmpegRoot 'bin') + [IO.Path]::PathSeparator + $libclangRoot + [IO.Path]::PathSeparator + $saved['PATH']
     $env:MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA = $fixtureContracts[0].path
     $env:MAELSTROM_HEVC_VFR_TEST_MEDIA = $fixtureContracts[1].path
+    $env:MAELSTROM_AV1_VFR_TEST_MEDIA = $fixtureContracts[2].path
     Push-Location -LiteralPath $repoRoot
     try {
         foreach ($test in $tests) {
@@ -211,13 +245,14 @@ try {
             source = [ordered]@{ start_commit = $sourceStart; end_commit = $sourceEnd; tracked_dirty_at_start = $sourceTrackedDirtyAtStart; tracked_dirty_at_end = $sourceTrackedDirtyAtEnd }
             authoritative = ($null -eq $failure -and $null -ne $sourceStart -and $sourceStart -eq $sourceEnd -and $sourceTrackedDirtyAtStart -eq $false -and $sourceTrackedDirtyAtEnd -eq $false)
             ffmpeg = $ffmpegIdentity
+            av1_cli_pixel_preflight = $av1CliPixelEvidence
             fixtures = $fixtureEvidence
             tests = $runResults
             test_count = $runResults.Count
             passed_test_count = @($runResults | Where-Object { $_.passed }).Count
-            exact_cases_total = if ($null -eq $failure -and $runResults.Count -eq 8) { 304 } else { $null }
+            exact_cases_total = if ($null -eq $failure -and $runResults.Count -eq 12) { 456 } else { $null }
             backend_apis = @('D3D11VA', 'DXVA2', 'NVIDIA CUVID', 'Intel Quick Sync')
-            codecs = @('h264', 'hevc_main10')
+            codecs = @('h264', 'hevc_main10', 'av1_main')
             output_sizes = @(@(64, 48), @(1920, 1080))
             retained_log = [IO.Path]::GetFullPath($logPath)
             log_write_failure = $logWriteFailure
@@ -240,4 +275,4 @@ try {
 }
 if ($null -ne $reportWriteFailure) { throw "Phase 1 hardware VFR qualification could not publish its report: $reportWriteFailure" }
 if ($null -ne $failure) { throw "Phase 1 hardware VFR qualification failed; preserved report: $resolvedReportPath. $failure" }
-Write-Host "Phase 1 hardware VFR qualification: PASS ($resolvedReportPath; 8 tests; 304 exact cases)"
+Write-Host "Phase 1 hardware VFR qualification: PASS ($resolvedReportPath; 12 tests; 456 exact cases)"

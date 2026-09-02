@@ -65,3 +65,35 @@ the local corpus. Do not add any file without redistribution permission to Git.
 FFmpeg is unavailable. The Phase 0 measurement gate remains incomplete: it additionally gates the
 reordered fixture's waveform/decode/preview source-time path and the two generated
 10-bit MOV decode/preview paths, but does not prove export behavior or broad real-media coverage.
+
+## Local AOM AV1 shifted-VFR fixture
+
+`fixtures/media/av1-vfr-fixture.json` is a separate, reproducible contract for a local-only AV1
+fixture. It records the official AOM checksum manifest as provenance and pins the test-data URLs,
+input hashes/sizes, the two published frame
+MD5 values, and the derived `vfr-av1-aom-shifted.mkv` hash, size, stream metadata, and all eight
+packet PTS/DTS/duration/flag values. The script stream-copies the two-packet IVF input four times,
+then uses `setts` (`time_base=1/1000`, `prescale=1`) to assign PTS/DTS of 5000, 5033, 5100, 5133,
+5200, 5267, 5367, and 5400 ms. It does not decode and does not need a GPU.
+
+The AOM inputs and resulting MKV stay only in ignored `artifacts/media-fixtures`; this repository
+does not redistribute them and makes no licensing claim. Obtain and use the source under its own
+terms. With already acquired local inputs, run:
+
+```powershell
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File `
+    'H:\Maelstrom Rust\scripts\Prepare-Av1VfrFixture.ps1'
+```
+
+To fetch the pinned inputs explicitly from `https://storage.googleapis.com/aom-test-data/`, add
+`-DownloadInputs`:
+
+```powershell
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File `
+    'H:\Maelstrom Rust\scripts\Prepare-Av1VfrFixture.ps1' -DownloadInputs
+```
+
+The preparation script accepts no FFmpeg override and requires exactly
+`H:\Maelstrom Rust\.deps\ffmpeg-project-8.1` (FFmpeg 8.1). Downloads and the
+derived output are verified at temporary paths and moved into place only after the complete
+contract passes, so a failed fetch or remux does not replace a known-good local artifact.

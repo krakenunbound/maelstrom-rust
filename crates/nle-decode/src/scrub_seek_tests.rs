@@ -229,6 +229,41 @@ fn ffprobe_frame_timestamps(path: &Path) -> Vec<i64> {
         .collect()
 }
 
+#[cfg(target_os = "windows")]
+fn ffprobe_packet_timestamps(path: &Path) -> Vec<i64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-read_intervals",
+            "%+#32",
+            "-show_packets",
+            "-show_entries",
+            "packet=pts_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("start FFprobe packet timestamp inspection");
+    assert!(
+        output.status.success(),
+        "FFprobe could not inspect packet timestamps for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("FFprobe packet timestamps were UTF-8")
+        .lines()
+        .map(|timestamp| {
+            parse_timestamp_microseconds(timestamp)
+                .unwrap_or_else(|| panic!("invalid FFprobe packet timestamp {timestamp:?}"))
+        })
+        .collect()
+}
+
 fn parse_timestamp_microseconds(timestamp: &str) -> Option<i64> {
     let (negative, decimal) = match timestamp.strip_prefix('-') {
         Some(decimal) => (true, decimal),
@@ -311,6 +346,79 @@ fn cli_sequential_reference_with_filter(
         output.stdout.len(),
         frame_count * bytes_per_frame,
         "independent reference byte count for {}",
+        path.display()
+    );
+    let rgba = output
+        .stdout
+        .chunks_exact(bytes_per_frame)
+        .map(Arc::<[u8]>::from)
+        .collect();
+    CliSequentialReference {
+        stream_origin,
+        timestamps,
+        rgba,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn cli_av1_hardware_reference_with_filter(
+    path: &Path,
+    frame_count: usize,
+    canvas: (u32, u32),
+    filter: &str,
+    requested_backend: DecodeBackend,
+) -> CliSequentialReference {
+    // AV1 frame best-effort timestamps are unavailable with this fixture's default
+    // decoder. Packet PTS are the source timestamps used by the AV1 decoder path.
+    let raw_timestamps = ffprobe_packet_timestamps(path);
+    assert_eq!(
+        raw_timestamps.len(),
+        frame_count,
+        "FFprobe AV1 packet count for {}",
+        path.display()
+    );
+    let stream_origin = *raw_timestamps
+        .first()
+        .expect("nonempty FFprobe AV1 packet timestamp list");
+    let timestamps = raw_timestamps
+        .into_iter()
+        .map(|timestamp| timestamp - stream_origin)
+        .collect();
+    let reference_decoder = if requested_backend == DecodeBackend::Nvidia {
+        "av1_qsv"
+    } else {
+        "av1_cuvid"
+    };
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-c:v", reference_decoder, "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            filter,
+            "-frames:v",
+            &frame_count.to_string(),
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .expect("start independent AV1 named-hardware FFmpeg reference decode");
+    assert!(
+        output.status.success(),
+        "FFmpeg {reference_decoder} could not create AV1 reference for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes_per_frame = canvas.0 as usize * canvas.1 as usize * 4;
+    assert_eq!(
+        output.stdout.len(),
+        frame_count * bytes_per_frame,
+        "independent AV1 reference byte count for {}",
         path.display()
     );
     let rgba = output
@@ -750,6 +858,77 @@ fn assert_windows_hardware_vfr_seek_matches_cli_reference(
     );
 }
 
+#[cfg(target_os = "windows")]
+fn assert_windows_hardware_av1_vfr_seek_matches_cli_reference(
+    label: &str,
+    path: PathBuf,
+    requested_backend: DecodeBackend,
+    request_id: u64,
+) {
+    let properties = ffprobe_stream_properties(&path);
+    for property in ["av1", "Main", "yuv420p"] {
+        assert!(
+            properties.iter().any(|value| value == property),
+            "{label} expected FFprobe property {property:?}, got {properties:?}"
+        );
+    }
+    assert_eq!(
+        ffprobe_video_dimensions(&path),
+        (352, 288),
+        "{label} AV1 fixture dimensions"
+    );
+    let reference = cli_av1_hardware_reference_with_filter(
+        &path,
+        8,
+        (64, 48),
+        "scale=59:48:flags=bicubic+accurate_rnd,format=rgba,pad=64:48:2:0:color=black@0",
+        requested_backend,
+    );
+    assert!(
+        reference.stream_origin > 0,
+        "{label} stream origin must be positive"
+    );
+    let gaps: std::collections::BTreeSet<_> = reference
+        .timestamps
+        .windows(2)
+        .map(|timestamps| timestamps[1] - timestamps[0])
+        .collect();
+    assert!(
+        gaps.len() > 1 && gaps.iter().all(|gap| *gap > 0),
+        "{label} must retain distinct positive AV1 VFR timestamp gaps: {gaps:?}"
+    );
+    let scaled_cases = assert_windows_hardware_vfr_output_matches_cli_reference(
+        label,
+        path.clone(),
+        requested_backend,
+        request_id,
+        (64, 48),
+        &reference,
+    );
+    // Keep the hardware qualification's large output gate at 1920x1080 even
+    // though this deliberately small AOM AV1 source is 352x288.
+    let large_reference = cli_av1_hardware_reference_with_filter(
+        &path,
+        8,
+        (1_920, 1_080),
+        "scale=1320:1080:flags=bicubic+accurate_rnd,format=rgba,pad=1920:1080:300:0:color=black@0",
+        requested_backend,
+    );
+    let large_cases = assert_windows_hardware_vfr_output_matches_cli_reference(
+        label,
+        path,
+        requested_backend,
+        request_id + 1_000,
+        (1_920, 1_080),
+        &large_reference,
+    );
+    assert_eq!(
+        scaled_cases + large_cases,
+        38,
+        "{label} hardware AV1 parity case count"
+    );
+}
+
 fn scrub_request(path: std::path::PathBuf, request_id: u64) -> DecodeRequest {
     DecodeRequest {
         project_epoch: 1,
@@ -1161,6 +1340,74 @@ fn supplied_windows_qsv_h264_vfr_scrub_matches_independent_cli_reference() {
         "h264",
         DecodeBackend::IntelQuickSync,
         8_500,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_AV1_VFR_TEST_MEDIA to point to the supplied 8-frame shifted AOM AV1 fixture"]
+fn supplied_windows_d3d11va_av1_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_AV1_VFR_TEST_MEDIA must name the AV1 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_av1_vfr_seek_matches_cli_reference(
+        "D3D11VA supplied AV1 VFR",
+        path,
+        DecodeBackend::D3D11VA,
+        8_800,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_AV1_VFR_TEST_MEDIA to point to the supplied 8-frame shifted AOM AV1 fixture"]
+fn supplied_windows_dxva2_av1_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_AV1_VFR_TEST_MEDIA must name the AV1 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_av1_vfr_seek_matches_cli_reference(
+        "DXVA2 supplied AV1 VFR",
+        path,
+        DecodeBackend::DXVA2,
+        8_900,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_AV1_VFR_TEST_MEDIA to point to the supplied 8-frame shifted AOM AV1 fixture"]
+fn supplied_windows_cuvid_av1_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_AV1_VFR_TEST_MEDIA must name the AV1 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_av1_vfr_seek_matches_cli_reference(
+        "CUVID supplied AV1 VFR",
+        path,
+        DecodeBackend::Nvidia,
+        9_000,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_AV1_VFR_TEST_MEDIA to point to the supplied 8-frame shifted AOM AV1 fixture"]
+fn supplied_windows_qsv_av1_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_AV1_VFR_TEST_MEDIA must name the AV1 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_av1_vfr_seek_matches_cli_reference(
+        "QSV supplied AV1 VFR",
+        path,
+        DecodeBackend::IntelQuickSync,
+        9_100,
     );
 }
 
