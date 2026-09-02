@@ -10,12 +10,14 @@ Last updated: 2026-09-01
 ## Current stopping point
 
 - [x] Expand reproducible Windows hardware-VFR qualification to native and named decoder paths
-  without launching the editor. The schema-1 runner at clean commit `ccc6285` verifies the complete
+  without launching the editor. The schema-1 runner at clean commit `e7cbf0c` verifies the complete
   42-file pinned FFmpeg bundle, then passes D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync for
   H.264 and HEVC Main 10 at 64x48 and 1920x1080: 304 exact timestamp-and-pixel comparisons with no
   fallback. QSV reverse seeks reopen only that named decoder because a flush retained stale surface
-  pixels; correctness now passes, while reopen latency remains unqualified. Adapter inventory is not
-  physical-device proof. See `docs/hardware-decode-parity.md`.
+  pixels. The report now records exactly seven synchronous reopen attempts per QSV output size;
+  observed means were 15.309–18.610 ms and maxima 17.898–23.146 ms on this host. These are decoder-
+  recreation spans, not end-to-end scrub latency or a universal no-lag gate. Adapter inventory is
+  not physical-device proof. See `docs/hardware-decode-parity.md`.
 - [x] Persist the user's per-media proxy enable choice without persisting derived media. Project
   schema 9 stores one defaulted boolean; v1–v8 migrate disabled, while export and duplicate preserve
   intent. Reopen keeps original routing until current cache validation succeeds, and explicit

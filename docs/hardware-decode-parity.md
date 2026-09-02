@@ -86,7 +86,7 @@ qualification claim by itself; the retained result is recorded below.
 ## Current authoritative runner checkpoint — 2026-09-01
 
 The expanded schema-1 runner passed from clean commit
-`ccc6285d246e7e2c4e54d4e625775912dbbaeb76`. It verified all 42 files in the
+`e7cbf0ce42a5e4f2f624d00efc76f7b5fc9c2bca`. It verified all 42 files in the
 project-built FFmpeg checksum inventory and passed all eight backend/codec tests:
 D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync against H.264 High and HEVC
 Main 10, each at 64x48 and native 1920x1080. The result contains 304 exact
@@ -98,14 +98,19 @@ from the preceding surface. A fresh monitor at the same target and sequential
 QSV decoding were exact. Maelstrom now supplies the packet time base and reopens
 only the named QSV decoder on backward seeks, clearing its asynchronous surface
 queue. Both codecs now pass the complete forward/reverse/repeated-final/fresh
-matrix. Native Windows and CUVID keep the cheaper proven flush path. The reopen
-is synchronous and has not received a separate latency gate, so this is a
-correctness result rather than a no-lag QSV reverse-scrub claim.
+matrix. Native Windows and CUVID keep the cheaper proven flush path. The report
+now measures the synchronous named-decoder recreation boundary separately from
+ordinary decoder calls, including failed attempts. Each QSV output size recorded
+exactly seven reopens. H.264 measured 17.007 ms mean / 19.476 ms max at 64x48 and
+15.309 ms mean / 17.898 ms max at 1920x1080. HEVC measured 18.610 ms mean /
+21.974 ms max at 64x48 and 17.543 ms mean / 23.146 ms max at 1920x1080. These
+host-specific CPU elapsed spans are diagnostic evidence, not GPU execution,
+end-to-end scrub latency, or a universal no-lag threshold.
 
-The retained local report is 6,127 bytes with SHA-256
-`FECEAB07DD5735511DEFF23E0EBF492B8A1DEB5B55B66FF85A4C424A2DB2DD4A`; its
-5,338-byte log SHA-256 is
-`8D6BF9354B2DE8D2794BFF322FD623AAC8E13437C07943477D5A69B99DAA9E2E`.
+The retained local report is 7,700 bytes with SHA-256
+`A8E88B66197F508767ED84644F9887FE211F4499E3310ECF7CB62DBC1426BAB5`; its
+5,856-byte log SHA-256 is
+`CC48FA48AE6B92A5EE192DDE96192D67797DC7103C9687E67BAD0D78667E15E3`.
 Optional inventory listed NVIDIA GeForce RTX 3090 and Intel UHD Graphics 770,
 but remains inventory rather than physical-adapter attribution. No editor, GUI
 surface, export path, or physical scanout was exercised.
