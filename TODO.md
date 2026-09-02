@@ -140,6 +140,15 @@ Last updated: 2026-09-01
   unique; start/end commits match; no tracked changes or invocation/report-read failures occurred.
   This renews headless Software decode/`h264_mf` evidence only; live audio, GUI, packaged playback,
   physical scanout, and cross-hardware gates remain open. See `docs/phase0-scenarios.md`.
+- [x] Prefer completed monitor sessions during demand-driven capacity reclamation. Source groups
+  remain whole and priority-protected; within equal visual priority the least-recently-requested
+  completed group is reclaimed before the established active-work fallback. A real two-permit,
+  three-source Phase 0 path proves exact deferred retry identity, preserves the newer resident, and
+  reaches zero final ownership. The clean `b668543` requalification passed 32 complete matrices,
+  224 scenario executions, and 1,312 declared work iterations over 617.912 seconds; report SHA-256
+  is `80C965A68011CC0CEB950744176C803857E70CBF104054B99D15B07A3D871FE5`.
+  This is not a general time-based idle reaper or cross-hardware proof. See
+  `docs/phase0-scenarios.md`.
 - [x] Add a clean-commit Phase 0 timeline-foundation runner around the existing release gates.
   The retained schema-1 run at `6576d91` passed ten independent 50,000-clip history trials
   (press/release p95 0.2672/0.7453 ms), wide/detail/playhead CPU p95

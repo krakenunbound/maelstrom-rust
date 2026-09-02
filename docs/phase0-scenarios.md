@@ -85,7 +85,11 @@ the commit or tracked state changes. Short dirty-tree harness checks may pass bu
 non-authoritative.
 
 This gate supplies repeated reverse-scrub, project-switch, offline/recovery,
-three forms of cache/idle-retirement pressure, and export-cancellation evidence in one report. It
+three forms of cache/idle-retirement pressure, and export-cancellation evidence in one report.
+The multi-source scenario now also fills a two-source coordinator, requires a third real source to
+defer, applies the production priority-first least-recently-requested selection to a completed
+lower-priority group, and proves the exact retained request retries without displacing the newer
+resident. This is demand-driven capacity reclamation, not a background or time-based idle reaper. It
 does not display the UI, exercise a live audio device, measure physical GPU
 scanout, replace the packaged playback soak, or satisfy the integrated/discrete
 cross-hardware exit gate by itself.
@@ -100,12 +104,14 @@ separate nullable role fields. The report recorded `authoritative: true` with
 SHA-256 `bef925939b118aaf7d9c1339cbd6e0cfca1c084b0e7b57a46d24971f0ba1e5d6`.
 Integrated/discrete cross-hardware proof remains open.
 
-The 2026-09-01 requalification embeds identical clean start/end source commit
-`ea234ea57d5793eedb4e19d3cf0c4ff2764d169b`. It passed for 618.843 measured matrix seconds,
-excluding 1.231 seconds of setup, with 26 complete matrix runs, 182 scenario executions, and
-962 declared work iterations. All seven scenarios passed all 26 runs, every child report had a
+The current 2026-09-01 requalification embeds identical clean start/end source commit
+`b668543b15d0eb2e2bb53d1540fe9dae206dbd2b`. It passed for 617.912 measured matrix seconds,
+excluding 1.210 seconds of setup, with 32 complete matrix runs, 224 scenario executions, and
+1,312 declared work iterations. All seven scenarios passed all 32 runs, every child report had a
 unique SHA-256, and no invocation or report-read failure occurred. The wrapper is authoritative;
-its SHA-256 is `9FC73AB450535A5917AAF4A86EE307C01D0E258AAA576FDA042F6CC8E32DDFB1`.
+its SHA-256 is `80C965A68011CC0CEB950744176C803857E70CBF104054B99D15B07A3D871FE5`.
+Every multi-source run recorded one idle reclaim, exact retry identity, the newer resident still
+owned, and zero final session/source/actor ownership.
 It observed only the headless Software decoder and `h264_mf` encoder in their explicit role fields;
 the listed Intel/NVIDIA adapters were machine inventory, not exercised rendering. Live audio,
 GUI-present, packaged playback, physical scanout, and cross-hardware soak evidence remain open.

@@ -173,9 +173,10 @@ Follow `ENGINE_ROADMAP.md`.
 
 - Versioned fixture manifest (codec, rate, GOP, expected failure)
 - Soak: 10 min play plus a separate seven-scenario native matrix for reverse scrub, project switch,
-  offline media, cache pressure, twelve-source pressure/eager idle release, and export cancel. The
-  provenance-qualified schema-2 wrapper over the schema-4 matrix passed 521 complete runs over
-  600.673 seconds; broader cross-hardware soak evidence remains open.
+  offline media, cache pressure, twelve-source pressure/eager idle release, demand-driven
+  completed-session reclamation, and export cancel. The current provenance-qualified schema-2
+  wrapper passed 32 complete matrices over 617.912 seconds at clean commit `b668543`; broader
+  cross-hardware soak evidence remains open.
 - Per-stage timers and drop/hold/late/underrun counters are now available from the compact HUD
   hover in English/Japanese, with truthful mean-versus-p95 labels, sample counts, active layers,
   preview scale, and explicit unavailable GPU rows. Physical scanout is still not measured.
@@ -196,8 +197,10 @@ Open: UI-present/cross-hardware multi-source proof, later proxy queues/persisten
 profiles, and broad VFR/cross-backend proof. A bounded local headless gate now proves real-default-device
 audio clock and consumed-PCM continuity under four concurrent Full-1080p Software decode sources,
 including a deterministic 750 ms topmost-source hold with ready-source progress and delayed-source
-recovery; cross-hardware and UI-present audio proof remain open. Bounded speculative-prewarm-first priority/recency session
-eviction is implemented; strict priority has no age-based fairness guarantee.
+recovery; cross-hardware and UI-present audio proof remain open. Under demand/capacity pressure,
+bounded speculative-prewarm-first session eviction now prefers completed lower-priority groups and
+applies request recency within equal priority; strict priority still has no age-based fairness
+guarantee.
 
 Additional local Software coverage now includes shifted-VFR ProRes/DNxHR 10-bit MOV and supplied
 HEVC Main 10. Independent CLI pixels exposed and verified a fix for DNxHR BT.709 preview being
