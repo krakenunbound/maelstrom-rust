@@ -93,6 +93,38 @@ points; untracked and ignored evidence is deliberately excluded from that source
 state. This is a reproducible harness contract, not a fresh authoritative
 qualification claim by itself; the retained result is recorded below.
 
+## Current authoritative runner checkpoint — 2026-09-01
+
+The schema-1 runner passed from clean commit
+`f76c9ab1065d26e8393ddbf264fedb0eba9265bd`. It verified all 42 files in the
+project-built FFmpeg checksum inventory and passed all twelve backend/codec tests:
+D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync against H.264 High, HEVC
+Main 10, and AV1 Main. Every path passed 19 forward/reverse/repeated-final/fresh
+seeks at both 64x48 and 1920x1080, for 456 exact timestamp-and-pixel comparisons
+with no fallback.
+
+Before the Rust matrix, all four FFmpeg CLI AV1 paths decoded the stronger fixture
+to the eight distinct frame MD5 values published in AOM's manifest pinned at commit
+`a40ed1ea9e4ecc3df58a5bccb76623f2c94ae727`. The local-only derived MKV is
+306,777 bytes with SHA-256
+`B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21`; it
+retains eight all-intra packets at a five-second source origin with irregular gaps.
+
+Each QSV output size recorded exactly seven named-decoder reopens. H.264 measured
+19.728 ms mean / 25.253 ms max at 64x48 and 23.487 ms mean / 25.623 ms max at
+1920x1080. HEVC measured 19.494 ms mean / 24.968 ms max at 64x48 and 24.626 ms
+mean / 29.806 ms max at 1920x1080. AV1 measured 15.281 ms mean / 17.249 ms max at
+64x48 and 15.646 ms mean / 17.659 ms max at 1920x1080. These host-specific
+synchronous decoder-recreation spans remain diagnostic evidence, not GPU execution,
+end-to-end scrub latency, or a universal no-lag threshold.
+
+The retained local report is 12,161 bytes with SHA-256
+`4562502DEDE4A6C4412A53F239D15C9D44243F69B67F374407078174A4A29546`; its
+8,762-byte log SHA-256 is
+`D0145CD9591580450DD5A78450E557C393F84D6AF770955D3F217C7BC5BA4B24`.
+No adapter inventory was requested. No editor, GUI surface, export path, or physical
+scanout was exercised.
+
 ## Previous authoritative runner checkpoint — 2026-09-01
 
 The schema-1 runner passed from clean commit
