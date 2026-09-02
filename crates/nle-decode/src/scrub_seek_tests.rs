@@ -558,10 +558,12 @@ fn assert_windows_hardware_vfr_output_matches_cli_reference(
         );
         assert_eq!(monitor.backend, requested_backend, "{label} actual backend");
         assert_eq!(monitor.fallback_reason, None, "{label} fallback reason");
-        assert!(
-            timings.snapshot().hardware_transfer.samples > previous_transfers,
-            "{label} did not transfer a hardware frame"
-        );
+        if requires_cpu_frame_transfer(requested_backend) {
+            assert!(
+                timings.snapshot().hardware_transfer.samples > previous_transfers,
+                "{label} did not transfer a hardware frame"
+            );
+        }
     };
     let mut cases = 0;
     let timings = DecoderStageTimingAccumulators::default();
@@ -575,10 +577,12 @@ fn assert_windows_hardware_vfr_output_matches_cli_reference(
             });
     assert_eq!(monitor.backend, requested_backend, "{label} actual backend");
     assert_eq!(monitor.fallback_reason, None, "{label} fallback reason");
-    assert!(
-        monitor.transfer_hardware_frames,
-        "{label} hardware frame transfer"
-    );
+    if requires_cpu_frame_transfer(requested_backend) {
+        assert!(
+            monitor.transfer_hardware_frames,
+            "{label} hardware frame transfer"
+        );
+    }
 
     // Forward, reverse (including repeated final), then return to the final frame.
     let targets = reference
@@ -628,10 +632,12 @@ fn assert_windows_hardware_vfr_output_matches_cli_reference(
         decode_and_check(&mut fresh_monitor, &request, &fresh_timings);
         cases += 1;
     }
-    assert!(
-        timings.snapshot().hardware_transfer.samples > 0,
-        "{label} reusable monitor did not transfer a hardware frame"
-    );
+    if requires_cpu_frame_transfer(requested_backend) {
+        assert!(
+            timings.snapshot().hardware_transfer.samples > 0,
+            "{label} reusable monitor did not transfer a hardware frame"
+        );
+    }
     assert_eq!(cases, 19, "{label} hardware parity case count");
     eprintln!(
         "{label} {} {}x{}: {} VFR boundaries, {cases} exact CLI-reference seek cases",
@@ -1097,6 +1103,42 @@ fn supplied_windows_dxva2_h264_vfr_scrub_matches_independent_cli_reference() {
 
 #[cfg(target_os = "windows")]
 #[test]
+#[ignore = "requires MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR H.264 fixture"]
+fn supplied_windows_cuvid_h264_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA must name the H.264 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "CUVID supplied H.264 VFR",
+        path,
+        "h264",
+        DecodeBackend::Nvidia,
+        8_400,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR H.264 fixture"]
+fn supplied_windows_qsv_h264_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HARDWARE_H264_VFR_TEST_MEDIA must name the H.264 VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "QSV supplied H.264 VFR",
+        path,
+        "h264",
+        DecodeBackend::IntelQuickSync,
+        8_500,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 #[ignore = "requires MAELSTROM_HEVC_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR HEVC fixture"]
 fn supplied_windows_d3d11va_hevc_vfr_scrub_matches_independent_cli_reference() {
     let path = PathBuf::from(
@@ -1128,6 +1170,42 @@ fn supplied_windows_dxva2_hevc_vfr_scrub_matches_independent_cli_reference() {
         "hevc",
         DecodeBackend::DXVA2,
         8_300,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HEVC_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR HEVC fixture"]
+fn supplied_windows_cuvid_hevc_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HEVC_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HEVC_VFR_TEST_MEDIA must name the HEVC VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "CUVID supplied HEVC VFR",
+        path,
+        "hevc",
+        DecodeBackend::Nvidia,
+        8_600,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires MAELSTROM_HEVC_VFR_TEST_MEDIA to point to the supplied 8-frame shifted VFR HEVC fixture"]
+fn supplied_windows_qsv_hevc_vfr_scrub_matches_independent_cli_reference() {
+    let path = PathBuf::from(
+        std::env::var_os("MAELSTROM_HEVC_VFR_TEST_MEDIA")
+            .expect("MAELSTROM_HEVC_VFR_TEST_MEDIA must name the HEVC VFR fixture"),
+    );
+    let _hardware = hardware_test_guard();
+    assert_windows_hardware_vfr_seek_matches_cli_reference(
+        "QSV supplied HEVC VFR",
+        path,
+        "hevc",
+        DecodeBackend::IntelQuickSync,
+        8_700,
     );
 }
 

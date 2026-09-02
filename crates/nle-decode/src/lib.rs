@@ -3084,6 +3084,32 @@ impl StickyMonitor {
         Ok((scaler, scaled_size))
     }
 
+    fn reopen_named_decoder(&mut self) -> Result<(), String> {
+        let stream = self
+            .input
+            .stream(self.stream_index)
+            .ok_or_else(|| "monitor video stream disappeared while reopening decoder".to_owned())?;
+        let (name, _) = hardware_decoder_candidates(stream.parameters().id())
+            .iter()
+            .find(|(_, backend)| *backend == self.backend)
+            .ok_or_else(|| {
+                format!(
+                    "{} has no named decoder candidate for this stream",
+                    self.backend.display_name()
+                )
+            })?;
+        self.decoder = open_named_hardware_decoder(&stream, name)?;
+        self.scaler = None;
+        self.scaler_input = None;
+        self.scaled_size = fitted_size(
+            self.decoder.width(),
+            self.decoder.height(),
+            self.output_size.0,
+            self.output_size.1,
+        );
+        Ok(())
+    }
+
     fn decode(
         &mut self,
         request: &DecodeRequest,
@@ -3210,7 +3236,14 @@ impl StickyMonitor {
                     ffmpeg::Error::from(seek_result)
                 ));
             }
-            {
+            if dense_reverse_cache && self.backend == DecodeBackend::IntelQuickSync {
+                // FFmpeg's named QSV decoders can retain an asynchronous surface across
+                // avcodec_flush_buffers, pairing the new reverse-seek timestamp with pixels
+                // from the preceding frame. Reopening only this fallback decoder gives the
+                // reverse request a fresh surface queue; native Windows and CUVID keep the
+                // cheaper proven flush path.
+                self.reopen_named_decoder()?;
+            } else {
                 let _timer = StageTimer::new(&stage_timings.decoder_calls);
                 self.decoder.flush();
             }
@@ -3524,14 +3557,7 @@ fn open_video_decoder(
         }
 
         for &(name, backend) in hardware_decoder_candidates(codec_id) {
-            let Some(codec) = ffmpeg::decoder::find_by_name(name) else {
-                continue;
-            };
-            let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-                .map_err(|error| format!("could not create video decoder: {error}"))?;
-            if let Ok(opened) = context.decoder().open_as(codec)
-                && let Ok(video) = opened.video()
-            {
+            if let Ok(video) = open_named_hardware_decoder(stream, name) {
                 return Ok((video, backend));
             }
         }
@@ -3550,6 +3576,27 @@ fn open_video_decoder(
         .video()
         .map(|video| (video, DecodeBackend::Software))
         .map_err(|error| format!("could not open video decoder: {error}"))
+}
+
+/// Opens one explicit FFmpeg named hardware decoder.  Production still owns candidate order
+/// and fallback; tests use this seam only when they must prove one named backend without
+/// allowing a different backend to satisfy the assertion.
+fn open_named_hardware_decoder(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+    name: &str,
+) -> Result<ffmpeg::decoder::Video, String> {
+    let codec = ffmpeg::decoder::find_by_name(name)
+        .ok_or_else(|| format!("named hardware decoder {name} is unavailable"))?;
+    let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|error| format!("could not create video decoder: {error}"))?;
+    let mut decoder = context.decoder();
+    decoder.set_packet_time_base(stream.time_base());
+    let opened = decoder
+        .open_as(codec)
+        .map_err(|error| format!("could not open named hardware decoder {name}: {error}"))?;
+    opened
+        .video()
+        .map_err(|error| format!("named hardware decoder {name} is not a video decoder: {error}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -3879,6 +3926,31 @@ fn scale_monitor_frame(
                 .map_err(|error| format!("could not scale monitor frame: {error}"))?;
         }
     } else {
+        // Named decoders can report their pre-open format, then select the actual CPU-readable
+        // output format after the first packet (for example NV12/P010 from QSV). Rebuild only
+        // when that concrete frame contract changes, as we already do after native transfers.
+        let input = (decoded.format(), decoded.width(), decoded.height());
+        let required_scaled_size = fitted_size(input.1, input.2, output_size.0, output_size.1);
+        if *scaler_input != Some(input)
+            || *scaled_size != required_scaled_size
+            || *scaler_quality != Some(scaling_quality)
+        {
+            *scaler = Some(
+                ScalingContext::get(
+                    input.0,
+                    input.1,
+                    input.2,
+                    Pixel::RGBA,
+                    required_scaled_size.0,
+                    required_scaled_size.1,
+                    scaling_flags(scaling_quality),
+                )
+                .map_err(|error| format!("could not create RGBA scaler: {error}"))?,
+            );
+            *scaler_input = Some(input);
+            *scaled_size = required_scaled_size;
+            *scaler_quality = Some(scaling_quality);
+        }
         {
             let _timer = StageTimer::new(&stage_timings.scaler);
             let scaler = scaler
@@ -5901,46 +5973,87 @@ mod tests {
     ) -> Result<StickyMonitor, String> {
         let input = ffmpeg::format::input(&path)
             .map_err(|error| format!("could not open supplied test media: {error}"))?;
-        let (stream_index, time_base, stream_start_time_microseconds, decoder) = {
+        let (
+            stream_index,
+            time_base,
+            stream_start_time_microseconds,
+            decoder,
+            transfer_hardware_frames,
+        ) = {
             let stream = input
                 .streams()
                 .best(Type::Video)
                 .ok_or_else(|| "supplied test media has no video stream".to_owned())?;
-            let candidate = windows_hardware_decoder_candidates()
-                .into_iter()
-                .find(|candidate| candidate.backend == requested_backend)
-                .expect("requested Windows hardware backend is configured for this test");
-            let codec = ffmpeg::decoder::find(stream.parameters().id())
-                .ok_or_else(|| "could not find supplied-media video decoder".to_owned())?;
-            if !codec_supports_hardware_config(
-                &codec,
-                candidate.device_type,
-                candidate.pixel_format,
-            ) {
-                return Err(format!(
-                    "{} is not advertised with HW_DEVICE_CTX for supplied media",
-                    requested_backend.display_name()
-                ));
-            }
-            let decoder = open_hardware_device_decoder(
-                &stream,
-                codec,
-                candidate.device_type,
-                candidate.select_format,
-            )?;
+            let (decoder, transfer_hardware_frames) = if let Some(candidate) =
+                windows_hardware_decoder_candidates()
+                    .into_iter()
+                    .find(|candidate| candidate.backend == requested_backend)
+            {
+                let codec = ffmpeg::decoder::find(stream.parameters().id())
+                    .ok_or_else(|| "could not find supplied-media video decoder".to_owned())?;
+                if !codec_supports_hardware_config(
+                    &codec,
+                    candidate.device_type,
+                    candidate.pixel_format,
+                ) {
+                    return Err(format!(
+                        "{} is not advertised with HW_DEVICE_CTX for supplied media",
+                        requested_backend.display_name()
+                    ));
+                }
+                (
+                    open_hardware_device_decoder(
+                        &stream,
+                        codec,
+                        candidate.device_type,
+                        candidate.select_format,
+                    )?,
+                    true,
+                )
+            } else {
+                let (name, _) = hardware_decoder_candidates(stream.parameters().id())
+                    .iter()
+                    .find(|(_, backend)| *backend == requested_backend)
+                    .ok_or_else(|| {
+                        format!(
+                            "{} has no named decoder candidate for supplied media",
+                            requested_backend.display_name()
+                        )
+                    })?;
+                (open_named_hardware_decoder(&stream, name)?, false)
+            };
             (
                 stream.index(),
                 stream.time_base(),
                 stream_start_time_microseconds(stream.start_time(), stream.time_base()),
                 decoder,
+                transfer_hardware_frames,
             )
         };
-        let scaled_size = fitted_size(
-            decoder.width(),
-            decoder.height(),
-            output_size.0,
-            output_size.1,
-        );
+        let scaler_input = (!transfer_hardware_frames)
+            .then(|| (decoder.format(), decoder.width(), decoder.height()));
+        let (scaler, scaled_size) = match scaler_input {
+            Some((format, source_width, source_height)) => {
+                let (scaler, scaled_size) = StickyMonitor::make_scaler(
+                    format,
+                    source_width,
+                    source_height,
+                    output_size.0,
+                    output_size.1,
+                    ScalingQuality::Bicubic,
+                )?;
+                (Some(scaler), scaled_size)
+            }
+            None => (
+                None,
+                fitted_size(
+                    decoder.width(),
+                    decoder.height(),
+                    output_size.0,
+                    output_size.1,
+                ),
+            ),
+        };
         let session_pool = MonitorSessionPool::new(1, 0);
         let session_permit = session_pool
             .try_acquire(MonitorSessionLane::Foreground)
@@ -5953,16 +6066,16 @@ mod tests {
             time_base,
             stream_start_time_microseconds,
             decoder,
-            scaler: None,
-            scaler_input: None,
-            scaler_quality: None,
+            scaler,
+            scaler_input,
+            scaler_quality: Some(ScalingQuality::Bicubic),
             output_size,
             scaled_size,
             last_source_tick: None,
             last_visible_tick: None,
             backend: requested_backend,
             fallback_reason: None,
-            transfer_hardware_frames: true,
+            transfer_hardware_frames,
         })
     }
 

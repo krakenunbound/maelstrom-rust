@@ -97,8 +97,12 @@ $fixtureContracts = @(
 $tests = @(
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_d3d11va_h264_vfr_scrub_matches_independent_cli_reference'; backend = 'D3D11VA'; codec = 'h264'; label = 'D3D11VA supplied H.264 VFR Windows D3D11VA' },
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_dxva2_h264_vfr_scrub_matches_independent_cli_reference'; backend = 'DXVA2'; codec = 'h264'; label = 'DXVA2 supplied H.264 VFR Windows DXVA2' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_cuvid_h264_vfr_scrub_matches_independent_cli_reference'; backend = 'NVIDIA CUVID'; codec = 'h264'; label = 'CUVID supplied H.264 VFR NVIDIA CUVID' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_qsv_h264_vfr_scrub_matches_independent_cli_reference'; backend = 'Intel Quick Sync'; codec = 'h264'; label = 'QSV supplied H.264 VFR Intel Quick Sync' },
     [ordered]@{ name = 'scrub_seek_tests::supplied_windows_d3d11va_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'D3D11VA'; codec = 'hevc_main10'; label = 'D3D11VA supplied HEVC VFR Windows D3D11VA' },
-    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_dxva2_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'DXVA2'; codec = 'hevc_main10'; label = 'DXVA2 supplied HEVC VFR Windows DXVA2' }
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_dxva2_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'DXVA2'; codec = 'hevc_main10'; label = 'DXVA2 supplied HEVC VFR Windows DXVA2' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_cuvid_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'NVIDIA CUVID'; codec = 'hevc_main10'; label = 'CUVID supplied HEVC VFR NVIDIA CUVID' },
+    [ordered]@{ name = 'scrub_seek_tests::supplied_windows_qsv_hevc_vfr_scrub_matches_independent_cli_reference'; backend = 'Intel Quick Sync'; codec = 'hevc_main10'; label = 'QSV supplied HEVC VFR Intel Quick Sync' }
 )
 
 $saved = @{}
@@ -191,8 +195,8 @@ try {
             tests = $runResults
             test_count = $runResults.Count
             passed_test_count = @($runResults | Where-Object { $_.passed }).Count
-            exact_cases_total = if ($null -eq $failure -and $runResults.Count -eq 4) { 152 } else { $null }
-            backend_apis = @('D3D11VA', 'DXVA2')
+            exact_cases_total = if ($null -eq $failure -and $runResults.Count -eq 8) { 304 } else { $null }
+            backend_apis = @('D3D11VA', 'DXVA2', 'NVIDIA CUVID', 'Intel Quick Sync')
             codecs = @('h264', 'hevc_main10')
             output_sizes = @(@(64, 48), @(1920, 1080))
             retained_log = [IO.Path]::GetFullPath($logPath)
@@ -201,19 +205,19 @@ try {
                 physical_gpu_claim = $false
                 gui_or_editor_launched = $false
                 export_parity_claim = $false
-                note = 'D3D11VA and DXVA2 are backend API qualifications against the default adapter; this harness does not prove physical-GPU coverage, GUI presentation, scanout, or export parity.'
+                note = 'D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync are decoder-path qualifications on this host; this harness does not prove physical-adapter identity, GUI presentation, scanout, export parity, or other machines.'
             }
             adapter_inventory = if ($IncludeAdapterInventory) { [ordered]@{ inventory_only = $true; adapters = $adapterInventory } } else { $null }
             }
             Write-AtomicJson $resolvedReportPath $report
         } catch { $reportWriteFailure = $_.Exception.Message }
     }
-    # Always restore the caller environment and dispose the mutex, even when a
-    # an abandoned mutex is recovered before this run safely publishes evidence.
+    # Always restore the caller environment and dispose the mutex, even when an
+    # abandoned mutex is recovered before this run safely publishes evidence.
     foreach ($name in $saved.Keys) { Restore-EnvironmentValue $name $saved[$name] }
     if ($runMutexHeld) { $runMutex.ReleaseMutex() }
     $runMutex.Dispose()
 }
 if ($null -ne $reportWriteFailure) { throw "Phase 1 hardware VFR qualification could not publish its report: $reportWriteFailure" }
 if ($null -ne $failure) { throw "Phase 1 hardware VFR qualification failed; preserved report: $resolvedReportPath. $failure" }
-Write-Host "Phase 1 hardware VFR qualification: PASS ($resolvedReportPath; 4 tests; 152 exact cases)"
+Write-Host "Phase 1 hardware VFR qualification: PASS ($resolvedReportPath; 8 tests; 304 exact cases)"
