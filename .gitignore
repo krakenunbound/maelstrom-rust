@@ -15,6 +15,7 @@
 /artifacts/phase1-sustained/
 /artifacts/phase2-integrated-auto/
 /artifacts/package-worker-policy-c603358/
+/artifacts/package-schema9-*/
 
 # Local AI weights and model packages are never public source. Keep only the
 # registry contract and its licensing guidance in Git.

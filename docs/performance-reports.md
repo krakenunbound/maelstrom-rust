@@ -257,6 +257,34 @@ message, relevant artifact path, and process exit code when available. Unavailab
 driver values remain JSON `null`; the runner never infers them from an adapter request. The wrapper
 also records the deterministic fixture codecs separately (`mpeg4` video and `aac` audio).
 
+### Prepared schema-9 package checkpoint — 2026-09-01
+
+The portable package was rebuilt from clean source commit
+`c3cfebe856a42b7c8566a6f7b8cfa21b55b5fd7a` through the reviewed
+`scripts/package-windows.ps1 -SkipSmoke` path. The packaged `Maelstrom.exe` exactly matches
+`target\release\nle-app.exe` at SHA-256
+`27BC9D24B2DD921607781BFE3B5DFD4FBE7574A7BDB2CACFD45F081171DF6DF8`. Its 23-file package is
+runtime-complete: all 13 copied FFmpeg command/runtime inventory hashes match the pinned project
+bundle, the app-local `vcruntime140.dll` matches the authorized installed Visual Studio AMD64 CRT,
+and the packaged model manifest matches its documented source. All 15 PE files report AMD64; a
+read-only `dumpbin /dependents` walk classified all 117 static import edges as 43 adjacent,
+62 present Windows-module, and 12 API-set-contract edges, with no unresolved non-contract
+dependency. API-set contracts are virtual aliases and were classified rather than resolved by this
+static inspection. Separate post-build checks prove packaged FFmpeg and FFprobe load using a
+restricted package-plus-Windows path and report `n8.1-maelstrom-20260824`. The exact
+`H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat --verify-runtime` branch also passes and returns
+before its launch branch.
+
+Before replacement, the previous 23-file package was copied to
+`H:\Maelstrom Rust\dist\package-backups\Maelstrom-Windows-x64-pre-schema9-C42458E86AE9` and every
+relative-path hash was verified. Only `Maelstrom.exe` and `PACKAGE-STATUS.json` differ between that
+copy and the rebuilt package. No DLL was downloaded or installed. `PACKAGE-STATUS.json` deliberately
+records `smoke_status: "not_run"`; no editor, GUI surface, schema-9 runtime report, export smoke, or
+physical scanout was exercised. Historical schema-7 reports do not qualify this executable. A fresh
+schema-9 windowed run remains permission-gated to the exact full-path launcher. Current static
+evidence is retained locally at `artifacts/package-schema9-c3cfebe/verification.json`: 3,378 bytes,
+SHA-256 `1F4F33952A321722788D728C7804C3E85C242E8A87F3EC7203528ACBF97249B7`.
+
 The focused failure-contract check creates a disposable, deliberately incomplete package without
 launching the editor and verifies the schema-2 `package` / `runtime_closure` diagnosis:
 

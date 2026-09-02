@@ -9,6 +9,17 @@ Last updated: 2026-09-01
 
 ## Current stopping point
 
+- [x] Rebuild the portable Windows package from clean commit `c3cfebe` with the schema-9
+  surface-report contract, using the supported `-SkipSmoke` path. The packaged executable matches
+  `target\release\nle-app.exe` at SHA-256
+  `27BC9D24B2DD921607781BFE3B5DFD4FBE7574A7BDB2CACFD45F081171DF6DF8`. All 23 files are present;
+  pinned runtime/model/VC hashes match their approved sources; all 15 PE files are AMD64; 117 static
+  import edges classify as 43 adjacent, 62 present Windows-module, and 12 API-set-contract edges,
+  with no unresolved non-contract dependency. Separate restricted-path FFmpeg/FFprobe checks and
+  the exact full-path launcher's `--verify-runtime` check pass. Only the executable
+  and `PACKAGE-STATUS.json` differ from the verified 23-file recovery copy. No GUI was launched and
+  `smoke_status` remains `not_run`; fresh schema-9 windowed qualification still requires explicit
+  launch permission. See `docs/performance-reports.md`.
 - [x] Expand reproducible Windows hardware-VFR qualification to native and named decoder paths
   without launching the editor. The schema-1 runner at clean commit `e7cbf0c` verifies the complete
   42-file pinned FFmpeg bundle, then passes D3D11VA, DXVA2, NVIDIA CUVID, and Intel Quick Sync for
