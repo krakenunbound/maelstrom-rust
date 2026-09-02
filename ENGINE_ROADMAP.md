@@ -904,6 +904,11 @@ Extend the data model without putting recursive work on the timeline draw path.
       bounded session-initialization probe; GPU model-name matching alone is not sufficient.
       Probe off the UI thread, allow a compatible processing GPU to differ from the display GPU,
       and re-evaluate after runtime changes, device loss, or driver reset.
+      Foundation landed: the startup-resources worker now checks the exact bundled filter inventory
+      and counts every independent Vulkan physical candidate without collapsing duplicate models
+      before performing indexed real `fruc_vulkan` session initialization inside one FFmpeg budget.
+      The Playback menu reports the session-only result and reason; it does not yet apply
+      interpolation. See `docs/runtime-media-tools.md`.
 - [ ] Keep hardware interpolation visible but disabled with a specific reason when it is unusable.
       Availability selection is automatic; applying interpolation remains an explicit user choice.
       Preserve unavailable saved settings, require an explicit export fallback, and never silently

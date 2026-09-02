@@ -1462,6 +1462,9 @@ pub struct EditorState {
     pub export_status: EditorExportStatus,
     pub kraken_upscale_ready: bool,
     pub kraken_upscale_reason: String,
+    /// Runtime-only result from the bounded bundled-FFmpeg/Vulkan FRUC probe.
+    gpu_optical_flow_available: bool,
+    gpu_optical_flow_reason: String,
     pub kraken_upscale_quality: u8,
     pub kraken_upscale_goal: u8,
     pub kraken_upscale_status: EditorExportStatus,
@@ -1626,6 +1629,13 @@ impl EditorState {
             export_status: EditorExportStatus::Idle,
             kraken_upscale_ready: false,
             kraken_upscale_reason: String::new(),
+            gpu_optical_flow_available: false,
+            gpu_optical_flow_reason: t(
+                language,
+                "Detecting GPU Optical Flow capability…",
+                "GPU オプティカルフロー機能を検出中…",
+            )
+            .to_owned(),
             kraken_upscale_quality: 3,
             kraken_upscale_goal: 2,
             kraken_upscale_status: EditorExportStatus::Idle,
@@ -1793,6 +1803,13 @@ impl EditorState {
         if !ready && self.workspace == EditorWorkspace::KrakenUpscale {
             self.workspace = EditorWorkspace::Edit;
         }
+    }
+
+    /// Installs runtime capability evidence only. Applying temporal interpolation remains an
+    /// explicit editing choice once the shared preview/export time-mapping hook is available.
+    pub fn set_gpu_optical_flow_capability(&mut self, available: bool, reason: impl Into<String>) {
+        self.gpu_optical_flow_available = available;
+        self.gpu_optical_flow_reason = reason.into();
     }
 
     pub fn kraken_source_path(&self) -> Option<PathBuf> {
@@ -6021,6 +6038,10 @@ fn playback_menu(ui: &mut Ui, state: &mut EditorState) {
             menu_text(state.language, "Sampling Quality", "サンプリング品質"),
             |ui| preview_sampling_menu(ui, state),
         );
+        ui.menu_button(
+            menu_text(state.language, "Frame Interpolation", "フレーム補間"),
+            |ui| frame_interpolation_menu(ui, state),
+        );
         ui.separator();
         if ui
             .button(menu_text(
@@ -6076,6 +6097,51 @@ fn playback_menu(ui: &mut Ui, state: &mut EditorState) {
             ui.close();
         }
     });
+}
+
+fn frame_interpolation_menu(ui: &mut Ui, state: &EditorState) {
+    ui.selectable_label(
+        true,
+        menu_text(state.language, "Nearest Frame", "最近傍フレーム"),
+    )
+    .on_hover_text(t(
+        state.language,
+        "Current behavior; no generated intermediate frames",
+        "現在の動作：中間フレームを生成しません",
+    ));
+    ui.separator();
+    let label = if state.gpu_optical_flow_available {
+        t(
+            state.language,
+            "GPU Optical Flow — Runtime Ready",
+            "GPU オプティカルフロー — ランタイム準備完了",
+        )
+    } else {
+        t(
+            state.language,
+            "GPU Optical Flow — Unavailable",
+            "GPU オプティカルフロー — 利用不可",
+        )
+    };
+    ui.add_enabled(false, egui::Button::new(label))
+        .on_hover_text(if state.gpu_optical_flow_reason.is_empty() {
+            t(
+                state.language,
+                "Capability has not been checked yet",
+                "機能はまだ確認されていません",
+            )
+        } else {
+            state.gpu_optical_flow_reason.clone()
+        });
+    ui.label(
+        RichText::new(t(
+            state.language,
+            "Detection is automatic. Applying it will remain a user choice.",
+            "検出は自動です。適用はユーザーが選択します。",
+        ))
+        .small()
+        .color(Color32::from_rgb(132, 148, 164)),
+    );
 }
 
 fn preview_quality_menu(ui: &mut Ui, state: &mut EditorState, paused: bool) {
@@ -23404,6 +23470,33 @@ mod tests {
         assert!(!editor.set_paused_preview_quality(PreviewQuality::Quarter));
         assert!(!editor.set_preview_sampling(PreviewSampling::Nearest));
         assert_eq!(editor.durable_generation(), generation + 3);
+    }
+
+    #[test]
+    fn gpu_optical_flow_capability_is_runtime_only_and_never_changes_quality() {
+        let mut editor = EditorState::new(Language::English, "Optical flow capability");
+        let generation = editor.durable_generation();
+        let snapshot = editor.snapshot();
+
+        editor.set_gpu_optical_flow_capability(
+            true,
+            "Bundled FFmpeg initialized fruc_vulkan on Vulkan device 1",
+        );
+
+        assert!(editor.gpu_optical_flow_available);
+        assert_eq!(
+            editor.gpu_optical_flow_reason,
+            "Bundled FFmpeg initialized fruc_vulkan on Vulkan device 1"
+        );
+        assert_eq!(editor.preview_quality(), PreviewQuality::Full);
+        assert_eq!(editor.paused_preview_quality(), PreviewQuality::Full);
+        assert_eq!(editor.preview_sampling(), PreviewSampling::Bicubic);
+        assert_eq!(editor.durable_generation(), generation);
+
+        let restored =
+            EditorState::restore(Language::English, "Optical flow capability", snapshot).unwrap();
+        assert!(!restored.gpu_optical_flow_available);
+        assert!(restored.gpu_optical_flow_reason.contains("Detecting"));
     }
 
     #[test]

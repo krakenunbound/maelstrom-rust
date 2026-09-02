@@ -21,6 +21,31 @@ The background export, upscale, and proxy owners retain their own execution-time
 failure reporting. Startup resolution is a stable routing decision, not a claim that a file cannot
 be removed or replaced later.
 
+## GPU Optical Flow capability
+
+The same startup worker now performs a bounded, non-interactive capability probe against the exact
+resolved FFmpeg executable. It first requires the exact `fruc_vulkan` filter name. When present, it
+counts every Vulkan physical device independently of the display adapter, preserving duplicate
+model names, then attempts a tiny real Vulkan upload, FRUC, download, and null-output graph by exact
+device index. Each child attempt has a two-second limit inside one eight-second FFmpeg probe budget;
+a timed-out child is killed and reaped. The verified index is reported without guessing a unique
+card name; the successful filter session is the capability proof, not a model-name allowlist.
+
+The Playback > Frame Interpolation menu reports the resulting session-only state and a specific
+reason. Detection never changes playback resolution or sampling quality, and it does not select an
+interpolation method. The current approved FFmpeg 8.1 bundle does not contain `fruc_vulkan`, so the
+expected local result is unavailable with that exact runtime reason. The working bundle remains
+unchanged.
+
+This is capability-foundation evidence, not completion of temporal interpolation. Per-clip format
+and dimension checks, runtime/device-change re-probing, user device override, device-loss recovery,
+durable method selection, and shared preview/export time mapping remain open. The filter requires
+Vulkan hardware frames and uses `VK_NV_optical_flow`; the Vulkan contract separately requires an
+optical-flow-capable queue and supported image/session parameters.
+
+References: [FFmpeg `fruc_vulkan`](https://ffmpeg.org/ffmpeg-filters.html#fruc_005fvulkan),
+[Vulkan optical flow](https://docs.vulkan.org/spec/latest/chapters/VK_NV_optical_flow/optical_flow.html).
+
 ## Verification
 
 Two focused regressions cover adjacent-package priority, whole-pair fallback, canonical absolute

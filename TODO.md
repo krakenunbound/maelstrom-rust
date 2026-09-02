@@ -488,6 +488,12 @@ Last updated: 2026-09-01
     features, queues, supported formats/dimensions, and successful filter/session initialization.
   - On multi-GPU systems, select a compatible processing device independently of the display
     adapter, subject to a user's explicit device override. Keep probing bounded and off the UI thread.
+  - [x] Add the first capability foundation: the startup-resources worker inventories the exact
+    resolved bundled runtime, counts all Vulkan physical devices independently of the display
+    adapter without collapsing duplicate models, then runs indexed real `fruc_vulkan` session
+    probes inside one bounded FFmpeg budget. The Playback menu exposes session-only availability
+    and the exact failure reason without changing quality or selecting interpolation. The approved
+    FFmpeg 8.1 bundle correctly reports the filter as missing. See `docs/runtime-media-tools.md`.
   - Enable the Optical Flow option only when usable; otherwise keep it visible but disabled with
     a specific reason (runtime filter missing, unsupported GPU/driver, or unsupported clip format).
     Recheck when the device/runtime changes; do not cache support indefinitely after device loss.

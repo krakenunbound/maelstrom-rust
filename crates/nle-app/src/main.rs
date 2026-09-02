@@ -7,8 +7,10 @@ mod phase1_ui;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -328,6 +330,271 @@ fn format_file_size(bytes: u64) -> String {
 struct MediaTools {
     ffmpeg: PathBuf,
     ffprobe: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GpuOpticalFlowCapability {
+    available: bool,
+    selected_device: Option<String>,
+    reason: String,
+}
+
+impl GpuOpticalFlowCapability {
+    fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            selected_device: None,
+            reason: reason.into(),
+        }
+    }
+
+    fn available(device: impl Into<String>) -> Self {
+        let selected_device = device.into();
+        Self {
+            available: true,
+            reason: format!("Vulkan processing device {selected_device} initialized fruc_vulkan"),
+            selected_device: Some(selected_device),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrucFilterInventory {
+    Present,
+    Missing,
+}
+
+const GPU_OPTICAL_FLOW_TIMEOUT: Duration = Duration::from_secs(2);
+const GPU_OPTICAL_FLOW_TOTAL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Count every Vulkan processing candidate independently of the window/display adapter. Duplicate
+/// model names remain separate physical candidates; FFmpeg receives the corresponding Vulkan index
+/// and its real filter session remains the capability authority.
+fn vulkan_processing_device_count() -> usize {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN)).len()
+}
+
+fn classify_fruc_filter_inventory(output: &str) -> FrucFilterInventory {
+    // `ffmpeg -filters` prints the filter name as the second whitespace-delimited field. Matching
+    // that field avoids accepting similarly named filters from a custom runtime.
+    if output
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some("fruc_vulkan"))
+    {
+        FrucFilterInventory::Present
+    } else {
+        FrucFilterInventory::Missing
+    }
+}
+
+fn ffmpeg_filter_inventory_arguments() -> Vec<String> {
+    ["-hide_banner", "-nostdin", "-v", "error", "-filters"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn fruc_vulkan_probe_arguments(device_index: usize) -> Vec<String> {
+    let device_spec = format!("vulkan=fruc:{device_index}");
+    vec![
+        "-hide_banner".to_owned(),
+        "-nostdin".to_owned(),
+        "-v".to_owned(),
+        "error".to_owned(),
+        "-init_hw_device".to_owned(),
+        device_spec,
+        "-filter_hw_device".to_owned(),
+        "fruc".to_owned(),
+        "-f".to_owned(),
+        "lavfi".to_owned(),
+        "-i".to_owned(),
+        "testsrc2=size=32x32:rate=2".to_owned(),
+        "-frames:v".to_owned(),
+        "2".to_owned(),
+        "-vf".to_owned(),
+        "format=yuv420p,hwupload,fruc_vulkan=fps=4:perf=fast,hwdownload,format=yuv420p".to_owned(),
+        "-f".to_owned(),
+        "null".to_owned(),
+        "-".to_owned(),
+    ]
+}
+
+fn run_bounded_ffmpeg(
+    ffmpeg: &Path,
+    arguments: &[String],
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = Command::new(ffmpeg)
+        .args(arguments)
+        // The executable path is resolved and absolute; do not let an ambient PATH select a
+        // different FFmpeg runtime for this capability result.
+        .env_remove("PATH")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start bundled FFmpeg: {error}"))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("bundled FFmpeg did not provide stdout".to_owned());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("bundled FFmpeg did not provide stderr".to_owned());
+    };
+    let stdout_reader = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return collect_bounded_ffmpeg_output(status, stdout_reader, stderr_reader);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!("could not poll bundled FFmpeg: {error}"));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait(); // Always reap after a bounded probe timeout.
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(format!("timed out after {} ms", timeout.as_millis()));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn collect_bounded_ffmpeg_output(
+    status: std::process::ExitStatus,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<std::process::Output, String> {
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "bundled FFmpeg stdout reader panicked".to_owned())?
+        .map_err(|error| format!("could not read bundled FFmpeg stdout: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "bundled FFmpeg stderr reader panicked".to_owned())?
+        .map_err(|error| format!("could not read bundled FFmpeg stderr: {error}"))?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn ffmpeg_output_summary(output: &std::process::Output) -> String {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(240).collect())
+        .unwrap_or_else(|| format!("FFmpeg exited with {}", output.status))
+}
+
+fn probe_gpu_optical_flow_capability(
+    media_tools: &Result<MediaTools, String>,
+) -> GpuOpticalFlowCapability {
+    let deadline = Instant::now() + GPU_OPTICAL_FLOW_TOTAL_TIMEOUT;
+    let tools = match media_tools {
+        Ok(tools) if tools.ffmpeg.is_absolute() && tools.ffmpeg.is_file() => tools,
+        Ok(_) => {
+            return GpuOpticalFlowCapability::unavailable(
+                "Resolved bundled FFmpeg path is not an absolute executable file",
+            );
+        }
+        Err(error) => {
+            return GpuOpticalFlowCapability::unavailable(format!(
+                "Bundled FFmpeg runtime unavailable: {error}"
+            ));
+        }
+    };
+    let inventory = match run_bounded_ffmpeg(
+        &tools.ffmpeg,
+        &ffmpeg_filter_inventory_arguments(),
+        GPU_OPTICAL_FLOW_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+    ) {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return GpuOpticalFlowCapability::unavailable(format!(
+                "Bundled FFmpeg filter inventory failed: {}",
+                ffmpeg_output_summary(&output)
+            ));
+        }
+        Err(error) => {
+            return GpuOpticalFlowCapability::unavailable(format!(
+                "Bundled FFmpeg filter inventory {error}"
+            ));
+        }
+    };
+    let inventory_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&inventory.stdout),
+        String::from_utf8_lossy(&inventory.stderr)
+    );
+    if classify_fruc_filter_inventory(&inventory_text) == FrucFilterInventory::Missing {
+        return GpuOpticalFlowCapability::unavailable(
+            "Bundled FFmpeg runtime does not include the required fruc_vulkan filter",
+        );
+    }
+
+    let device_count = vulkan_processing_device_count();
+    if device_count == 0 {
+        return GpuOpticalFlowCapability::unavailable(
+            "No Vulkan processing device was detected for fruc_vulkan",
+        );
+    }
+
+    let mut failures = Vec::new();
+    for device_index in 0..device_count {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return GpuOpticalFlowCapability::unavailable(format!(
+                "GPU Optical Flow probe budget expired before all {} Vulkan devices were checked",
+                device_count
+            ));
+        }
+        match run_bounded_ffmpeg(
+            &tools.ffmpeg,
+            &fruc_vulkan_probe_arguments(device_index),
+            GPU_OPTICAL_FLOW_TIMEOUT.min(remaining),
+        ) {
+            Ok(output) if output.status.success() => {
+                return GpuOpticalFlowCapability::available(format!("index {device_index}"));
+            }
+            Ok(output) => failures.push(format!(
+                "device index {device_index}: {}",
+                ffmpeg_output_summary(&output)
+            )),
+            Err(error) => failures.push(format!("device index {device_index}: {error}")),
+        }
+    }
+    GpuOpticalFlowCapability::unavailable(format!(
+        "fruc_vulkan could not initialize on Vulkan processing devices ({})",
+        failures.join("; ")
+    ))
 }
 
 fn media_tool_file_name(name: &str) -> String {
@@ -3822,6 +4089,23 @@ fn proxy_error_text(
     }
 }
 
+fn localized_gpu_optical_flow_reason(
+    language: Language,
+    capability: &GpuOpticalFlowCapability,
+) -> String {
+    match language {
+        Language::English => capability.reason.clone(),
+        Language::Japanese if capability.available => format!(
+            "Vulkan 処理デバイス {} で fruc_vulkan を初期化しました",
+            capability.selected_device.as_deref().unwrap_or("default")
+        ),
+        Language::Japanese => format!(
+            "GPU オプティカルフローを利用できません: {}",
+            capability.reason
+        ),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Splash,
@@ -3844,6 +4128,7 @@ struct StartupResources {
     preloaded_models: model_preload::PreloadedModels,
     model_errors: Vec<String>,
     media_tools: Result<MediaTools, String>,
+    gpu_optical_flow: GpuOpticalFlowCapability,
 }
 
 fn load_startup_resources(catalog_path: Option<PathBuf>) -> StartupResources {
@@ -3856,6 +4141,7 @@ fn load_startup_resources_from(
     model_directory: Option<&Path>,
 ) -> StartupResources {
     let media_tools = resolve_media_tools();
+    let gpu_optical_flow = probe_gpu_optical_flow_capability(&media_tools);
     let model_preload = model_preload::preload_models(model_directory);
     let mut catalog = catalog_path.as_deref().map(load_catalog_with_paths);
     if let (Some(path), Some((projects, paths))) = (catalog_path.as_deref(), catalog.as_mut()) {
@@ -3897,6 +4183,7 @@ fn load_startup_resources_from(
         preloaded_models: model_preload.models,
         model_errors: model_preload.errors,
         media_tools,
+        gpu_optical_flow,
     }
 }
 
@@ -6571,6 +6858,24 @@ impl App {
             ),
             Err(error) => tracing::warn!(%error, "startup media tools unavailable"),
         }
+        if resources.gpu_optical_flow.available {
+            tracing::info!(
+                device = ?resources.gpu_optical_flow.selected_device,
+                reason = %resources.gpu_optical_flow.reason,
+                "GPU optical flow capability available"
+            );
+        } else {
+            tracing::info!(
+                reason = %resources.gpu_optical_flow.reason,
+                "GPU optical flow capability unavailable"
+            );
+        }
+        let optical_flow_reason =
+            localized_gpu_optical_flow_reason(self.editor.language, &resources.gpu_optical_flow);
+        self.editor.set_gpu_optical_flow_capability(
+            resources.gpu_optical_flow.available,
+            optical_flow_reason,
+        );
         self.media_tools = resources.media_tools;
         self.startup_resources_ready = true;
         self.refresh_app_resources_ready();
@@ -12427,6 +12732,81 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("complete FFmpeg/FFprobe runtime"));
+    }
+
+    #[test]
+    fn fruc_filter_inventory_requires_the_exact_filter_name() {
+        let inventory = " .. fruc_vulkan V->V Vulkan optical flow\n .. fruc_vulkan_extra V->V";
+        assert_eq!(
+            classify_fruc_filter_inventory(inventory),
+            FrucFilterInventory::Present
+        );
+        assert_eq!(
+            classify_fruc_filter_inventory(" .. fruc_vulkan_extra V->V"),
+            FrucFilterInventory::Missing
+        );
+    }
+
+    #[test]
+    fn fruc_vulkan_probe_arguments_select_an_enumerated_processing_device_index() {
+        let arguments = fruc_vulkan_probe_arguments(5);
+        assert_eq!(
+            arguments,
+            vec![
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-init_hw_device",
+                "vulkan=fruc:5",
+                "-filter_hw_device",
+                "fruc",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=32x32:rate=2",
+                "-frames:v",
+                "2",
+                "-vf",
+                "format=yuv420p,hwupload,fruc_vulkan=fps=4:perf=fast,hwdownload,format=yuv420p",
+                "-f",
+                "null",
+                "-",
+            ]
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.eq_ignore_ascii_case("-hwaccel")),
+            "the processing-device probe must not inherit a display adapter"
+        );
+    }
+
+    #[test]
+    fn fruc_filter_inventory_command_is_quiet_and_noninteractive() {
+        assert_eq!(
+            ffmpeg_filter_inventory_arguments(),
+            vec!["-hide_banner", "-nostdin", "-v", "error", "-filters"]
+        );
+    }
+
+    #[test]
+    fn gpu_optical_flow_capability_reason_is_bilingual_without_losing_diagnostics() {
+        let unavailable = GpuOpticalFlowCapability::unavailable(
+            "Bundled FFmpeg runtime does not include fruc_vulkan",
+        );
+        assert_eq!(
+            localized_gpu_optical_flow_reason(Language::English, &unavailable),
+            unavailable.reason
+        );
+        let japanese = localized_gpu_optical_flow_reason(Language::Japanese, &unavailable);
+        assert!(japanese.contains("利用できません"));
+        assert!(japanese.contains("fruc_vulkan"));
+
+        let available = GpuOpticalFlowCapability::available("2");
+        let japanese = localized_gpu_optical_flow_reason(Language::Japanese, &available);
+        assert!(japanese.contains("デバイス 2"));
+        assert!(japanese.contains("初期化しました"));
     }
 
     #[test]
