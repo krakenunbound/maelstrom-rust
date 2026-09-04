@@ -1,5 +1,21 @@
 # Shifted VFR export source identity
 
+## FFVHUFF/Matroska follow-up — 2026-09-04
+
+The generated FFVHUFF Matroska fixture adds a clean lossless RGB-family/BGRA input
+path: 160×90, eight irregular selected frames at 24 fps, no audio, and a
+five-second origin. The existing production-graph harness passes its ten
+head/trim/slip/exclusive-tail/final-frame cases at 30/1 and 30000/1001; all 44
+exported frames retain preview's independently decoded source identity and the
+rational output timestamp grid. The Software scrub regression passes 19 exact
+CLI-reference seeks, while the app regression proves local-duration and
+bidirectional floor/hold addressing.
+
+FFprobe reports all eight key frames and I pictures. BGRA is an alpha-capable
+pixel path, but this fixture does not claim alpha preservation. This is bounded
+local Software evidence, not an FFVHUFF export, alpha, color, hardware, GUI,
+performance, or broad VFR claim.
+
 ## FFV1/Matroska follow-up — 2026-09-04
 
 The generated lossless FFV1 level-3 Matroska fixture adds a distinct container and
@@ -14,8 +30,8 @@ retain the rational output timestamp grid. The accompanying software scrub check
 passes 19 exact CLI-reference seeks, and the app boundary test verifies
 bidirectional floor/hold routing. The Phase 0 runner now supplies and restores the
 fixture variable before invoking those focused regressions. Combined with the
-ProRes, DNxHR, shifted/reordered MPEG-4, and AV1 fixtures, the current gate has
-50 cases and 222 exported source-identity frames.
+ProRes, DNxHR, shifted/reordered MPEG-4, FFV1, FFVHUFF, and AV1 fixtures, the current gate
+has 60 cases and 266 exported source-identity frames.
 
 Matroska exposes a 9.542-second raw container duration because its timestamps begin
 at nine seconds. The shared media-analysis path now verifies the complete VFR index,

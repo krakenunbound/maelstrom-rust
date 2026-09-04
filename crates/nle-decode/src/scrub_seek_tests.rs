@@ -1268,6 +1268,22 @@ fn generated_shifted_ffv1_vfr_scrub_matches_independent_cli_reference() {
 }
 
 #[test]
+fn generated_shifted_ffvhuff_vfr_scrub_matches_independent_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    let Some(path) = std::env::var_os("MAELSTROM_FFVHUFF_VFR_TEST_MEDIA") else {
+        return;
+    };
+    assert_real_codec_vfr_seek_matches_cli_reference(
+        "generated shifted FFVHUFF Matroska VFR",
+        PathBuf::from(path),
+        &["ffvhuff", "bgra"],
+        7_750,
+    );
+}
+
+#[test]
 fn scrub_seek_real_codec_vfr_hevc_main10_matches_independent_cli_reference() {
     if !ffmpeg_available_for_scrub_seek_test() {
         return;

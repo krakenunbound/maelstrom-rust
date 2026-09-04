@@ -348,7 +348,13 @@ foreach ($fixture in $manifest.fixtures) {
     Assert-Equal (Get-Item -LiteralPath $path).Length $fixture.byte_size "Byte size for $($fixture.id)"
     $json = & $ffprobe -v error -show_streams -show_format -of json $path 2>$null
     $probeExit = $LASTEXITCODE
-    if ($fixture.expected -eq 'ffprobe_failure') { if ($probeExit -eq 0) { throw "Expected ffprobe to fail: $($fixture.id)" }; continue }
+    if ($fixture.expected -eq 'ffprobe_failure') {
+        if ($probeExit -eq 0) { throw "Expected ffprobe to fail: $($fixture.id)" }
+        # This is the declared success path for a deliberately invalid fixture. Do not leak
+        # FFprobe's expected nonzero status as the validator process result.
+        $global:LASTEXITCODE = 0
+        continue
+    }
     if ($probeExit -ne 0) { throw "ffprobe failed: $($fixture.id)" }
     $probe = $json | ConvertFrom-Json
     Assert-Equal $probe.format.format_name $fixture.container "Container for $($fixture.id)"

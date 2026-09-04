@@ -250,7 +250,7 @@ seven-second origin; their hashes are:
 
 ## Verification boundary
 
-The current release workspace passes 904 tests (868 executed, 36 opt-in tests ignored). The twelve
+The current serial release workspace reports 906 passed and 36 opt-in tests ignored. The twelve
 hardware tests were run separately through the bounded qualification harness, not inferred
 from ignored results. Strict all-target workspace Clippy and formatting pass.
 All eight primary deterministic fixture contracts, the separate local AV1 derivative contract,

@@ -117,7 +117,7 @@ Build the evidence harness before adding engine complexity.
       diagnostic and actor-budget tests now wait for their asynchronous source reapers, live
       actors, and sticky FFmpeg sessions to reach zero before deleting temporary media. Twenty
       focused repetitions of each repaired path, ten consecutive complete decoder-suite runs, and
-      the final serial release workspace passed on 2026-09-04: 904 tests passed, 36 opt-in tests
+      the current serial release workspace passed on 2026-09-04: 906 tests passed, 36 opt-in tests
       were ignored, strict all-target Clippy and formatting were clean, and no editor was launched.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
@@ -481,8 +481,16 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       bidirectional app floor/hold mapping, and 44 production-graph export source
       identities across ten 30/1 and 30000/1001 cases. It does not close this
       broad VFR item or establish hardware, long-GOP, color, GUI, or performance parity.
-      The complete 13-fixture Phase 0 matrix and 904-test serial release workspace pass;
+      The complete 14-fixture Phase 0 matrix and 906-test serial release workspace pass;
       the editor executable was not launched.
+      Generated FFVHUFF Matroska adds a clean lossless RGB-family/BGRA
+      source/container checkpoint with eight selected 160×90 VFR frames, a
+      five-second origin, no audio, exact Software CLI-reference scrubs, app
+      local-duration/floor-hold routing, and 44 production-graph export source
+      identities across ten 30/1 and 30000/1001 cases. All eight FFprobe
+      keyframe/I-picture labels are pinned; BGRA is alpha-capable but alpha
+      preservation is not claimed. This does not close the broad VFR item or
+      establish export-codec, hardware, color, GUI, or performance parity.
       The shifted/reordered MPEG-4 MP4 now passes the same ten cases with its three-second
       origin and irregular B-frame presentation order, bringing the gate to 30 cases and
       132 exported frames without a production graph change. Export now also preserves original

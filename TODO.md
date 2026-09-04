@@ -156,7 +156,7 @@ Last updated: 2026-09-04
   actor-budget tests. Teardown now waits for the asynchronous source reaper, live source
   ownership, and sticky FFmpeg session count to reach zero before deleting temporary files.
   Twenty focused release repetitions of each repaired path and ten consecutive complete decoder
-  suites pass; the final serial release workspace reports 904 passed and 36 opt-in ignored,
+  suites pass; the current serial release workspace reports 906 passed and 36 opt-in ignored,
   together with strict all-target Clippy and formatting. No editor was launched.
 - [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
   EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
@@ -535,8 +535,14 @@ Last updated: 2026-09-04
   production-graph source-identity tests. Import reconciles the source, placed clip, and
   video strip to 542 ms while retaining the 9.542-second raw container duration for
   inspection. This is one intra-only lossless/container
-  checkpoint; the 13-fixture Phase 0 matrix and 904-test serial release workspace pass,
+  checkpoint; the 14-fixture Phase 0 matrix and 906-test serial release workspace pass,
   while broad VFR qualification remains open.
+  Generated FFVHUFF Matroska now adds a clean software-only 160×90 lossless
+  RGB-family/BGRA VFR path with eight selected frames, a five-second origin, and
+  no audio. Exact CLI scrub, app floor/hold/local-duration, and production export
+  source-identity checks pass; all eight FFprobe keyframe/I-picture labels are
+  pinned. BGRA is alpha-capable, but alpha preservation is not claimed. This is
+  one codec/container checkpoint; broad VFR qualification remains open.
   Generated shifted/reordered MPEG-4 MP4 now adds one deterministic case combining irregular VFR,
   a three-second stream origin, B-frame packet reordering, and exact waveform/decode/app local-time
   checks. Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 also have exact local Software

@@ -9,6 +9,9 @@ keyframe positions for every video fixture. VFR timing records presentation PTS 
 microseconds, required distinct timestamp gaps, and a SHA-256 fingerprint of the comma-separated
 PTS sequence.
 Optional `profile` and `pixel_format` contracts are also checked against FFprobe.
+The deliberately truncated negative-control fixture is a declared validator success when FFprobe
+rejects it; that expected child-process failure is cleared so a standalone passing validator also
+returns process exit code zero.
 
 Use only the pinned bundle explicitly; the scripts do not resolve `ffmpeg` or `ffprobe` from
 `PATH`:
@@ -72,6 +75,15 @@ its nonzero origin. Media analysis preserves that raw value for inspection while
 clips and extracting the video strip against the 542 ms local source span. Independent CLI
 pixel/seek comparisons, app ingestion, and export mapping are described in
 [shifted VFR export parity](shifted-vfr-export-parity.md).
+
+The generated `vfr-ffvhuff-shifted.mkv` adds a clean lossless RGB-family BGRA
+Matroska path: eight 160×90 selected VFR frames, no audio, and a five-second
+presentation origin. Its local boundaries are
+`0, 42000, 125000, 167000, 250000, 333000, 458000, 500000` microseconds. Two
+pinned FFmpeg 8.1 regenerations produce zero stderr, 136,515 bytes, and SHA-256
+`57AD5387877399DD49377E303D330ACAA725D3F9709FB749250379511D676C3D`.
+FFprobe reports all eight key frames and I pictures. BGRA is an alpha-capable
+pixel path, but this fixture makes no alpha-preservation claim.
 The harness is deliberately independent of the editor executable. Normal Cargo tests do not depend
 on generated binaries; the opt-in Phase 0 runner passes the generated reordered TS by its exact
 absolute path through `MAELSTROM_REORDERED_VFR_TEST_MEDIA` to focused waveform, monitor-decode,

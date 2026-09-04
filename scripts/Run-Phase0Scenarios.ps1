@@ -57,6 +57,7 @@ $mediaPath = Join-Path $fixtureRoot 'bars-aac-2997.mp4'
 $reorderedVfrPath = Join-Path $fixtureRoot 'vfr-reordered-mpeg2.ts'
 $shiftedReorderedVfrPath = Join-Path $fixtureRoot 'vfr-reordered-shifted-mpeg4.mp4'
 $shiftedFfv1VfrPath = Join-Path $fixtureRoot 'vfr-ffv1-shifted.mkv'
+$shiftedFfvHuffVfrPath = Join-Path $fixtureRoot 'vfr-ffvhuff-shifted.mkv'
 $proresVfrPath = Join-Path $fixtureRoot 'vfr-prores-10bit-shifted.mov'
 $dnxhrVfrPath = Join-Path $fixtureRoot 'vfr-dnxhr-10bit-shifted.mov'
 $av1VfrPath = Join-Path $fixtureRoot 'vfr-av1-aom-shifted.mkv'
@@ -74,6 +75,7 @@ $savedMedia = $env:MAELSTROM_PHASE0_MEDIA
 $savedReorderedVfrMedia = $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA
 $savedShiftedReorderedVfrMedia = $env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA
 $savedShiftedFfv1VfrMedia = $env:MAELSTROM_FFV1_VFR_TEST_MEDIA
+$savedShiftedFfvHuffVfrMedia = $env:MAELSTROM_FFVHUFF_VFR_TEST_MEDIA
 $savedProresVfrMedia = $env:MAELSTROM_PRORES_VFR_TEST_MEDIA
 $savedDnxhrVfrMedia = $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA
 $savedAv1VfrMedia = $env:MAELSTROM_AV1_VFR_TEST_MEDIA
@@ -93,6 +95,7 @@ try {
     $reorderedVfrPath = (Resolve-Path -LiteralPath $reorderedVfrPath).Path
     $shiftedReorderedVfrPath = (Resolve-Path -LiteralPath $shiftedReorderedVfrPath -ErrorAction Stop).Path
     $shiftedFfv1VfrPath = (Resolve-Path -LiteralPath $shiftedFfv1VfrPath -ErrorAction Stop).Path
+    $shiftedFfvHuffVfrPath = (Resolve-Path -LiteralPath $shiftedFfvHuffVfrPath -ErrorAction Stop).Path
     $proresVfrPath = (Resolve-Path -LiteralPath $proresVfrPath -ErrorAction Stop).Path
     $dnxhrVfrPath = (Resolve-Path -LiteralPath $dnxhrVfrPath -ErrorAction Stop).Path
     $av1VfrPath = (Resolve-Path -LiteralPath $av1VfrPath -ErrorAction Stop).Path
@@ -106,6 +109,7 @@ try {
     $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA = $reorderedVfrPath
     $env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA = $shiftedReorderedVfrPath
     $env:MAELSTROM_FFV1_VFR_TEST_MEDIA = $shiftedFfv1VfrPath
+    $env:MAELSTROM_FFVHUFF_VFR_TEST_MEDIA = $shiftedFfvHuffVfrPath
     $env:MAELSTROM_PRORES_VFR_TEST_MEDIA = $proresVfrPath
     $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA = $dnxhrVfrPath
     $env:MAELSTROM_AV1_VFR_TEST_MEDIA = $av1VfrPath
@@ -129,6 +133,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Shifted/reordered MPEG-4 decode regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-decode --release scrub_seek_tests::generated_shifted_ffv1_vfr_scrub_matches_independent_cli_reference -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted FFV1 VFR decode regression failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-decode --release scrub_seek_tests::generated_shifted_ffvhuff_vfr_scrub_matches_independent_cli_reference -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Shifted FFVHUFF VFR decode regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_vfr_fixtures_route_preview_to_local_boundaries -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted VFR app regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_ffv1_analysis_normalizes_clip_and_strip_duration -- --exact --test-threads=1
@@ -241,6 +247,7 @@ finally {
     if ($null -eq $savedReorderedVfrMedia) { Remove-Item Env:MAELSTROM_REORDERED_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_REORDERED_VFR_TEST_MEDIA = $savedReorderedVfrMedia }
     if ($null -eq $savedShiftedReorderedVfrMedia) { Remove-Item Env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_SHIFTED_REORDERED_VFR_TEST_MEDIA = $savedShiftedReorderedVfrMedia }
     if ($null -eq $savedShiftedFfv1VfrMedia) { Remove-Item Env:MAELSTROM_FFV1_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_FFV1_VFR_TEST_MEDIA = $savedShiftedFfv1VfrMedia }
+    if ($null -eq $savedShiftedFfvHuffVfrMedia) { Remove-Item Env:MAELSTROM_FFVHUFF_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_FFVHUFF_VFR_TEST_MEDIA = $savedShiftedFfvHuffVfrMedia }
     if ($null -eq $savedProresVfrMedia) { Remove-Item Env:MAELSTROM_PRORES_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PRORES_VFR_TEST_MEDIA = $savedProresVfrMedia }
     if ($null -eq $savedDnxhrVfrMedia) { Remove-Item Env:MAELSTROM_DNXHR_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_DNXHR_VFR_TEST_MEDIA = $savedDnxhrVfrMedia }
     if ($null -eq $savedAv1VfrMedia) { Remove-Item Env:MAELSTROM_AV1_VFR_TEST_MEDIA -ErrorAction SilentlyContinue } else { $env:MAELSTROM_AV1_VFR_TEST_MEDIA = $savedAv1VfrMedia }

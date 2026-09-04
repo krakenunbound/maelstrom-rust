@@ -17336,6 +17336,17 @@ mod tests {
                 542_000,
             ),
             (
+                "MAELSTROM_FFVHUFF_VFR_TEST_MEDIA",
+                "ffvhuff",
+                5.0,
+                5.542,
+                0.542,
+                [
+                    0, 42_000, 125_000, 167_000, 250_000, 333_000, 458_000, 500_000,
+                ],
+                542_000,
+            ),
+            (
                 "MAELSTROM_AV1_VFR_TEST_MEDIA",
                 "av1",
                 5.0,
@@ -17359,7 +17370,11 @@ mod tests {
                 .find(|stream| stream.kind.as_deref() == Some("video"))
                 .expect("fixture video stream");
             assert_eq!(video.start_seconds, Some(origin));
-            assert!((metadata.duration_seconds.unwrap() - container_duration).abs() < 0.000_001);
+            assert!(
+                (metadata.duration_seconds.unwrap() - container_duration).abs() < 0.000_001,
+                "{codec} container duration {:?}, expected {container_duration}",
+                metadata.duration_seconds
+            );
             let timing =
                 nle_waveform::analyze_frame_timing(&path).expect("scan shifted VFR fixture");
             let nle_waveform::FrameTiming::Variable(index) = &timing else {

@@ -171,6 +171,17 @@ Invoke-FixtureFfmpeg @(
     '-pix_fmt', 'yuv420p', '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1'
 ) $shiftedFfv1VfrPath
 
+# FFVHUFF supplies a second lossless RGB-family pixel path while retaining the
+# normal FFprobe all-keyframe/I-picture contract. Matroska retains its nonzero
+# stream origin; the app must use the local indexed duration for editing.
+$shiftedFfvHuffVfrPath = Join-Path $outputPath 'vfr-ffvhuff-shifted.mkv'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=24',
+    '-vf', "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)',setpts=PTS+5/TB",
+    '-frames:v', '8', '-fps_mode', 'vfr', '-an', '-c:v', 'ffvhuff', '-pix_fmt', 'bgra',
+    '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1'
+) $shiftedFfvHuffVfrPath
+
 # Intra-frame professional formats with 10-bit 4:2:2 pixels and a nonzero MOV
 # presentation origin. Their local frame timing must still begin at zero.
 foreach ($codec in @('prores', 'dnxhr')) {
