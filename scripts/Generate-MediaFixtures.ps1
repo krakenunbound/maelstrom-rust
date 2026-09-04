@@ -108,6 +108,14 @@ Invoke-FixtureFfmpeg @(
     '-c:a', 'pcm_s16le', '-ac', '1', '-ar', '48000'
 ) $wavPath
 
+# Keep each 5.1 channel distinguishable so channel order and layout handling can
+# be verified from a single deterministic PCM source (FL, FR, FC, LFE, BL, BR).
+$surroundWavPath = Join-Path $outputPath 'surround-51-pcm-48k.wav'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'aevalsrc=sin(2*PI*220*t)|sin(2*PI*330*t)|sin(2*PI*440*t)|sin(2*PI*55*t)|sin(2*PI*550*t)|sin(2*PI*660*t):sample_rate=48000:channel_layout=5.1', '-t', '1',
+    '-c:a', 'pcm_s16le', '-ar', '48000'
+) $surroundWavPath
+
 $corruptPath = Join-Path $outputPath 'truncated-header.bin'
 [IO.File]::WriteAllBytes($corruptPath, [byte[]](0x00, 0x00, 0x00, 0x0C, 0x66, 0x74, 0x79, 0x70, 0x6D, 0x70, 0x34, 0x32))
 

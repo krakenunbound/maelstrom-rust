@@ -58,6 +58,10 @@ Last updated: 2026-09-04
   pass, including 19 exact Software/CLI pixel seeks and bidirectional preview floor/hold mapping.
   The complete seven-scenario Phase 0 runner passes without launching the editor. See
   `docs/media-fixtures.md`, `docs/codec-color-qualification.md`, and `docs/phase0-scenarios.md`.
+- [x] Add deterministic multichannel audio to the Phase 0 corpus. The generated one-second PCM WAV
+  pins six distinct 5.1 channels, layout, duration, byte size, and hash. Manifest-only validation
+  now requires mono, stereo, and multichannel classes and proves missing multichannel coverage is
+  rejected without touching files or running FFmpeg. This is corpus evidence, not mixer/export parity.
 - [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 9 now
   distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
   from physical scanout, which remains explicitly false, and carries the optional named-decoder
@@ -546,7 +550,7 @@ Last updated: 2026-09-04
   [Vulkan capability contract](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html).
 - [ ] Keep the compact EN/JA interface, default panel sizing, border padding, nested menus, and
   draggable/scrubbable numeric controls consistent as features land.
-- [ ] Add real detachable/re-dockable native frames for Media Pool, Viewer, Timeline, the complete
+- [x] Add real detachable/re-dockable native frames for Media Pool, Viewer, Timeline, the complete
   right sidebar, and Undertow. Support cross-monitor movement, saved workspace placement,
   close-to-reattach, safe recovery when a monitor disappears, and one shared editor/undo/render
   authority. Keep the current organized panel sizing as the single-window default and prove that

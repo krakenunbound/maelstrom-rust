@@ -86,6 +86,10 @@ Build the evidence harness before adding engine complexity.
       irregular VFR presentation timing and an MPEG-2 transport-stream fixture with observable
       B-frame packet reordering. This corpus gate validates fixture metadata and probe evidence;
       it does not establish preview or export behavior.
+- [x] Add deterministic mono, stereo, and multichannel audio coverage to the generated corpus.
+      The six-channel PCM fixture uses distinct 5.1 tones and pins its FFprobe layout, size, and
+      hash; manifest-only validation rejects loss of any audio layout class. Mixer and export
+      multichannel parity remain separate later-phase gates.
 - [x] Add an opt-in real-media corpus runner for large local files.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.

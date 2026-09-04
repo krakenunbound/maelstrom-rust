@@ -29,6 +29,13 @@ MPEG-2 with two B-frames; its contract pins decoded presentation PTS, packet-ord
 types, and requires observable packet reordering. Both are generated, not downloaded, and carry
 no third-party video or audio content. The validator scans the exact timing contract; it does not
 infer VFR from `r_frame_rate`.
+
+The generated audio set now covers mono, stereo, and multichannel layouts. The 5.1 PCM WAV carries
+six distinct one-second tones in standard order (FL 220 Hz, FR 330 Hz, FC 440 Hz, LFE 55 Hz,
+BL 550 Hz, BR 660 Hz), so future decode, mixer, routing, and export checks can distinguish channels
+instead of treating a silent layout tag as evidence. The manifest pins its six-channel `5.1`
+FFprobe identity, exact byte size, and SHA-256. This is corpus coverage only; it does not claim that
+the current mixer or exporter preserves every multichannel layout.
 `vfr-reordered-shifted-mpeg4.mp4` combines the same eight-frame selection at 320×180/30 fps with
 a three-second presentation origin and MPEG-4 B-frames. Its MP4 contract pins Advanced Simple
 Profile/yuv420p, decoded presentation PTS from 3.000000 to 3.400000 seconds, packet-order PTS,

@@ -201,6 +201,19 @@
       "expected": "success"
     },
     {
+      "id": "surround-51-pcm-48k-wav",
+      "path": "surround-51-pcm-48k.wav",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi aevalsrc filter; six distinct sine tones in standard 5.1 order; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "FL 220 Hz, FR 330 Hz, FC 440 Hz, LFE 55 Hz, BL 550 Hz, BR 660 Hz; 48 kHz; 1 second; pcm_s16le 5.1 WAV",
+      "sha256": "F8D7468BB1D6D8A549814EBC3874F6D102BECA13D44885967891F4A7F5786332",
+      "byte_size": 576102,
+      "container": "wav",
+      "audio": { "codec": "pcm_s16le", "sample_rate": 48000, "channels": 6, "layout": "5.1" },
+      "duration_seconds": 1.0,
+      "expected": "success"
+    },
+    {
       "id": "truncated-header",
       "path": "truncated-header.bin",
       "source": "generated",

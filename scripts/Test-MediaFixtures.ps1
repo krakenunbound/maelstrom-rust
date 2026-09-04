@@ -5,6 +5,7 @@ param(
     [string]$FfmpegRoot = $env:FFMPEG_DIR,
     [string]$ArtifactRoot,
     [switch]$ManifestOnly,
+    [switch]$ManifestCoverageContractFixture,
     [switch]$IncludeRealCorpus
 )
 
@@ -19,6 +20,9 @@ if ($manifest.schema_version -ne 3 -or [string]::IsNullOrWhiteSpace($manifest.ar
     throw 'Unsupported or incomplete media fixture manifest.'
 }
 if ($manifest.artifact_root -ne 'artifacts/media-fixtures') { throw 'Unexpected fixture artifact root.' }
+if ($ManifestCoverageContractFixture -and -not $ManifestOnly) {
+    throw '-ManifestCoverageContractFixture is permitted only with -ManifestOnly.'
+}
 $seenIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $seenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($fixture in $manifest.fixtures) {
@@ -68,6 +72,32 @@ foreach ($fixture in $manifest.fixtures) {
         if ([int]$fixture.audio.sample_rate -lt 1 -or [int]$fixture.audio.channels -lt 1) { throw "Audio rate and channel count must be positive: $($fixture.id)." }
     }
 }
+if ($ManifestCoverageContractFixture) {
+    # Test the real coverage assertion against an in-memory-only incomplete view.
+    $manifest.fixtures = @($manifest.fixtures | Where-Object {
+        -not ($_.PSObject.Properties.Name -contains 'audio') -or [int]$_.audio.channels -le 2
+    })
+}
+
+function Assert-ManifestAudioCoverage([object[]]$Fixtures) {
+    $audioFixtures = @($Fixtures | Where-Object { $_.PSObject.Properties.Name -contains 'audio' })
+    $hasMono = @($audioFixtures | Where-Object {
+        [int]$_.audio.channels -eq 1 -and [string]$_.audio.layout -eq 'mono'
+    }).Count -gt 0
+    $hasStereo = @($audioFixtures | Where-Object {
+        [int]$_.audio.channels -eq 2 -and [string]$_.audio.layout -eq 'stereo'
+    }).Count -gt 0
+    $hasMultichannel = @($audioFixtures | Where-Object {
+        [int]$_.audio.channels -gt 2 -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.audio.layout) -and
+        [string]$_.audio.layout -notin @('mono', 'stereo')
+    }).Count -gt 0
+    if (-not $hasMono -or -not $hasStereo -or -not $hasMultichannel) {
+        throw 'Manifest audio coverage requires exact mono (1 channel), exact stereo (2 channels), and a declared multichannel (>2 channels, non-mono/stereo layout) fixture.'
+    }
+}
+
+Assert-ManifestAudioCoverage @($manifest.fixtures)
 if ($ManifestOnly) { Write-Output 'Media fixture manifest schema: PASS'; exit 0 }
 
 if ([string]::IsNullOrWhiteSpace($FfmpegRoot)) { throw 'Pass -FfmpegRoot with an absolute FFmpeg bundle root or set FFMPEG_DIR.' }
