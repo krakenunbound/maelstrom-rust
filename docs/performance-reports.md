@@ -315,20 +315,22 @@ end of each real timeline pass it rewinds to zero and starts the ordinary seek/d
 again. It does not lower preview quality, alter the audio callback, add per-frame logging, or run
 during a normal startup.
 
-Run the full Phase 0 gate only against the explicit package path:
+Run the full Phase 0 gate only through the exact project launcher:
 
 ```powershell
 & 'H:\Maelstrom Rust\scripts\Run-PlaybackSoak.ps1' `
-  -ExecutablePath 'H:\Maelstrom Rust\dist\Maelstrom-Windows-x64\Maelstrom.exe' `
+  -LauncherPath 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat' `
   -DurationSeconds 600
 ```
 
 For a quick plumbing check, pass an explicit short duration such as `-DurationSeconds 15`; that is
-not evidence for the ten-minute gate. The runner requires sibling packaged `ffmpeg.exe` and
-`ffprobe.exe`, builds a deterministic 60-second A/V clip, and launches only the supplied absolute
-executable path. During the opt-in run the editor window remains visible and always-on-top to avoid
-Windows occluded-surface throttling; it returns to normal level when the application report is
-written.
+not evidence for the ten-minute gate. `-ValidateOnly` performs no GUI launch while proving the
+exact launcher path plus the derived packaged editor, sibling `ffmpeg.exe`, `ffprobe.exe`, runtime
+inventory, and launcher/editor hashes. A real run derives the package path only for runtime and
+report identity, builds a deterministic 60-second A/V clip, then starts the editor exclusively by
+calling `H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat` with `MAELSTROM_LAUNCHER_WAIT=1`.
+During the opt-in run the editor window remains visible and always-on-top to avoid Windows
+occluded-surface throttling; it returns to normal level when the application report is written.
 
 The app atomically writes schema-version 5 `playback-soak-app-report.json` under the ignored
 `artifacts/phase0-playback-soak` directory. It contains requested and actual wall duration,
@@ -354,7 +356,8 @@ foreground/background totals, bounded source groups, combined live-plus-retiring
 greater than the lane-actor cap, zero monitor errors/fallback uploads, no more than 2% late monitor requests, and zero audio
 underruns/callback lock failures/late discards. It then atomically writes schema-version 2
 `playback-soak-report.json` beside the app report. A passed wrapper has `status: "passed"` and
-`failure: null`; it records the exact executable path/SHA-256 plus coarse WorkingSet64 evidence.
+`failure: null`; it records the exact launcher path/SHA-256, derived executable path/SHA-256, and
+coarse WorkingSet64 evidence.
 After the artifact directory and stale-artifact cleanup have succeeded, every runner failure
 attempts to atomically publish the same schema with `status: "failed"`, the exact current
 `failure.stage`, exception type/message,
@@ -362,13 +365,15 @@ any executable identity available at that point, the parsed application report w
 the bounded WorkingSet64 samples collected so far. Failure stages distinguish `path_validation`,
 `packaged_runtime`, `fixture_generation_codec`, `editor_launch_report_wait`,
 `app_report_schema_environment`, `app_report_resources`, `app_report_runtime_diagnostics`, and
-`report_publication`. The runner rejects a non-absolute path or a basename other than
-`Maelstrom.exe`, verifies `ffmpeg.exe`, `ffprobe.exe`, and the same app-local DLL inventory required
+`report_publication`. The runner rejects a non-absolute launcher path or any launcher other than
+`H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`, derives and verifies the packaged `Maelstrom.exe`,
+`ffmpeg.exe`, `ffprobe.exe`, and the same app-local DLL inventory required
 by Windows packaging before launch, and refuses to launch if a stale report or temporary report
 cannot be removed after bounded retries. Failure evidence does not relax any acceptance limit.
 
-WorkingSet64 is sampled about once per second from only the exact GUI process launched by the
-runner. Its warm baseline is the third sample, and the final report records peak/final/growth plus
+WorkingSet64 is sampled about once per second from only the exact derived packaged GUI child found
+under the tracked launcher process tree, never from `cmd.exe` or by process-name search. Its warm
+baseline is the third sample, and the final report records peak/final/growth plus
 a deliberately generous 1.5 GiB peak-growth bound. This is not total system memory, GPU memory,
 or child-process memory, so it detects only coarse sustained GUI working-set growth rather than a
 complete leak diagnosis. The runner always restores its environment and terminates only its tracked

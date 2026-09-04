@@ -1,8 +1,8 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ExecutablePath,
+    [string]$LauncherPath = 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat',
     [ValidateRange(5, 3600)]
-    [int]$DurationSeconds = 600
+    [int]$DurationSeconds = 600,
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,19 +66,43 @@ function Test-JsonFiniteNumber {
     return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
 }
 
+function Find-OwnedPackagedEditorProcess {
+    param(
+        [Parameter(Mandatory = $true)][int]$LauncherProcessId,
+        [Parameter(Mandatory = $true)][string]$PackagedExecutable
+    )
+    # The batch launcher can insert cmd.exe/start.exe between its root and the editor.
+    # Walk only that fresh process tree; never claim a same-named editor elsewhere.
+    $pending = [System.Collections.Generic.Queue[int]]::new()
+    $pending.Enqueue($LauncherProcessId)
+    while ($pending.Count -gt 0) {
+        $parentId = $pending.Dequeue()
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parentId" -ErrorAction SilentlyContinue)) {
+            if ([string]::Equals([string]$child.ExecutablePath, $PackagedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+                return Get-Process -Id ([int]$child.ProcessId) -ErrorAction SilentlyContinue
+            }
+            $pending.Enqueue([int]$child.ProcessId)
+        }
+    }
+    return $null
+}
+
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$approvedLauncherPath = 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
 $artifactDirectory = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-playback-soak'))
-New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
 $mediaPath = Join-Path $artifactDirectory 'deterministic-av-60s.mp4'
 $appReportPath = Join-Path $artifactDirectory 'playback-soak-app-report.json'
 $finalReportPath = Join-Path $artifactDirectory 'playback-soak-report.json'
 $appReportTemporaryPath = "$appReportPath.tmp"
 $finalReportTemporaryPath = "$finalReportPath.tmp"
-foreach ($staleArtifact in @(
-    $appReportPath, $finalReportPath, $appReportTemporaryPath, $finalReportTemporaryPath
-)) {
-    if (-not (Remove-FileWithRetries -Path $staleArtifact)) {
-        throw "Playback soak cannot remove stale report artifact before launch: $staleArtifact"
+if (-not $ValidateOnly) {
+    New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
+    foreach ($staleArtifact in @(
+        $appReportPath, $finalReportPath, $appReportTemporaryPath, $finalReportTemporaryPath
+    )) {
+        if (-not (Remove-FileWithRetries -Path $staleArtifact)) {
+            throw "Playback soak cannot remove stale report artifact before launch: $staleArtifact"
+        }
     }
 }
 
@@ -87,10 +111,14 @@ $savedSmokeEditor = $env:MAELSTROM_SMOKE_EDITOR
 $savedMediaPath = $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH
 $savedSoakReport = $env:MAELSTROM_PLAYBACK_SOAK_REPORT
 $savedSoakSeconds = $env:MAELSTROM_PLAYBACK_SOAK_SECONDS
-$process = $null
+$savedLauncherWait = $env:MAELSTROM_LAUNCHER_WAIT
+$launcherProcess = $null
+$editorProcess = $null
 $workingSetSamples = [System.Collections.Generic.List[UInt64]]::new()
 $maximumWorkingSetGrowthBytes = 1536MB
 $stage = 'path_validation'
+$resolvedLauncher = $null
+$launcherSha256 = $null
 $resolvedExecutable = $null
 $packageDirectory = $null
 $ffmpeg = $null
@@ -136,6 +164,8 @@ function Write-FailedPlaybackSoakReport {
                 error_type = $Failure.Exception.GetType().FullName
                 message = $Failure.Exception.Message
             }
+            launcher_path = $resolvedLauncher
+            launcher_sha256 = $launcherSha256
             executable_path = $resolvedExecutable
             executable_sha256 = $executableSha256
             duration_seconds_requested = $DurationSeconds
@@ -149,16 +179,19 @@ function Write-FailedPlaybackSoakReport {
 }
 
 try {
-    if (-not [System.IO.Path]::IsPathRooted($ExecutablePath)) {
-        throw 'ExecutablePath must be an absolute path to the packaged Maelstrom.exe.'
+    if (-not [System.IO.Path]::IsPathRooted($LauncherPath)) {
+        throw "LauncherPath must be the exact full path $approvedLauncherPath."
     }
-    $resolvedExecutable = [System.IO.Path]::GetFullPath($ExecutablePath)
-    if ([System.IO.Path]::GetFileName($resolvedExecutable) -ine 'Maelstrom.exe') {
-        throw "ExecutablePath must name the packaged Maelstrom.exe: $resolvedExecutable"
+    $resolvedLauncher = [System.IO.Path]::GetFullPath($LauncherPath)
+    if (-not [string]::Equals($resolvedLauncher, $approvedLauncherPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The only permitted launcher is $approvedLauncherPath."
     }
-    if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
-        throw "Packaged executable does not exist: $resolvedExecutable"
+    if (-not (Test-Path -LiteralPath $resolvedLauncher -PathType Leaf)) {
+        throw "Required Maelstrom launcher does not exist: $resolvedLauncher"
     }
+    $launcherSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedLauncher).Hash
+    $resolvedExecutable = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'dist\Maelstrom-Windows-x64\Maelstrom.exe'))
+    if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) { throw "Packaged executable does not exist: $resolvedExecutable" }
     $executableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedExecutable).Hash
     $stage = 'packaged_runtime'
     $packageDirectory = [System.IO.Path]::GetDirectoryName($resolvedExecutable)
@@ -173,6 +206,19 @@ try {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "Packaged runtime is incomplete: $required"
         }
+    }
+    if ($ValidateOnly) {
+        [pscustomobject]@{
+            validation = 'passed'
+            launcher_path = $resolvedLauncher
+            launcher_sha256 = $launcherSha256
+            executable_path = $resolvedExecutable
+            executable_sha256 = $executableSha256
+            ffmpeg_path = $ffmpeg
+            ffprobe_path = $ffprobe
+            launch_performed = $false
+        }
+        return
     }
     # Use the package's own FFmpeg binaries and DLL search path, never a system installation.
     $env:PATH = "$packageDirectory;$env:SystemRoot\System32;$env:SystemRoot"
@@ -199,24 +245,33 @@ try {
     $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH = $mediaPath
     $env:MAELSTROM_PLAYBACK_SOAK_REPORT = $appReportPath
     $env:MAELSTROM_PLAYBACK_SOAK_SECONDS = [string]$DurationSeconds
-    $process = Start-Process -FilePath $resolvedExecutable -WorkingDirectory $packageDirectory -WindowStyle Normal -PassThru
+    $env:MAELSTROM_LAUNCHER_WAIT = '1'
+    $launcherProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', ('call "{0}"' -f $resolvedLauncher)) -WorkingDirectory $repoRoot -WindowStyle Normal -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($DurationSeconds + 120)
+    while ($null -eq $editorProcess) {
+        $editorProcess = Find-OwnedPackagedEditorProcess -LauncherProcessId $launcherProcess.Id -PackagedExecutable $resolvedExecutable
+        if ($null -ne $editorProcess) { break }
+        $launcherProcess.Refresh()
+        if ($launcherProcess.HasExited) { throw "Maelstrom launcher exited before its packaged editor child was observed (code $($launcherProcess.ExitCode))." }
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Maelstrom launcher did not start the packaged editor within the bounded startup allowance.' }
+        Start-Sleep -Milliseconds 100
+    }
     while (-not (Test-Path -LiteralPath $appReportPath)) {
         if ([DateTime]::UtcNow -ge $deadline) {
             throw "Playback soak did not report within $DurationSeconds seconds plus its bounded startup allowance."
         }
         Start-Sleep -Seconds 1
-        $process.Refresh()
-        if ($process.HasExited) {
-            throw "Packaged Maelstrom exited during playback soak with code $($process.ExitCode)."
+        $editorProcess.Refresh()
+        if ($editorProcess.HasExited) {
+            throw "Packaged Maelstrom exited during playback soak with code $($editorProcess.ExitCode)."
         }
         # This deliberately samples only the exact launched GUI process. Child processes are
         # tracked solely for finally-cleanup; their memory is not represented as app RSS.
-        $workingSetSamples.Add([uint64]$process.WorkingSet64)
+        $workingSetSamples.Add([uint64]$editorProcess.WorkingSet64)
     }
-    $process.Refresh()
-    if (-not $process.HasExited) {
-        $workingSetSamples.Add([uint64]$process.WorkingSet64)
+    $editorProcess.Refresh()
+    if (-not $editorProcess.HasExited) {
+        $workingSetSamples.Add([uint64]$editorProcess.WorkingSet64)
     }
     if ($workingSetSamples.Count -lt 3) {
         throw 'Playback soak completed before a warmed working-set baseline could be sampled.'
@@ -334,6 +389,8 @@ try {
         schema_version = 2
         status = 'passed'
         failure = $null
+        launcher_path = $resolvedLauncher
+        launcher_sha256 = $launcherSha256
         executable_path = $resolvedExecutable
         executable_sha256 = $executableSha256
         duration_seconds_requested = $DurationSeconds
@@ -344,27 +401,30 @@ try {
     Write-Host "Playback soak passed: $($appReport.actual_duration_seconds) s, $($appReport.loop_count) loops, peak working set $peakWorkingSetBytes bytes."
     Get-Item -LiteralPath $finalReportPath
 } catch {
-    Write-FailedPlaybackSoakReport -Failure $_
+    if (-not $ValidateOnly) { Write-FailedPlaybackSoakReport -Failure $_ }
     throw
 } finally {
-    if ($process) {
+    if ($launcherProcess) {
         try {
-            # Exact PID tree only; never terminate a process by executable name.
-            & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F *> $null
+            # Exact launcher-rooted PID tree only; never terminate by executable name.
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $launcherProcess.Id /T /F *> $null
         } catch {
         }
-        try { Wait-Process -Id $process.Id -ErrorAction SilentlyContinue } catch {}
+        try { Wait-Process -Id $launcherProcess.Id -ErrorAction SilentlyContinue } catch {}
     }
     Restore-EnvironmentValue -Name 'PATH' -Value $savedPath
     Restore-EnvironmentValue -Name 'MAELSTROM_SMOKE_EDITOR' -Value $savedSmokeEditor
     Restore-EnvironmentValue -Name 'MAELSTROM_MEDIA_ACCEPTANCE_PATH' -Value $savedMediaPath
     Restore-EnvironmentValue -Name 'MAELSTROM_PLAYBACK_SOAK_REPORT' -Value $savedSoakReport
     Restore-EnvironmentValue -Name 'MAELSTROM_PLAYBACK_SOAK_SECONDS' -Value $savedSoakSeconds
-    foreach ($temporaryArtifact in @(
-        $mediaPath, "$mediaPath.tmp", $appReportTemporaryPath, $finalReportTemporaryPath
-    )) {
-        if (-not (Remove-FileWithRetries -Path $temporaryArtifact)) {
-            Write-Warning "Could not remove playback-soak temporary artifact: $temporaryArtifact"
+    Restore-EnvironmentValue -Name 'MAELSTROM_LAUNCHER_WAIT' -Value $savedLauncherWait
+    if (-not $ValidateOnly) {
+        foreach ($temporaryArtifact in @(
+            $mediaPath, "$mediaPath.tmp", $appReportTemporaryPath, $finalReportTemporaryPath
+        )) {
+            if (-not (Remove-FileWithRetries -Path $temporaryArtifact)) {
+                Write-Warning "Could not remove playback-soak temporary artifact: $temporaryArtifact"
+            }
         }
     }
 }

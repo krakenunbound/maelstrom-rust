@@ -433,6 +433,10 @@ Last updated: 2026-09-04
 
 ## Phase 0–1 verification queue
 
+- [x] Route the packaged playback-soak harness exclusively through
+      `H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`. Its non-launching validation proves the
+      derived packaged runtime identity without modifying retained soak evidence, and the contract
+      rejects direct executable paths.
 - [ ] Complete broader cross-hardware ten-minute playback and seven-scenario soak evidence.
 - [ ] Complete UI-present/cross-hardware four-source latency evidence.
       Local one/four-source CPU and exact native-layer presentation cases pass on both adapters;
