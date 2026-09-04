@@ -3393,6 +3393,328 @@ impl PlaybackSoakProbe {
     }
 }
 
+/// The packaged disruption schedule is intentionally inert unless all three environment values
+/// are supplied. It runs only after the existing layout-backed media placement has created real
+/// editor media/timeline state; normal editor frames do not allocate or log for this probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackDisruptionStep {
+    WaitingForPlacement,
+    Scrubbing,
+    Restoring,
+    OfflineAwaitError,
+    OfflineMarked,
+    RecoveryAwaitFrame,
+    CachePressure,
+    ExportAwaitProgress,
+    ExportAwaitTerminal,
+    RecoveryPlayback,
+    Complete,
+    Failed,
+}
+
+fn next_playback_disruption_step(step: PlaybackDisruptionStep) -> PlaybackDisruptionStep {
+    match step {
+        PlaybackDisruptionStep::WaitingForPlacement => PlaybackDisruptionStep::Scrubbing,
+        PlaybackDisruptionStep::Scrubbing => PlaybackDisruptionStep::Restoring,
+        PlaybackDisruptionStep::Restoring => PlaybackDisruptionStep::OfflineAwaitError,
+        PlaybackDisruptionStep::OfflineAwaitError => PlaybackDisruptionStep::OfflineMarked,
+        PlaybackDisruptionStep::OfflineMarked => PlaybackDisruptionStep::RecoveryAwaitFrame,
+        PlaybackDisruptionStep::RecoveryAwaitFrame => PlaybackDisruptionStep::CachePressure,
+        PlaybackDisruptionStep::CachePressure => PlaybackDisruptionStep::ExportAwaitProgress,
+        PlaybackDisruptionStep::ExportAwaitProgress => PlaybackDisruptionStep::ExportAwaitTerminal,
+        PlaybackDisruptionStep::ExportAwaitTerminal => PlaybackDisruptionStep::RecoveryPlayback,
+        PlaybackDisruptionStep::RecoveryPlayback => PlaybackDisruptionStep::Complete,
+        PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed => step,
+    }
+}
+
+const fn playback_probe_requires_foreground(
+    surface_submission: bool,
+    playback_soak: bool,
+    playback_disruption: bool,
+) -> bool {
+    surface_submission || playback_soak || playback_disruption
+}
+
+const fn capture_playback_disruption_failure_step(
+    existing: Option<PlaybackDisruptionStep>,
+    current: PlaybackDisruptionStep,
+) -> Option<PlaybackDisruptionStep> {
+    match existing {
+        Some(step) => Some(step),
+        None => Some(current),
+    }
+}
+
+const fn playback_disruption_export_cleanup_is_settled(
+    owns_export: bool,
+    export_job_active: bool,
+    residue_present: bool,
+) -> bool {
+    !owns_export || (!export_job_active && !residue_present)
+}
+
+const fn playback_disruption_releases_foreground(step: PlaybackDisruptionStep) -> bool {
+    matches!(
+        step,
+        PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed
+    )
+}
+
+const fn snapshot_restore_is_live(
+    fresh_frame_presented: bool,
+    playing: bool,
+    audio_transport_active: bool,
+) -> bool {
+    fresh_frame_presented && playing && audio_transport_active
+}
+
+#[derive(Debug, Serialize)]
+struct PlaybackDisruptionReport {
+    schema_version: u32,
+    success: bool,
+    failed_step: Option<String>,
+    failure: Option<String>,
+    elapsed_ms: u128,
+    action_count: u64,
+    scrub_requests: u32,
+    snapshot_restores: u32,
+    snapshot_restore_frames: u32,
+    snapshot_restore_audio_restarts: u32,
+    decoder_error_observed: bool,
+    offline_marked: bool,
+    recovery_frame_presented: bool,
+    cache_eviction_before: u64,
+    cache_eviction_after: u64,
+    cache_eviction_growth: u64,
+    export_started: bool,
+    export_progress_observed: bool,
+    export_cancelled: bool,
+    export_terminal_cleanup: bool,
+    selected_preview_quality: String,
+    resolved_preview_quality: String,
+    runtime_diagnostics_delta: RuntimeDiagnosticsReport,
+}
+
+struct PlaybackDisruptionProbe {
+    report_tx: Option<mpsc::SyncSender<PlaybackDisruptionReport>>,
+    export_path: PathBuf,
+    step: PlaybackDisruptionStep,
+    started_at: Option<Instant>,
+    deadline: Option<Instant>,
+    media_id: Option<u32>,
+    original_snapshot: Option<EditorProjectSnapshot>,
+    original_project_name: Option<String>,
+    original_settings: Option<ProjectSettings>,
+    original_language: Option<Language>,
+    original_preview_quality: PreviewQuality,
+    original_playing: bool,
+    original_save_blocked: bool,
+    baseline_diagnostics: RuntimeDiagnosticsReport,
+    cache_eviction_before: u64,
+    scrub_requests: u32,
+    snapshot_restores: u32,
+    snapshot_restore_frames: u32,
+    snapshot_restore_audio_restarts: u32,
+    restore_waiting_for_frame: bool,
+    restore_waiting_for_transport: bool,
+    cache_seek_index: u32,
+    cache_seek_target: u32,
+    decoder_error_observed: bool,
+    offline_marked: bool,
+    recovery_frame_presented: bool,
+    export_started: bool,
+    export_progress_observed: bool,
+    export_cancelled: bool,
+    export_terminal_cleanup: bool,
+    action_count: u64,
+    failed_step: Option<PlaybackDisruptionStep>,
+    failure: Option<String>,
+    owns_runtime_scrub: bool,
+    owns_export: bool,
+    cleanup_restored: bool,
+    measured_selected_preview_quality: Option<String>,
+    measured_resolved_preview_quality: Option<String>,
+}
+
+struct PlaybackDisruptionArm {
+    media_id: u32,
+    snapshot: EditorProjectSnapshot,
+    project_name: String,
+    settings: ProjectSettings,
+    language: Language,
+    preview_quality: PreviewQuality,
+    playing: bool,
+    save_blocked: bool,
+    diagnostics: RuntimeDiagnosticsReport,
+    cache_evictions: u64,
+    cache_seek_target: u32,
+}
+
+impl PlaybackDisruptionProbe {
+    fn from_environment() -> Option<Self> {
+        std::env::var_os("MAELSTROM_MEDIA_ACCEPTANCE_PATH")?;
+        let report_path = PathBuf::from(std::env::var_os("MAELSTROM_PLAYBACK_DISRUPTION_REPORT")?);
+        let export_path = PathBuf::from(std::env::var_os(
+            "MAELSTROM_PLAYBACK_DISRUPTION_EXPORT_PATH",
+        )?);
+        let (report_tx, report_rx) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("maelstrom-playback-disruption-report".into())
+            .spawn(move || {
+                let Ok(report) = report_rx.recv() else {
+                    return;
+                };
+                let Ok(mut json) = serde_json::to_string_pretty(&report) else {
+                    return;
+                };
+                json.push('\n');
+                let _ = write_atomic_report(&report_path, &json);
+            })
+            .ok()?;
+        Some(Self {
+            report_tx: Some(report_tx),
+            export_path,
+            step: PlaybackDisruptionStep::WaitingForPlacement,
+            started_at: None,
+            deadline: None,
+            media_id: None,
+            original_snapshot: None,
+            original_project_name: None,
+            original_settings: None,
+            original_language: None,
+            original_preview_quality: PreviewQuality::Full,
+            original_playing: false,
+            original_save_blocked: false,
+            baseline_diagnostics: RuntimeDiagnosticsReport::default(),
+            cache_eviction_before: 0,
+            scrub_requests: 0,
+            snapshot_restores: 0,
+            snapshot_restore_frames: 0,
+            snapshot_restore_audio_restarts: 0,
+            restore_waiting_for_frame: false,
+            restore_waiting_for_transport: false,
+            cache_seek_index: 0,
+            cache_seek_target: 0,
+            decoder_error_observed: false,
+            offline_marked: false,
+            recovery_frame_presented: false,
+            export_started: false,
+            export_progress_observed: false,
+            export_cancelled: false,
+            export_terminal_cleanup: false,
+            action_count: 0,
+            failed_step: None,
+            failure: None,
+            owns_runtime_scrub: false,
+            owns_export: false,
+            cleanup_restored: false,
+            measured_selected_preview_quality: None,
+            measured_resolved_preview_quality: None,
+        })
+    }
+
+    fn arm(&mut self, arm: PlaybackDisruptionArm) {
+        if self.step != PlaybackDisruptionStep::WaitingForPlacement {
+            return;
+        }
+        let now = Instant::now();
+        self.step = next_playback_disruption_step(self.step);
+        self.started_at = Some(now);
+        self.deadline = Some(now + Duration::from_secs(90));
+        self.media_id = Some(arm.media_id);
+        self.original_snapshot = Some(arm.snapshot);
+        self.original_project_name = Some(arm.project_name);
+        self.original_settings = Some(arm.settings);
+        self.original_language = Some(arm.language);
+        self.original_preview_quality = arm.preview_quality;
+        self.original_playing = arm.playing;
+        self.original_save_blocked = arm.save_blocked;
+        self.baseline_diagnostics = arm.diagnostics;
+        self.cache_eviction_before = arm.cache_evictions;
+        self.cache_seek_target = arm.cache_seek_target.max(2);
+    }
+
+    fn fail_with(&mut self, reason: impl Into<String>) {
+        self.failed_step = capture_playback_disruption_failure_step(self.failed_step, self.step);
+        self.failure = Some(reason.into());
+        self.step = PlaybackDisruptionStep::Failed;
+    }
+    fn fail(&mut self) {
+        self.fail_with(format!("invariant failed during {:?}", self.step));
+    }
+    fn timed_out(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+    fn note_decoder_error(&mut self) {
+        if self.step == PlaybackDisruptionStep::OfflineAwaitError {
+            self.decoder_error_observed = true;
+        }
+    }
+    fn note_frame_presented(&mut self, media_id: u32) {
+        if self.step == PlaybackDisruptionStep::Restoring
+            && self.restore_waiting_for_frame
+            && self.media_id == Some(media_id)
+        {
+            self.restore_waiting_for_frame = false;
+            self.snapshot_restore_frames = self.snapshot_restore_frames.saturating_add(1);
+        }
+        if self.step == PlaybackDisruptionStep::RecoveryAwaitFrame
+            && self.media_id == Some(media_id)
+        {
+            self.recovery_frame_presented = true;
+        }
+    }
+    fn observe_restore_transport(&mut self, playing: bool, audio_transport_active: bool) {
+        if self.step == PlaybackDisruptionStep::Restoring
+            && self.restore_waiting_for_transport
+            && snapshot_restore_is_live(
+                !self.restore_waiting_for_frame,
+                playing,
+                audio_transport_active,
+            )
+        {
+            self.restore_waiting_for_transport = false;
+            self.snapshot_restore_audio_restarts =
+                self.snapshot_restore_audio_restarts.saturating_add(1);
+        }
+    }
+    fn note_export_progress(&mut self) {
+        if self.step == PlaybackDisruptionStep::ExportAwaitProgress {
+            self.export_progress_observed = true;
+        }
+    }
+    fn note_export_cancelled(&mut self) {
+        if self.step == PlaybackDisruptionStep::ExportAwaitTerminal {
+            self.export_cancelled = true;
+        }
+    }
+    fn note_export_terminal_failure(&mut self, detail: &str) {
+        if matches!(
+            self.step,
+            PlaybackDisruptionStep::ExportAwaitProgress
+                | PlaybackDisruptionStep::ExportAwaitTerminal
+        ) {
+            self.fail_with(format!(
+                "export terminated before cancellation completed: {detail}"
+            ));
+        }
+    }
+
+    fn publish(&mut self, report: PlaybackDisruptionReport) {
+        if let Some(tx) = self.report_tx.take() {
+            let _ = tx.try_send(report);
+        }
+    }
+
+    fn capture_measured_quality(&mut self, editor: &EditorState) {
+        self.measured_selected_preview_quality
+            .get_or_insert_with(|| format!("{:?}", editor.preview_quality()));
+        self.measured_resolved_preview_quality
+            .get_or_insert_with(|| format!("{:?}", editor.resolved_preview_quality()));
+    }
+}
+
 fn write_atomic_report(path: &Path, contents: &str) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(".tmp");
@@ -4168,6 +4490,7 @@ struct App {
     surface_submission_probe: Option<SurfaceSubmissionProbe>,
     phase1_ui_probe: Option<phase1_ui::Probe>,
     playback_soak_probe: Option<PlaybackSoakProbe>,
+    playback_disruption_probe: Option<PlaybackDisruptionProbe>,
     machine_profile: MachineProfile,
     renderer_report: Option<RendererReport>,
     monitor_cache_cap_bytes: usize,
@@ -5022,6 +5345,7 @@ impl App {
             surface_submission_probe: SurfaceSubmissionProbe::from_environment(),
             phase1_ui_probe: phase1_ui::Probe::from_environment(),
             playback_soak_probe: PlaybackSoakProbe::from_environment(),
+            playback_disruption_probe: PlaybackDisruptionProbe::from_environment(),
             machine_profile: hardware::detect_machine(),
             renderer_report: None,
             monitor_cache_cap_bytes: monitor_cache_bytes,
@@ -5561,6 +5885,470 @@ impl App {
         self.playback_soak_probe = Some(probe);
     }
 
+    fn arm_playback_disruption_after_layout_drop(&mut self, media_id: u32) {
+        let Some(mut probe) = self.playback_disruption_probe.take() else {
+            return;
+        };
+        if probe.step == PlaybackDisruptionStep::WaitingForPlacement {
+            // Preserve the user's durable state before forcing the synthetic measurement mode.
+            let snapshot = self.editor.snapshot();
+            let project_name = self.editor.project_name.clone();
+            let settings = self.current_project_settings;
+            let language = self.editor.language;
+            let preview_quality = self.editor.preview_quality();
+            let playing = self.editor.playing;
+            let save_blocked = self.project_save_blocked;
+            let diagnostics = self.runtime_diagnostics().into();
+            let cache_evictions = self.monitor_frame_cache_pool.diagnostics().eviction_count;
+            // The schedule explicitly measures Full quality. Save is blocked for all synthetic
+            // restores below, so this temporary preference cannot leak into a user's project.
+            self.editor.set_preview_quality(PreviewQuality::Full);
+            let [width, height] = preview_request(&self.editor).output_size;
+            let estimated_frame_bytes = usize::try_from(width)
+                .ok()
+                .and_then(|width| {
+                    usize::try_from(height)
+                        .ok()
+                        .map(|height| width.saturating_mul(height))
+                })
+                .map(|pixels| pixels.saturating_mul(4).max(1))
+                .unwrap_or(1);
+            let cache = self.monitor_frame_cache_pool.diagnostics();
+            let target = cache
+                .capacity_bytes
+                .saturating_div(estimated_frame_bytes)
+                .saturating_add(2)
+                .min(u32::MAX as usize) as u32;
+            probe.arm(PlaybackDisruptionArm {
+                media_id,
+                snapshot,
+                project_name,
+                settings,
+                language,
+                preview_quality,
+                playing,
+                save_blocked,
+                diagnostics,
+                cache_evictions,
+                cache_seek_target: target,
+            });
+            self.project_save_blocked = true;
+            self.last_enqueued_generation = None;
+        }
+        self.playback_disruption_probe = Some(probe);
+    }
+
+    fn playback_disruption_export_residue(&self, output: &Path) -> bool {
+        let mut staged = output.as_os_str().to_os_string();
+        staged.push(".part");
+        output.exists() || PathBuf::from(staged).exists()
+    }
+
+    fn clear_playback_disruption_export_artifacts(&self, output: &Path) -> bool {
+        let mut staged = output.as_os_str().to_os_string();
+        staged.push(".part");
+        [output.to_path_buf(), PathBuf::from(staged)]
+            .into_iter()
+            .all(|path| !path.exists() || fs::remove_file(path).is_ok())
+    }
+
+    /// Restores state held by the synthetic schedule before emitting either terminal report.
+    /// Export cancellation is asynchronous, so this returns false until the owned job is gone
+    /// and its dedicated output path has no residue.
+    fn cleanup_playback_disruption(&mut self, probe: &mut PlaybackDisruptionProbe) -> bool {
+        if probe.owns_runtime_scrub {
+            if self.editor.is_scrubbing() {
+                let _ = self.editor.end_runtime_scrub(false);
+            }
+            probe.owns_runtime_scrub = false;
+        }
+        if probe.owns_export {
+            if let Some(job) = &self.export_job {
+                job.cancel();
+                return false;
+            }
+            // The supplied path is rejected before starting if it already exists, so these are
+            // probe-owned artifacts only. Remove an unexpected completed output as well.
+            if self.playback_disruption_export_residue(&probe.export_path)
+                && !self.clear_playback_disruption_export_artifacts(&probe.export_path)
+            {
+                return false;
+            }
+            if self.playback_disruption_export_residue(&probe.export_path) {
+                return false;
+            }
+            debug_assert!(playback_disruption_export_cleanup_is_settled(
+                probe.owns_export,
+                self.export_job.is_some(),
+                self.playback_disruption_export_residue(&probe.export_path),
+            ));
+            probe.owns_export = false;
+            probe.export_terminal_cleanup = true;
+        }
+        if probe.cleanup_restored {
+            return true;
+        }
+        let (Some(snapshot), Some(project_name), Some(settings), Some(language)) = (
+            probe.original_snapshot.clone(),
+            probe.original_project_name.clone(),
+            probe.original_settings,
+            probe.original_language,
+        ) else {
+            probe.fail_with("original editor state was unavailable during terminal cleanup");
+            return false;
+        };
+        self.show_editor_screen(project_name, language, Some(snapshot), settings, true);
+        self.editor
+            .set_preview_quality(probe.original_preview_quality);
+        if probe.original_playing {
+            self.editor.start_playback();
+        }
+        self.audio_transport = None;
+        self.project_save_blocked = probe.original_save_blocked;
+        self.last_enqueued_generation = None;
+        self.sync_monitor_decode();
+        probe.cleanup_restored = true;
+        true
+    }
+
+    fn publish_playback_disruption_terminal(
+        &mut self,
+        probe: &mut PlaybackDisruptionProbe,
+        now: Instant,
+    ) {
+        let success = probe.step == PlaybackDisruptionStep::Complete;
+        let elapsed_ms = probe
+            .started_at
+            .map(|started| now.duration_since(started).as_millis())
+            .unwrap_or(0);
+        let cache_after = self.monitor_frame_cache_pool.diagnostics().eviction_count;
+        probe.publish(PlaybackDisruptionReport {
+            schema_version: 1,
+            success,
+            failed_step: (!success)
+                .then(|| probe.failed_step.unwrap_or(probe.step))
+                .map(|step| format!("{step:?}")),
+            failure: (!success).then(|| {
+                probe
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "unspecified disruption failure".to_owned())
+            }),
+            elapsed_ms,
+            action_count: probe.action_count,
+            scrub_requests: probe.scrub_requests,
+            snapshot_restores: probe.snapshot_restores,
+            snapshot_restore_frames: probe.snapshot_restore_frames,
+            snapshot_restore_audio_restarts: probe.snapshot_restore_audio_restarts,
+            decoder_error_observed: probe.decoder_error_observed,
+            offline_marked: probe.offline_marked,
+            recovery_frame_presented: probe.recovery_frame_presented,
+            cache_eviction_before: probe.cache_eviction_before,
+            cache_eviction_after: cache_after,
+            cache_eviction_growth: cache_after.saturating_sub(probe.cache_eviction_before),
+            export_started: probe.export_started,
+            export_progress_observed: probe.export_progress_observed,
+            export_cancelled: probe.export_cancelled,
+            export_terminal_cleanup: probe.export_terminal_cleanup,
+            selected_preview_quality: probe
+                .measured_selected_preview_quality
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", self.editor.preview_quality())),
+            resolved_preview_quality: probe
+                .measured_resolved_preview_quality
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", self.editor.resolved_preview_quality())),
+            runtime_diagnostics_delta: RuntimeDiagnosticsReport::from(self.runtime_diagnostics())
+                .delta_since(probe.baseline_diagnostics),
+        });
+        if playback_disruption_releases_foreground(probe.step)
+            && let Some(window) = &self.window
+        {
+            window.set_window_level(WindowLevel::Normal);
+        }
+    }
+
+    /// Advances a bounded opt-in disruptive schedule from the UI-owned transport/render path.
+    /// Every operation goes through the same snapshot, decoder, audio, cache, and export owners
+    /// used by interactive editing; normal launches bypass this method entirely.
+    fn advance_playback_disruption(&mut self, now: Instant) {
+        let Some(mut probe) = self.playback_disruption_probe.take() else {
+            return;
+        };
+        if matches!(
+            probe.step,
+            PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed
+        ) {
+            probe.capture_measured_quality(&self.editor);
+            if self.cleanup_playback_disruption(&mut probe) {
+                self.publish_playback_disruption_terminal(&mut probe, now);
+            } else {
+                self.playback_disruption_probe = Some(probe);
+            }
+            return;
+        }
+        if probe.timed_out(now) {
+            probe.fail_with(format!("deadline exceeded while in {:?}", probe.step));
+        }
+        match probe.step {
+            PlaybackDisruptionStep::Scrubbing => {
+                let end = self.editor.timeline_end().0.max(1_000_000);
+                let tick = (end / 2)
+                    .saturating_sub(i64::from(probe.scrub_requests).saturating_mul(500_000))
+                    .max(0);
+                if probe.scrub_requests == 0 {
+                    // A scrub must never share one frame with the previous audio transport.
+                    self.audio_transport = None;
+                    if let Some(audio) = &self.audio_engine {
+                        audio.pause();
+                    }
+                    if !self.editor.begin_runtime_scrub(nle_timeline::Tick(tick)) {
+                        probe.fail_with("another timeline gesture owned the runtime scrub state");
+                    } else {
+                        probe.owns_runtime_scrub = true;
+                    }
+                } else if !self.editor.update_runtime_scrub(nle_timeline::Tick(tick)) {
+                    probe.fail();
+                }
+                probe.scrub_requests = probe.scrub_requests.saturating_add(1);
+                probe.action_count = probe.action_count.saturating_add(1);
+                self.sync_monitor_decode();
+                if probe.scrub_requests >= 8 {
+                    if !self.editor.end_runtime_scrub(true) {
+                        probe.fail();
+                    } else {
+                        probe.owns_runtime_scrub = false;
+                    }
+                    self.audio_transport = None;
+                    probe.step = next_playback_disruption_step(probe.step);
+                }
+            }
+            PlaybackDisruptionStep::Restoring => {
+                let Some(snapshot) = probe.original_snapshot.clone() else {
+                    probe.fail();
+                    self.playback_disruption_probe = Some(probe);
+                    return;
+                };
+                let Some(project_name) = probe.original_project_name.clone() else {
+                    probe.fail();
+                    self.playback_disruption_probe = Some(probe);
+                    return;
+                };
+                let Some(settings) = probe.original_settings else {
+                    probe.fail();
+                    self.playback_disruption_probe = Some(probe);
+                    return;
+                };
+                probe
+                    .observe_restore_transport(self.editor.playing, self.audio_transport.is_some());
+                if probe.restore_waiting_for_frame || probe.restore_waiting_for_transport {
+                    // A restore only counts after the newly-owned decoder presents a frame.
+                    // This turns the eight project changes into live decoder/audio ownership
+                    // churn rather than eight synchronous data assignments.
+                } else if probe.snapshot_restores < 8 {
+                    let mut restored = snapshot;
+                    restored.view.playhead =
+                        nle_timeline::Tick(if probe.snapshot_restores % 2 == 0 {
+                            0
+                        } else {
+                            self.editor.timeline_end().0 / 2
+                        });
+                    self.show_editor_screen(
+                        format!(
+                            "{project_name} — disruption {}",
+                            if probe.snapshot_restores % 2 == 0 {
+                                "A"
+                            } else {
+                                "B"
+                            }
+                        ),
+                        Language::English,
+                        Some(restored),
+                        settings,
+                        true,
+                    );
+                    self.editor.set_preview_quality(PreviewQuality::Full);
+                    self.editor.start_playback();
+                    self.audio_transport = None;
+                    probe.snapshot_restores = probe.snapshot_restores.saturating_add(1);
+                    probe.restore_waiting_for_frame = true;
+                    probe.restore_waiting_for_transport = true;
+                    probe.action_count = probe.action_count.saturating_add(1);
+                    self.sync_monitor_decode();
+                } else if probe.snapshot_restore_frames == 8
+                    && probe.snapshot_restore_audio_restarts == 8
+                {
+                    let mut missing = snapshot;
+                    let Some(media_id) = probe.media_id else {
+                        probe.fail();
+                        self.playback_disruption_probe = Some(probe);
+                        return;
+                    };
+                    let Some(item) = missing.media.iter_mut().find(|item| item.id == media_id)
+                    else {
+                        probe.fail();
+                        self.playback_disruption_probe = Some(probe);
+                        return;
+                    };
+                    item.path = item.path.with_extension("maelstrom-disruption-missing");
+                    self.show_editor_screen(
+                        "Maelstrom disruption offline".to_owned(),
+                        Language::English,
+                        Some(missing),
+                        settings,
+                        true,
+                    );
+                    self.editor.set_preview_quality(PreviewQuality::Full);
+                    self.sync_monitor_decode();
+                    probe.action_count = probe.action_count.saturating_add(1);
+                    probe.step = next_playback_disruption_step(probe.step);
+                }
+            }
+            PlaybackDisruptionStep::OfflineAwaitError => {
+                if probe.decoder_error_observed {
+                    if let Some(media_id) = probe.media_id {
+                        self.editor.set_media_error(
+                            media_id,
+                            "disruption schedule verified missing decoder source",
+                        );
+                        probe.offline_marked = self.editor.media_is_offline(media_id);
+                        if probe.offline_marked {
+                            probe.step = next_playback_disruption_step(probe.step);
+                        } else {
+                            probe.fail_with(
+                                "offline state was not exposed after a current decoder error",
+                            );
+                        }
+                    } else {
+                        probe.fail();
+                    }
+                }
+            }
+            PlaybackDisruptionStep::OfflineMarked => {
+                let (Some(snapshot), Some(project_name), Some(settings)) = (
+                    probe.original_snapshot.clone(),
+                    probe.original_project_name.clone(),
+                    probe.original_settings,
+                ) else {
+                    probe.fail();
+                    self.playback_disruption_probe = Some(probe);
+                    return;
+                };
+                self.show_editor_screen(
+                    project_name,
+                    Language::English,
+                    Some(snapshot),
+                    settings,
+                    true,
+                );
+                self.editor.set_preview_quality(PreviewQuality::Full);
+                self.editor.start_playback();
+                self.audio_transport = None;
+                self.sync_monitor_decode();
+                probe.action_count = probe.action_count.saturating_add(1);
+                probe.step = next_playback_disruption_step(probe.step);
+            }
+            PlaybackDisruptionStep::RecoveryAwaitFrame => {
+                if probe.recovery_frame_presented {
+                    if self.editor.playing {
+                        self.editor.toggle_playback();
+                    }
+                    self.audio_transport = None;
+                    if let Some(audio) = &self.audio_engine {
+                        audio.pause();
+                    }
+                    probe.step = next_playback_disruption_step(probe.step);
+                }
+            }
+            PlaybackDisruptionStep::CachePressure => {
+                if probe.cache_seek_index < probe.cache_seek_target {
+                    // Wait for the active decoder request to settle. This avoids latest-wins
+                    // coalescing and makes every increment a real sequential decoded seek.
+                    if !self.monitor_requests_in_flight[0] {
+                        let end = self.editor.timeline_end().0.max(1_000_000);
+                        let divisor = i64::from(probe.cache_seek_target).max(1);
+                        let tick = (end.saturating_mul(i64::from(probe.cache_seek_index + 1))
+                            / divisor)
+                            .min(end.saturating_sub(1));
+                        self.editor.set_playhead(nle_timeline::Tick(tick));
+                        self.sync_monitor_decode();
+                        probe.cache_seek_index = probe.cache_seek_index.saturating_add(1);
+                        probe.action_count = probe.action_count.saturating_add(1);
+                    }
+                } else if !self.monitor_requests_in_flight[0] {
+                    if self.monitor_frame_cache_pool.diagnostics().eviction_count
+                        > probe.cache_eviction_before
+                    {
+                        if self.playback_disruption_export_residue(&probe.export_path) {
+                            probe.fail_with("disruption export path was not empty before start");
+                            self.playback_disruption_probe = Some(probe);
+                            return;
+                        }
+                        self.start_video_export(probe.export_path.clone());
+                        probe.export_started = self.export_job.is_some();
+                        probe.owns_export = probe.export_started;
+                        probe.action_count = probe.action_count.saturating_add(1);
+                        if probe.export_started {
+                            probe.step = next_playback_disruption_step(probe.step);
+                        } else {
+                            probe.fail_with("export did not start after cache pressure");
+                        }
+                    } else {
+                        probe.fail_with(
+                            "sequential decoded seeks settled without frame-cache eviction growth",
+                        );
+                    }
+                }
+            }
+            PlaybackDisruptionStep::ExportAwaitProgress => {
+                if probe.export_progress_observed {
+                    if let Some(job) = &self.export_job {
+                        job.cancel();
+                    }
+                    probe.step = next_playback_disruption_step(probe.step);
+                    probe.action_count = probe.action_count.saturating_add(1);
+                }
+            }
+            PlaybackDisruptionStep::ExportAwaitTerminal => {
+                if probe.export_cancelled {
+                    probe.export_terminal_cleanup =
+                        !self.playback_disruption_export_residue(&probe.export_path);
+                    if probe.export_terminal_cleanup {
+                        self.editor.start_playback();
+                        self.audio_transport = None;
+                        self.sync_monitor_decode();
+                        probe.step = next_playback_disruption_step(probe.step);
+                    }
+                }
+            }
+            PlaybackDisruptionStep::RecoveryPlayback => {
+                if self.editor.playing
+                    && self.audio_transport.is_some()
+                    && self.editor.monitor_frame_for_layer(0).is_some()
+                {
+                    self.project_save_blocked = probe.original_save_blocked;
+                    probe.step = next_playback_disruption_step(probe.step);
+                }
+            }
+            PlaybackDisruptionStep::WaitingForPlacement
+            | PlaybackDisruptionStep::Complete
+            | PlaybackDisruptionStep::Failed => {}
+        }
+        if matches!(
+            probe.step,
+            PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed
+        ) {
+            probe.capture_measured_quality(&self.editor);
+            if self.cleanup_playback_disruption(&mut probe) {
+                self.publish_playback_disruption_terminal(&mut probe, now);
+            } else {
+                self.playback_disruption_probe = Some(probe);
+            }
+            return;
+        }
+        self.playback_disruption_probe = Some(probe);
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -5827,6 +6615,7 @@ impl App {
             self.queue_project_autosave();
             self.sync_audio_transport();
             self.sync_monitor_decode();
+            self.advance_playback_disruption(Instant::now());
         }
         self.advance_phase1_ui(frame_cpu_duration);
     }
@@ -6536,12 +7325,20 @@ impl App {
                         if owns_visible_editor {
                             self.editor.set_export_running(progress)
                         }
+                        if let Some(probe) = &mut self.playback_disruption_probe {
+                            probe.note_export_progress();
+                        }
                     }
                     nle_export::ExportEvent::Completed(path) => {
                         if owns_visible_editor {
                             self.editor.set_export_completed(path.clone());
                         }
                         self.hub.status = Some(format!("Video exported to {}", path.display()));
+                        if let Some(probe) = &mut self.playback_disruption_probe {
+                            probe.note_export_terminal_failure(
+                                "export completed before cancellation",
+                            );
+                        }
                         terminal = true;
                     }
                     nle_export::ExportEvent::Cancelled => {
@@ -6552,6 +7349,9 @@ impl App {
                             probe.record_export_cancelled();
                         }
                         self.hub.status = Some("Video export cancelled".to_owned());
+                        if let Some(probe) = &mut self.playback_disruption_probe {
+                            probe.note_export_cancelled();
+                        }
                         terminal = true;
                     }
                     nle_export::ExportEvent::Failed(error) => {
@@ -6559,6 +7359,9 @@ impl App {
                             self.editor.set_export_failed(error.clone());
                         }
                         self.hub.status = Some(format!("Video export failed: {error}"));
+                        if let Some(probe) = &mut self.playback_disruption_probe {
+                            probe.note_export_terminal_failure(&error);
+                        }
                         terminal = true;
                     }
                 }
@@ -7837,6 +8640,7 @@ impl App {
                 linked_audio_bars,
             },
         );
+        self.arm_playback_disruption_after_layout_drop(media_id);
     }
 
     fn maybe_start_media_acceptance_export(&mut self) {
@@ -8890,6 +9694,9 @@ impl App {
                 if let Some(probe) = &mut self.media_acceptance_probe {
                     probe.record_monitor_frame(media_id, native_uploaded);
                 }
+                if let Some(probe) = &mut self.playback_disruption_probe {
+                    probe.note_frame_presented(media_id);
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -8903,6 +9710,9 @@ impl App {
                     error.request_id,
                 ) =>
             {
+                if let Some(probe) = &mut self.playback_disruption_probe {
+                    probe.note_decoder_error();
+                }
                 self.monitor_runtime_metrics.record_error();
                 self.monitor_requests_in_flight[layer] = false;
                 self.monitor_request_deferred[layer] = false;
@@ -9405,9 +10215,11 @@ impl ApplicationHandler<AppEvent> for App {
             .with_window_icon(Some(window_icon()))
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
-        if std::env::var_os("MAELSTROM_SURFACE_SUBMISSION_REPORT").is_some()
-            || std::env::var_os("MAELSTROM_PLAYBACK_SOAK_REPORT").is_some()
-        {
+        if playback_probe_requires_foreground(
+            std::env::var_os("MAELSTROM_SURFACE_SUBMISSION_REPORT").is_some(),
+            std::env::var_os("MAELSTROM_PLAYBACK_SOAK_REPORT").is_some(),
+            std::env::var_os("MAELSTROM_PLAYBACK_DISRUPTION_REPORT").is_some(),
+        ) {
             // Keep opt-in visible cadence/soak probes unobscured so Windows does not apply its
             // occluded-surface throttle. Each probe restores normal window level when complete.
             window_attributes = window_attributes.with_window_level(WindowLevel::AlwaysOnTop);
@@ -10157,6 +10969,86 @@ fn main() {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn playback_disruption_state_machine_has_one_deterministic_success_path() {
+        let mut step = PlaybackDisruptionStep::WaitingForPlacement;
+        for expected in [
+            PlaybackDisruptionStep::Scrubbing,
+            PlaybackDisruptionStep::Restoring,
+            PlaybackDisruptionStep::OfflineAwaitError,
+            PlaybackDisruptionStep::OfflineMarked,
+            PlaybackDisruptionStep::RecoveryAwaitFrame,
+            PlaybackDisruptionStep::CachePressure,
+            PlaybackDisruptionStep::ExportAwaitProgress,
+            PlaybackDisruptionStep::ExportAwaitTerminal,
+            PlaybackDisruptionStep::RecoveryPlayback,
+            PlaybackDisruptionStep::Complete,
+        ] {
+            step = next_playback_disruption_step(step);
+            assert_eq!(step, expected);
+        }
+        assert_eq!(
+            next_playback_disruption_step(step),
+            PlaybackDisruptionStep::Complete
+        );
+        assert_eq!(
+            next_playback_disruption_step(PlaybackDisruptionStep::Failed),
+            PlaybackDisruptionStep::Failed
+        );
+    }
+
+    #[test]
+    fn playback_disruption_failure_captures_original_stage_once() {
+        assert_eq!(
+            capture_playback_disruption_failure_step(
+                None,
+                PlaybackDisruptionStep::OfflineAwaitError,
+            ),
+            Some(PlaybackDisruptionStep::OfflineAwaitError)
+        );
+        assert_eq!(
+            capture_playback_disruption_failure_step(
+                Some(PlaybackDisruptionStep::Scrubbing),
+                PlaybackDisruptionStep::Failed,
+            ),
+            Some(PlaybackDisruptionStep::Scrubbing)
+        );
+    }
+
+    #[test]
+    fn playback_disruption_restore_and_cleanup_lifecycle_gates_are_explicit() {
+        assert!(!snapshot_restore_is_live(true, true, false));
+        assert!(!snapshot_restore_is_live(true, false, true));
+        assert!(snapshot_restore_is_live(true, true, true));
+        assert!(!playback_disruption_export_cleanup_is_settled(
+            true, true, false
+        ));
+        assert!(!playback_disruption_export_cleanup_is_settled(
+            true, false, true
+        ));
+        assert!(playback_disruption_export_cleanup_is_settled(
+            true, false, false
+        ));
+        assert!(playback_disruption_export_cleanup_is_settled(
+            false, true, true
+        ));
+    }
+
+    #[test]
+    fn playback_disruption_report_also_requests_foreground_cadence() {
+        assert!(!playback_probe_requires_foreground(false, false, false));
+        assert!(playback_probe_requires_foreground(false, false, true));
+        assert!(!playback_disruption_releases_foreground(
+            PlaybackDisruptionStep::CachePressure
+        ));
+        assert!(playback_disruption_releases_foreground(
+            PlaybackDisruptionStep::Complete
+        ));
+        assert!(playback_disruption_releases_foreground(
+            PlaybackDisruptionStep::Failed
+        ));
+    }
 
     fn compiled_test_graph(node_id: u32, brightness: f32) -> nle_timeline::VideoEffectGraph {
         let mut effect = nle_timeline::BrightnessContrastEffect::default();

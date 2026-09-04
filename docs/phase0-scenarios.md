@@ -52,6 +52,18 @@ own fixture copy and export final/staging/filter files; the successful JSON
 report remains for inspection. Generated fixtures and reports are local-only
 artifacts and are intentionally not part of the public repository.
 
+## Packaged disruption schedule
+
+The live packaged disruption schedule is deliberately separate from this headless Rust matrix.
+`scripts/Run-PlaybackDisruptions.ps1` creates an owned 60-second 1920x1080 A/V fixture only for an
+opt-in run, starts the editor only through the exact project batch launcher with `--cache-mb=512`,
+and validates the schema-1 app report for eight scrubs, eight restoring frames and frame-gated
+playback/audio-transport restarts, offline/error and
+recovery behavior, real decoded-frame-cache eviction, and cancelled-export cleanup. Its
+`-ValidateOnly` mode proves launcher/package/runtime identity without GUI, FFmpeg, environment, or
+artifact side effects. The harness exists but has not yet produced live, scanout, or cross-hardware
+Phase 0 evidence; see `docs/performance-reports.md` for the full contract.
+
 ## Sustained scenario matrix
 
 `scripts/Run-Phase0SustainedScenarios.ps1` repeatedly runs the same validated

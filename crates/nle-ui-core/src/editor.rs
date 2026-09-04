@@ -3625,6 +3625,44 @@ impl EditorState {
         matches!(self.timeline_drag, Some(TimelineDrag::Scrub))
     }
 
+    /// Starts a runtime-owned scrub gesture without synthesizing pointer input or changing the
+    /// durable project document. Native integration probes use this same transport state as the
+    /// timeline ruler, so monitor decode takes its real scrub-quality/latest-wins path.
+    pub fn begin_runtime_scrub(&mut self, tick: Tick) -> bool {
+        if self.timeline_drag.is_some() {
+            return false;
+        }
+        self.playing = false;
+        self.timeline_drag = Some(TimelineDrag::Scrub);
+        self.set_playhead_inner(tick, false);
+        self.clear_stale_monitor_for_scrub_gap();
+        true
+    }
+
+    /// Moves an active runtime-owned scrub. Returns false when another timeline gesture owns
+    /// the state, preserving ordinary pointer ownership rules.
+    pub fn update_runtime_scrub(&mut self, tick: Tick) -> bool {
+        if !self.is_scrubbing() {
+            return false;
+        }
+        self.set_playhead_inner(tick, false);
+        self.clear_stale_monitor_for_scrub_gap();
+        true
+    }
+
+    /// Releases a runtime-owned scrub and optionally resumes normal transport. This deliberately
+    /// leaves no synthetic drag state in the next rendered frame.
+    pub fn end_runtime_scrub(&mut self, resume_playback: bool) -> bool {
+        if !self.is_scrubbing() {
+            return false;
+        }
+        self.timeline_drag = None;
+        if resume_playback {
+            self.start_playback();
+        }
+        true
+    }
+
     /// Returns the measured ruler-handle and timeline mapping geometry from the current frame.
     ///
     /// The value is runtime-only and unavailable until the timeline has been laid out.
@@ -17131,6 +17169,29 @@ mod tests {
         assert_eq!(editor.media[0].kind, MediaKind::Video);
         assert_eq!(editor.media[1].kind, MediaKind::Audio);
         assert_eq!(editor.selected_media, Some(1));
+    }
+
+    #[test]
+    fn runtime_scrub_uses_real_scrub_state_and_can_resume_transport() {
+        let mut editor = EditorState::new(Language::English, "Runtime scrub");
+        editor.add_media_paths([PathBuf::from("runtime-scrub.mp4")]);
+        editor.media[0].duration = Some(Tick(1_000));
+        editor
+            .timeline
+            .insert_linked_av_pair(TimelineMediaId(1), Tick(0), Tick(1_000), Tick(0))
+            .unwrap();
+        let durable_generation = editor.durable_generation();
+        editor.start_playback();
+        assert!(editor.begin_runtime_scrub(Tick(800)));
+        assert!(editor.is_scrubbing());
+        assert!(!editor.playing);
+        assert_eq!(editor.playhead, Tick(800));
+        assert!(editor.update_runtime_scrub(Tick(200)));
+        assert_eq!(editor.playhead, Tick(200));
+        assert!(editor.end_runtime_scrub(true));
+        assert!(!editor.is_scrubbing());
+        assert!(editor.playing);
+        assert_eq!(editor.durable_generation(), durable_generation);
     }
 
     #[test]

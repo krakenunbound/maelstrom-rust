@@ -407,3 +407,31 @@ ignored local schema-version 2 wrapper and schema-version 5 app evidence remain 
 `artifacts/phase0-playback-soak/`; their SHA-256 values are
 `A1B4A1F485D93B3846E19CF87655CE76D40E4CD533489137607E1998796DB175` and
 `7431EFA650A1BE4B4262795E76CBD6C80EF585D95EC430BDD66C56D6C41682DD` respectively.
+
+## Opt-in packaged playback disruption schedule
+
+`scripts/Run-PlaybackDisruptions.ps1` is the separately opt-in live GUI schedule for disruptions
+that a normal soak intentionally does not cause: eight runtime scrub updates, eight snapshot/project
+restores that each must present a newly owned frame, an intentional missing-media decoder error
+followed by exposed offline state and recovery playback, sequential Full-quality decoded-frame cache
+pressure, and a started/progressed/cancelled export with terminal cleanup.
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Run-PlaybackDisruptions.ps1' `
+  -LauncherPath 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
+```
+
+The real run creates an owned 60-second 1920x1080 A/V fixture with package-local FFmpeg and starts
+only the exact project launcher, passing `--cache-mb=512`. It supplies the smoke-editor, media,
+report, export, and launcher-wait environment values; the runner finds only the exact packaged editor
+descendant under that fresh launcher root and cleans only that PID tree. The schema-1 app report must
+show exactly eight scrubs/restores/restore frames and frame-gated playback/audio-transport restarts;
+decoder/offline/recovery evidence; positive cache
+eviction growth; export start, progress, cancellation, and cleanup; `Full` selected/resolved quality;
+bounded diagnostics; and exactly one monitor error from the intentional missing source. The additive
+schema-1 wrapper records launcher/executable SHA-256 values and structured stage/type/message failures.
+
+`-ValidateOnly` proves exact launcher/package/runtime identity without creating/deleting artifacts,
+changing environment variables, running FFmpeg, or launching the GUI. Its contract rejects direct
+executable paths. The harness is installed but has not produced live, cross-hardware, scanout, or new
+performance evidence.

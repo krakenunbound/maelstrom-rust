@@ -132,6 +132,11 @@ Build the evidence harness before adding engine complexity.
       32 unique child-report hashes, identical clean start/end commits, and no invocation or
       report-read failures. The schema-2 wrapper SHA-256 is
       `80C965A68011CC0CEB950744176C803857E70CBF104054B99D15B07A3D871FE5`.
+      An opt-in packaged disruption harness is installed for eight scrub updates/eight snapshot
+      restores with fresh frames, intentional offline/error/recovery, Full-quality decoded-frame
+      cache eviction, and cancelled-export cleanup. Its non-launching contract proves exact
+      launcher/package identity and no validation side effects; it is not live or cross-hardware
+      qualification evidence. See `docs/performance-reports.md`.
       It renewed headless Software decode/`h264_mf` evidence only; adapter inventory is not
       rendering proof, and live-audio, GUI, packaged-playback, scanout, and cross-hardware gates
       remain open.
