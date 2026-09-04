@@ -534,7 +534,12 @@ Last updated: 2026-09-04
   - [x] Ship the first native Edit slice for Media Pool, Viewer, Timeline, and the complete right
     sidebar, including four dock regions, tab groups, cross-window transition drops, local monitor
     geometry, mixed-DPI resize handling, and close-to-reattach behavior.
-  - [ ] Extend the same native host contract to Undertow and saved named workspace presets.
+  - [x] Extend the native host contract to independent Undertow Tools and Mixer frames while
+    reusing the one authoritative Timeline. Edit/Undertow dock positions and active tabs remain
+    isolated, legacy projects migrate safely, and default-minus-detached layouts retain the
+    organized center-weighted audio workspace.
+  - [ ] Add saved named workspace presets without making machine-specific monitor geometry part of
+    portable project state.
 
 ## Release and repository
 

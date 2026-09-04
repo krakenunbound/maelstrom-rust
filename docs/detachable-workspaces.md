@@ -4,7 +4,7 @@ Maelstrom's detachable panels are native operating-system windows backed by the 
 session. They are not extra editor instances and they do not own independent project, playback,
 decode, undo, autosave, or export state.
 
-## First complete slice
+## Available detachable sections
 
 The Edit workspace exposes four independently detachable sections:
 
@@ -12,6 +12,16 @@ The Edit workspace exposes four independently detachable sections:
 - Viewer
 - Timeline
 - Tools (Inspector, Audio, Color, Effects, and Media tabs)
+
+Undertow exposes two additional native sections while reusing the same detachable Timeline:
+
+- Undertow Tools and track selector
+- Undertow Mixer
+
+The shared Timeline keeps one project, playback, decoder, and undo authority. Its dock destination
+is saved separately for Edit and Undertow: Bottom remains the Edit default, while Center remains
+the Undertow default. Active dock tabs are also scoped per workspace, so arranging audio panels
+does not rearrange or change the selected tabs in Edit.
 
 The existing organized single-window layout remains the default. A detached section disappears
 from that layout and the remaining sections expand into the released space. Its native window can
@@ -47,7 +57,8 @@ viewport has painted. This preserves the one-context texture lifetime contract.
 
 The slice is complete only when:
 
-1. each of the four sections can detach into a decorated native window and reattach;
+1. each Edit section plus Undertow Tools and Mixer can detach into a decorated native window and
+   reattach;
 2. the remaining root layout expands without clipped borders or dead gaps;
 3. child close does not exit the application and root close still does;
 4. edits made in any panel use the same selection, undo, autosave, and project snapshot;
@@ -58,7 +69,9 @@ The slice is complete only when:
 
 ## Workspace persistence
 
-Dock destinations and detached membership are backward-compatible project view state. Native
+Dock destinations and detached membership are backward-compatible project view state. Edit and
+Undertow dock maps are stored independently; older projects retain their Edit layout and receive
+the organized Undertow defaults. Native
 window geometry is saved separately in the machine-local Maelstrom preferences as desktop-space
 physical position, logical size, DPI scale, and monitor identity. Moving or resizing a native panel
 therefore does not dirty or autosave the project. Restore only geometry that intersects an available

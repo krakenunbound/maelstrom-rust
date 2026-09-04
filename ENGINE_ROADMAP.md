@@ -976,12 +976,19 @@ Improve information density without coupling it to live decode.
 - [ ] Add relink, replace, reveal-in-folder, consolidate/gather, and unused-media cleanup workflows.
 - [ ] Make Project Hub collections persistent and allow projects to be moved/copied between them.
 - [ ] Add workspace presets and persist every explicit panel choice without overriding defaults.
-- [ ] Add detachable, re-dockable native frames for every major editor section: Media Pool,
+- [x] Add detachable, re-dockable native frames for every major editor section: Media Pool,
       Viewer, Timeline, the Inspector/Audio/Color/Effects/Media sidebar, and Undertow. Detached
       frames must move independently across monitors, share one authoritative editor state, and
       restore their saved workspace placement without replacing the organized single-window
       default. Closing a detached frame reattaches its section; monitor removal clamps it safely
       onto an available display instead of losing the panel off-screen.
+      The native host now covers the four Edit sections plus independent Undertow Tools and Mixer
+      frames while reusing the one Timeline surface/state authority. Edit and Undertow persist
+      separate dock maps and session tab selections; legacy projects keep Edit's Bottom Timeline
+      and receive Undertow's Center Timeline default. Native geometry remains machine-local, and
+      unavailable monitor placement is recovered onto an available display. Full UI/app tests,
+      strict Clippy, and an independent regression review pass without launching the editor. See
+      `docs/detachable-workspaces.md`.
 - [ ] Complete English/Japanese coverage for all new commands, errors, tooltips, metadata, and
       accessibility labels.
 - [ ] Add keyboard remapping and searchable command discovery.

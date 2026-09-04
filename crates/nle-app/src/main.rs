@@ -9472,7 +9472,7 @@ impl ApplicationHandler<AppEvent> for App {
             .map_or_else(
                 || {
                     self.editor
-                        .panel_is_visible_in_edit_dock(EditorPanel::Timeline)
+                        .panel_is_visible_in_active_workspace_dock(EditorPanel::Timeline)
                 },
                 |panel| panel == EditorPanel::Timeline,
             );

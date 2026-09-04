@@ -442,6 +442,10 @@ pub struct EditorViewSnapshot {
     /// Durable dock destinations; missing entries use each panel's default slot.
     #[serde(default)]
     pub panel_docks: Vec<EditorPanelDock>,
+    /// Undertow-specific dock destinations. Older snapshots omit this and retain the new
+    /// audio-workspace defaults rather than inheriting Edit's Timeline placement.
+    #[serde(default)]
+    pub undertow_panel_docks: Vec<EditorPanelDock>,
 }
 
 /// Decode resolution used by the live viewer. This never changes export resolution.
@@ -989,7 +993,7 @@ pub enum TimelineTool {
 }
 
 /// The active project workspace. Both views operate on the same authoritative timeline.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub enum EditorWorkspace {
     #[default]
     Edit,
@@ -1004,6 +1008,8 @@ pub enum EditorPanel {
     Viewer,
     Timeline,
     Tools,
+    UndertowTools,
+    UndertowMixer,
 }
 
 /// Logical destination used when a panel is docked in the Edit workspace.
@@ -1023,7 +1029,16 @@ pub struct EditorPanelDock {
 }
 
 impl EditorPanel {
-    pub const ALL: [Self; 4] = [Self::MediaPool, Self::Viewer, Self::Timeline, Self::Tools];
+    pub const ALL: [Self; 6] = [
+        Self::MediaPool,
+        Self::Viewer,
+        Self::Timeline,
+        Self::Tools,
+        Self::UndertowTools,
+        Self::UndertowMixer,
+    ];
+    pub const EDIT: [Self; 4] = [Self::MediaPool, Self::Viewer, Self::Timeline, Self::Tools];
+    pub const UNDERTOW: [Self; 3] = [Self::UndertowTools, Self::Timeline, Self::UndertowMixer];
 
     pub const fn id(self) -> &'static str {
         match self {
@@ -1031,6 +1046,8 @@ impl EditorPanel {
             Self::Viewer => "viewer",
             Self::Timeline => "timeline",
             Self::Tools => "tools",
+            Self::UndertowTools => "undertow-tools",
+            Self::UndertowMixer => "undertow-mixer",
         }
     }
 
@@ -1044,6 +1061,10 @@ impl EditorPanel {
             (Language::Japanese, Self::Timeline) => "タイムライン",
             (Language::English, Self::Tools) => "Tools",
             (Language::Japanese, Self::Tools) => "ツール",
+            (Language::English, Self::UndertowTools) => "Undertow Tools",
+            (Language::Japanese, Self::UndertowTools) => "アンダートウツール",
+            (Language::English, Self::UndertowMixer) => "Undertow Mixer",
+            (Language::Japanese, Self::UndertowMixer) => "アンダートウミキサー",
         }
     }
 
@@ -1053,6 +1074,8 @@ impl EditorPanel {
             Self::Viewer => Vec2::new(960.0, 720.0),
             Self::Timeline => Vec2::new(1280.0, 440.0),
             Self::Tools => Vec2::new(300.0, 720.0),
+            Self::UndertowTools => Vec2::new(360.0, 720.0),
+            Self::UndertowMixer => Vec2::new(420.0, 720.0),
         }
     }
 
@@ -1072,7 +1095,37 @@ impl EditorPanel {
             Self::Viewer => EditorDockSlot::Center,
             Self::Timeline => EditorDockSlot::Bottom,
             Self::Tools => EditorDockSlot::Right,
+            Self::UndertowTools => EditorDockSlot::Left,
+            Self::UndertowMixer => EditorDockSlot::Right,
         }
+    }
+
+    pub const fn default_dock_slot_in_workspace(
+        self,
+        workspace: EditorWorkspace,
+    ) -> EditorDockSlot {
+        match (workspace, self) {
+            (EditorWorkspace::Undertow, Self::Timeline) => EditorDockSlot::Center,
+            _ => self.default_dock_slot(),
+        }
+    }
+
+    pub const fn belongs_to_workspace(self, workspace: EditorWorkspace) -> bool {
+        match workspace {
+            EditorWorkspace::Edit => matches!(
+                self,
+                Self::MediaPool | Self::Viewer | Self::Timeline | Self::Tools
+            ),
+            EditorWorkspace::Undertow => matches!(
+                self,
+                Self::UndertowTools | Self::Timeline | Self::UndertowMixer
+            ),
+            EditorWorkspace::KrakenUpscale => false,
+        }
+    }
+
+    pub const fn is_edit_panel(self) -> bool {
+        self.belongs_to_workspace(EditorWorkspace::Edit)
     }
 }
 
@@ -1722,8 +1775,10 @@ pub struct EditorState {
     pub media_pool_width: f32,
     pub analysis_width: f32,
     detached_panels: HashSet<EditorPanel>,
+    /// Edit dock destinations retained under the legacy snapshot field.
     panel_docks: HashMap<EditorPanel, EditorDockSlot>,
-    active_dock_tabs: HashMap<EditorDockSlot, EditorPanel>,
+    undertow_panel_docks: HashMap<EditorPanel, EditorDockSlot>,
+    active_dock_tabs: HashMap<(EditorWorkspace, EditorDockSlot), EditorPanel>,
     /// Active right-sidebar view is session-only UI state. It is intentionally excluded from
     /// snapshots and durable generations so inspecting media never dirties a project.
     right_sidebar_tab: RightSidebarTab,
@@ -1886,7 +1941,17 @@ impl EditorState {
             detached_panels: HashSet::new(),
             panel_docks: EditorPanel::ALL
                 .into_iter()
+                .filter(|panel| panel.is_edit_panel())
                 .map(|panel| (panel, panel.default_dock_slot()))
+                .collect(),
+            undertow_panel_docks: EditorPanel::UNDERTOW
+                .into_iter()
+                .map(|panel| {
+                    (
+                        panel,
+                        panel.default_dock_slot_in_workspace(EditorWorkspace::Undertow),
+                    )
+                })
                 .collect(),
             active_dock_tabs: HashMap::new(),
             right_sidebar_tab: RightSidebarTab::Inspector,
@@ -2026,39 +2091,81 @@ impl EditorState {
     pub fn toggle_panel_detached(&mut self, panel: EditorPanel) {
         if !self.detached_panels.insert(panel) {
             self.detached_panels.remove(&panel);
-            let slot = self.panel_dock(panel);
-            self.active_dock_tabs.insert(slot, panel);
+            let workspace = self.dock_workspace_for_panel(panel);
+            let slot = self.panel_dock_in_workspace(panel, workspace);
+            self.active_dock_tabs.insert((workspace, slot), panel);
         }
         self.mark_durable_edit();
     }
 
     pub fn dock_panel(&mut self, panel: EditorPanel) {
         if self.detached_panels.remove(&panel) {
-            let slot = self.panel_dock(panel);
-            self.active_dock_tabs.insert(slot, panel);
+            let workspace = self.dock_workspace_for_panel(panel);
+            let slot = self.panel_dock_in_workspace(panel, workspace);
+            self.active_dock_tabs.insert((workspace, slot), panel);
             self.mark_durable_edit();
         }
     }
 
     pub fn panel_dock(&self, panel: EditorPanel) -> EditorDockSlot {
-        self.panel_docks
+        self.panel_dock_in_workspace(panel, EditorWorkspace::Edit)
+    }
+
+    pub fn panel_dock_in_workspace(
+        &self,
+        panel: EditorPanel,
+        workspace: EditorWorkspace,
+    ) -> EditorDockSlot {
+        let docks = match workspace {
+            EditorWorkspace::Undertow => &self.undertow_panel_docks,
+            EditorWorkspace::Edit | EditorWorkspace::KrakenUpscale => &self.panel_docks,
+        };
+        docks
             .get(&panel)
             .copied()
-            .unwrap_or_else(|| panel.default_dock_slot())
+            .unwrap_or_else(|| panel.default_dock_slot_in_workspace(workspace))
     }
 
     pub fn has_custom_panel_docks(&self) -> bool {
-        EditorPanel::ALL
+        EditorPanel::EDIT
             .into_iter()
             .any(|panel| self.panel_dock(panel) != panel.default_dock_slot())
     }
 
+    fn has_custom_panel_docks_for(&self, workspace: EditorWorkspace) -> bool {
+        EditorPanel::ALL.into_iter().any(|panel| {
+            panel.belongs_to_workspace(workspace)
+                && self.panel_dock_in_workspace(panel, workspace)
+                    != panel.default_dock_slot_in_workspace(workspace)
+        })
+    }
+
     pub fn dock_panel_to(&mut self, panel: EditorPanel, slot: EditorDockSlot) {
-        let destination_changed = self.panel_dock(panel) != slot;
+        let workspace = self.dock_workspace_for_panel(panel);
+        self.dock_panel_to_in_workspace(panel, workspace, slot);
+    }
+
+    pub fn dock_panel_to_in_workspace(
+        &mut self,
+        panel: EditorPanel,
+        workspace: EditorWorkspace,
+        slot: EditorDockSlot,
+    ) {
+        if !panel.belongs_to_workspace(workspace) {
+            return;
+        }
+        let destination_changed = self.panel_dock_in_workspace(panel, workspace) != slot;
         let was_detached = self.detached_panels.remove(&panel);
         let changed = destination_changed || was_detached;
-        self.panel_docks.insert(panel, slot);
-        self.active_dock_tabs.insert(slot, panel);
+        match workspace {
+            EditorWorkspace::Undertow => {
+                self.undertow_panel_docks.insert(panel, slot);
+            }
+            EditorWorkspace::Edit | EditorWorkspace::KrakenUpscale => {
+                self.panel_docks.insert(panel, slot);
+            }
+        }
+        self.active_dock_tabs.insert((workspace, slot), panel);
         if changed {
             self.mark_durable_edit();
         }
@@ -2072,33 +2179,75 @@ impl EditorState {
     }
 
     pub fn active_dock_tab(&self, slot: EditorDockSlot) -> Option<EditorPanel> {
-        self.active_dock_tabs.get(&slot).copied()
+        self.active_dock_tab_in_workspace(self.workspace, slot)
+    }
+
+    pub fn active_dock_tab_in_workspace(
+        &self,
+        workspace: EditorWorkspace,
+        slot: EditorDockSlot,
+    ) -> Option<EditorPanel> {
+        self.active_dock_tabs.get(&(workspace, slot)).copied()
     }
 
     pub fn select_dock_tab(&mut self, slot: EditorDockSlot, panel: EditorPanel) {
-        if self.panel_dock(panel) == slot && !self.is_panel_detached(panel) {
-            self.active_dock_tabs.insert(slot, panel);
+        let workspace = self.workspace;
+        if panel.belongs_to_workspace(workspace)
+            && self.panel_dock_in_workspace(panel, workspace) == slot
+            && !self.is_panel_detached(panel)
+        {
+            self.active_dock_tabs.insert((workspace, slot), panel);
         }
     }
 
-    pub fn panel_is_visible_in_edit_dock(&self, panel: EditorPanel) -> bool {
-        if self.workspace != EditorWorkspace::Edit || self.is_panel_detached(panel) {
+    /// Whether this panel owns an attached dock in the active workspace.
+    ///
+    /// Native event routing uses this to avoid presenting a shared surface twice: a detached
+    /// panel is drawn only by its viewport, while its attached peer is the root-window owner.
+    pub fn panel_is_visible_in_active_workspace_dock(&self, panel: EditorPanel) -> bool {
+        if !panel.belongs_to_workspace(self.workspace) || self.is_panel_detached(panel) {
             return false;
         }
-        if !self.has_custom_panel_docks() && self.detached_panels.is_empty() {
+        if !self.has_custom_panel_docks_for(self.workspace)
+            && !EditorPanel::ALL.into_iter().any(|candidate| {
+                candidate.belongs_to_workspace(self.workspace) && self.is_panel_detached(candidate)
+            })
+        {
             return true;
         }
-        let slot = self.panel_dock(panel);
+        let slot = self.panel_dock_in_workspace(panel, self.workspace);
         let candidates = EditorPanel::ALL
             .into_iter()
             .filter(|candidate| {
-                !self.is_panel_detached(*candidate) && self.panel_dock(*candidate) == slot
+                candidate.belongs_to_workspace(self.workspace)
+                    && !self.is_panel_detached(*candidate)
+                    && self.panel_dock_in_workspace(*candidate, self.workspace) == slot
             })
             .collect::<Vec<_>>();
         self.active_dock_tab(slot)
             .filter(|active| candidates.contains(active))
             .or_else(|| candidates.first().copied())
             == Some(panel)
+    }
+
+    pub fn panel_is_visible_in_edit_dock(&self, panel: EditorPanel) -> bool {
+        self.workspace == EditorWorkspace::Edit
+            && panel.is_edit_panel()
+            && self.panel_is_visible_in_active_workspace_dock(panel)
+    }
+
+    fn dock_workspace_for_panel(&self, panel: EditorPanel) -> EditorWorkspace {
+        if matches!(
+            self.workspace,
+            EditorWorkspace::Edit | EditorWorkspace::Undertow
+        ) && panel.belongs_to_workspace(self.workspace)
+        {
+            self.workspace
+        } else if panel.is_edit_panel() {
+            EditorWorkspace::Edit
+        } else {
+            EditorWorkspace::Undertow
+        }
     }
 
     pub fn set_kraken_upscale_capability(&mut self, ready: bool, reason: impl Into<String>) {
@@ -2586,11 +2735,18 @@ impl EditorState {
                     .into_iter()
                     .filter(|panel| self.detached_panels.contains(panel))
                     .collect(),
-                panel_docks: EditorPanel::ALL
+                panel_docks: EditorPanel::EDIT
                     .into_iter()
                     .map(|panel| EditorPanelDock {
                         panel,
                         slot: self.panel_dock(panel),
+                    })
+                    .collect(),
+                undertow_panel_docks: EditorPanel::UNDERTOW
+                    .into_iter()
+                    .map(|panel| EditorPanelDock {
+                        panel,
+                        slot: self.panel_dock_in_workspace(panel, EditorWorkspace::Undertow),
                     })
                     .collect(),
             },
@@ -2674,14 +2830,49 @@ impl EditorState {
         state.panel_docks = snapshot
             .view
             .panel_docks
-            .into_iter()
+            .iter()
+            .copied()
+            .filter(|dock| dock.panel.is_edit_panel())
             .map(|dock| (dock.panel, dock.slot))
             .collect();
-        for panel in EditorPanel::ALL {
+        for panel in EditorPanel::EDIT {
             state
                 .panel_docks
                 .entry(panel)
                 .or_insert_with(|| panel.default_dock_slot());
+        }
+        state.undertow_panel_docks = snapshot
+            .view
+            .undertow_panel_docks
+            .iter()
+            .copied()
+            .filter(|dock| dock.panel.belongs_to_workspace(EditorWorkspace::Undertow))
+            .map(|dock| (dock.panel, dock.slot))
+            .collect();
+        // A short-lived pre-field build wrote the two Undertow-only panels into the legacy
+        // list. Preserve those choices, but deliberately do not import Timeline: its old Edit
+        // Bottom destination must never become the Undertow default.
+        if state.undertow_panel_docks.is_empty() {
+            state.undertow_panel_docks.extend(
+                snapshot
+                    .view
+                    .panel_docks
+                    .iter()
+                    .copied()
+                    .filter(|dock| {
+                        matches!(
+                            dock.panel,
+                            EditorPanel::UndertowTools | EditorPanel::UndertowMixer
+                        )
+                    })
+                    .map(|dock| (dock.panel, dock.slot)),
+            );
+        }
+        for panel in EditorPanel::UNDERTOW {
+            state
+                .undertow_panel_docks
+                .entry(panel)
+                .or_insert_with(|| panel.default_dock_slot_in_workspace(EditorWorkspace::Undertow));
         }
         state.selected_timeline_clip = snapshot.view.selected_timeline_clip.filter(|id| {
             state
@@ -4302,9 +4493,13 @@ impl EditorState {
             || self.track_density != TimelineTrackDensity::Normal
             || track_heights_changed;
         let panels_detached = !self.detached_panels.is_empty();
-        let panel_docks_changed = EditorPanel::ALL
+        let panel_docks_changed = EditorPanel::EDIT
             .into_iter()
             .any(|panel| self.panel_dock(panel) != panel.default_dock_slot());
+        let undertow_panel_docks_changed = EditorPanel::UNDERTOW.into_iter().any(|panel| {
+            self.panel_dock_in_workspace(panel, EditorWorkspace::Undertow)
+                != panel.default_dock_slot_in_workspace(EditorWorkspace::Undertow)
+        });
         self.media_pool_width = DEFAULT_MEDIA_POOL_WIDTH;
         self.analysis_width = DEFAULT_RIGHT_SIDEBAR_WIDTH;
         self.undertow_tools_width = 190.0;
@@ -4315,15 +4510,24 @@ impl EditorState {
         self.track_density = TimelineTrackDensity::Normal;
         self.track_heights.clear();
         self.detached_panels.clear();
-        self.panel_docks = EditorPanel::ALL
+        self.panel_docks = EditorPanel::EDIT
             .into_iter()
             .map(|panel| (panel, panel.default_dock_slot()))
+            .collect();
+        self.undertow_panel_docks = EditorPanel::UNDERTOW
+            .into_iter()
+            .map(|panel| {
+                (
+                    panel,
+                    panel.default_dock_slot_in_workspace(EditorWorkspace::Undertow),
+                )
+            })
             .collect();
         self.active_dock_tabs.clear();
         for track in &self.timeline.tracks {
             self.track_heights.insert(track.id, 64.0);
         }
-        if changed || panels_detached || panel_docks_changed {
+        if changed || panels_detached || panel_docks_changed || undertow_panel_docks_changed {
             self.mark_durable_edit();
         }
     }
@@ -5220,8 +5424,8 @@ pub fn show_editor_with_canvases(
             ui.allocate_ui_with_layout(available_body, Layout::top_down(Align::LEFT), |ui| {
                 match state.workspace {
                     EditorWorkspace::Edit => {
-                        if state.has_custom_panel_docks()
-                            || EditorPanel::ALL
+                        if state.has_custom_panel_docks_for(EditorWorkspace::Edit)
+                            || EditorPanel::EDIT
                                 .into_iter()
                                 .any(|panel| state.is_panel_detached(panel))
                         {
@@ -5263,7 +5467,15 @@ pub fn show_editor_with_canvases(
                         timeline_with_canvas(ui, state, timeline_height - 8.0, timeline_canvas);
                     }
                     EditorWorkspace::Undertow => {
-                        undertow_workspace(ui, state, available_body, timeline_canvas);
+                        if state.has_custom_panel_docks_for(EditorWorkspace::Undertow)
+                            || EditorPanel::UNDERTOW
+                                .into_iter()
+                                .any(|panel| state.is_panel_detached(panel))
+                        {
+                            custom_undertow_workspace(ui, state, available_body, timeline_canvas);
+                        } else {
+                            undertow_workspace(ui, state, available_body, timeline_canvas);
+                        }
                     }
                     EditorWorkspace::KrakenUpscale => {
                         kraken_upscale_workspace(ui, state);
@@ -5272,9 +5484,7 @@ pub fn show_editor_with_canvases(
             });
             workspace_navigation(ui, state);
         });
-    if state.workspace == EditorWorkspace::Edit {
-        show_detached_panels(ui.ctx(), state, timeline_canvas, viewer_canvas);
-    }
+    show_detached_panels(ui.ctx(), state, timeline_canvas, viewer_canvas);
     if state.show_licenses {
         egui::Window::new(t(
             state.language,
@@ -6392,7 +6602,11 @@ fn view_menu(ui: &mut Ui, state: &mut EditorState) {
         );
         ui.separator();
         ui.menu_button(menu_text(state.language, "Panels", "パネル"), |ui| {
-            for panel in EditorPanel::ALL {
+            let workspace = state.workspace;
+            for panel in EditorPanel::ALL
+                .into_iter()
+                .filter(|panel| panel.belongs_to_workspace(workspace))
+            {
                 let mut detached = state.is_panel_detached(panel);
                 if ui
                     .checkbox(&mut detached, panel.title(state.language))
@@ -6411,7 +6625,7 @@ fn view_menu(ui: &mut Ui, state: &mut EditorState) {
                         ] {
                             if ui
                                 .selectable_label(
-                                    state.panel_dock(panel) == slot,
+                                    state.panel_dock_in_workspace(panel, workspace) == slot,
                                     menu_text(state.language, en, ja),
                                 )
                                 .clicked()
@@ -6663,7 +6877,7 @@ fn custom_edit_workspace(
     timeline_canvas: &mut dyn TimelineCanvas,
     viewer_canvas: &mut dyn ViewerCanvas,
 ) {
-    let attached = EditorPanel::ALL
+    let attached = EditorPanel::EDIT
         .into_iter()
         .filter(|panel| !state.is_panel_detached(*panel))
         .collect::<Vec<_>>();
@@ -6826,6 +7040,178 @@ fn dock_region(
                     timeline_with_canvas(ui, state, ui.available_height(), timeline_canvas)
                 }
                 EditorPanel::Tools => details(ui, state),
+                EditorPanel::UndertowTools => undertow_tools_and_tracks(ui, state),
+                EditorPanel::UndertowMixer => {
+                    let focused_track = state.ensure_undertow_track();
+                    undertow_mixer(ui, state, focused_track);
+                }
+            }
+        }
+    });
+}
+
+/// Flexible Undertow layout. The same timeline/project state is passed through every region;
+/// only the native surface placement changes.
+fn custom_undertow_workspace(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    size: Vec2,
+    timeline_canvas: &mut dyn TimelineCanvas,
+) {
+    let attached = EditorPanel::UNDERTOW
+        .into_iter()
+        .filter(|panel| !state.is_panel_detached(*panel))
+        .collect::<Vec<_>>();
+    let bottom = attached
+        .iter()
+        .copied()
+        .filter(|panel| {
+            state.panel_dock_in_workspace(*panel, EditorWorkspace::Undertow)
+                == EditorDockSlot::Bottom
+        })
+        .collect::<Vec<_>>();
+    let top_slots = [
+        EditorDockSlot::Left,
+        EditorDockSlot::Center,
+        EditorDockSlot::Right,
+    ]
+    .into_iter()
+    .filter(|slot| {
+        attached
+            .iter()
+            .any(|panel| state.panel_dock_in_workspace(*panel, EditorWorkspace::Undertow) == *slot)
+    })
+    .collect::<Vec<_>>();
+    if top_slots.is_empty() && bottom.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label(t(
+                state.language,
+                "All Undertow panels are open in separate windows",
+                "すべてのアンダートウパネルは別ウィンドウで開いています",
+            ));
+        });
+        return;
+    }
+    let has_top = !top_slots.is_empty();
+    let has_bottom = !bottom.is_empty();
+    let bottom_height = if has_top && has_bottom {
+        (size.y * 0.58).clamp(180.0, (size.y - 150.0).max(180.0))
+    } else if has_bottom {
+        size.y
+    } else {
+        0.0
+    };
+    let top_height = if has_top {
+        (size.y - bottom_height).max(150.0)
+    } else {
+        0.0
+    };
+    if has_top {
+        let splitter_total = SPLITTER_THICKNESS * top_slots.len().saturating_sub(1) as f32;
+        let content_width = (size.x - splitter_total).max(1.0);
+        let slot_weight = |slot| match slot {
+            EditorDockSlot::Left => 1.0,
+            EditorDockSlot::Center => 3.0,
+            EditorDockSlot::Right => 1.2,
+            EditorDockSlot::Bottom => 0.0,
+        };
+        let total_weight = top_slots
+            .iter()
+            .map(|slot| slot_weight(*slot))
+            .sum::<f32>()
+            .max(1.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(size.x, top_height),
+            Layout::left_to_right(Align::TOP),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, slot) in top_slots.into_iter().enumerate() {
+                    if index > 0 {
+                        vertical_splitter(ui, top_height);
+                    }
+                    let panels = attached
+                        .iter()
+                        .copied()
+                        .filter(|panel| {
+                            state.panel_dock_in_workspace(*panel, EditorWorkspace::Undertow) == slot
+                        })
+                        .collect::<Vec<_>>();
+                    undertow_dock_region(
+                        ui,
+                        state,
+                        slot,
+                        panels,
+                        Vec2::new(content_width * slot_weight(slot) / total_weight, top_height),
+                        timeline_canvas,
+                    );
+                }
+            },
+        );
+    }
+    if has_bottom {
+        undertow_dock_region(
+            ui,
+            state,
+            EditorDockSlot::Bottom,
+            bottom,
+            Vec2::new(size.x, bottom_height),
+            timeline_canvas,
+        );
+    }
+}
+
+fn undertow_dock_region(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    slot: EditorDockSlot,
+    panels: Vec<EditorPanel>,
+    size: Vec2,
+    timeline_canvas: &mut dyn TimelineCanvas,
+) {
+    ui.allocate_ui_with_layout(size, Layout::top_down(Align::LEFT), |ui| {
+        panel_frame(ui);
+        if panels.len() > 1 {
+            ui.horizontal(|ui| {
+                for panel in &panels {
+                    if ui
+                        .selectable_label(
+                            state.active_dock_tab(slot) == Some(*panel),
+                            panel.title(state.language),
+                        )
+                        .clicked()
+                    {
+                        state.select_dock_tab(slot, *panel);
+                    }
+                }
+            });
+            ui.separator();
+        }
+        let selected = state
+            .active_dock_tab(slot)
+            .filter(|panel| panels.contains(panel))
+            .or_else(|| panels.first().copied());
+        if let Some(panel) = selected {
+            state.select_dock_tab(slot, panel);
+            match panel {
+                EditorPanel::UndertowTools => undertow_tools_and_tracks(ui, state),
+                EditorPanel::UndertowMixer => {
+                    let focused_track = state.ensure_undertow_track();
+                    undertow_mixer(ui, state, focused_track);
+                }
+                EditorPanel::Timeline => {
+                    let focused_track = state.ensure_undertow_track();
+                    timeline_with_canvas_presentation(
+                        ui,
+                        state,
+                        ui.available_height(),
+                        timeline_canvas,
+                        TimelinePresentation {
+                            show_tool_row: false,
+                            audio_focus: focused_track,
+                        },
+                    );
+                }
+                _ => unreachable!("only Undertow panels reach an Undertow dock"),
             }
         }
     });
@@ -6917,6 +7303,7 @@ fn show_detached_panels(
         if !state.is_panel_detached(panel) {
             continue;
         }
+        let dock_workspace = state.dock_workspace_for_panel(panel);
         let title = panel.title(state.language).to_owned();
         let builder = ViewportBuilder::default()
             .with_title(title.clone())
@@ -6949,12 +7336,19 @@ fn show_detached_panels(
                                         ] {
                                             if ui
                                                 .selectable_label(
-                                                    state.panel_dock(panel) == slot,
+                                                    state.panel_dock_in_workspace(
+                                                        panel,
+                                                        dock_workspace,
+                                                    ) == slot,
                                                     menu_text(state.language, en, ja),
                                                 )
                                                 .clicked()
                                             {
-                                                state.dock_panel_to(panel, slot);
+                                                state.dock_panel_to_in_workspace(
+                                                    panel,
+                                                    dock_workspace,
+                                                    slot,
+                                                );
                                                 dock = true;
                                                 ui.close();
                                             }
@@ -6967,13 +7361,29 @@ fn show_detached_panels(
                         match panel {
                             EditorPanel::MediaPool => media_pool(ui, state),
                             EditorPanel::Viewer => viewer_with_canvas(ui, state, viewer_canvas),
-                            EditorPanel::Timeline => timeline_with_canvas(
-                                ui,
-                                state,
-                                ui.available_height(),
-                                timeline_canvas,
-                            ),
+                            EditorPanel::Timeline => {
+                                let presentation = if state.workspace == EditorWorkspace::Undertow {
+                                    TimelinePresentation {
+                                        show_tool_row: false,
+                                        audio_focus: state.ensure_undertow_track(),
+                                    }
+                                } else {
+                                    TimelinePresentation::default()
+                                };
+                                timeline_with_canvas_presentation(
+                                    ui,
+                                    state,
+                                    ui.available_height(),
+                                    timeline_canvas,
+                                    presentation,
+                                );
+                            }
                             EditorPanel::Tools => details(ui, state),
+                            EditorPanel::UndertowTools => undertow_tools_and_tracks(ui, state),
+                            EditorPanel::UndertowMixer => {
+                                let focused_track = state.ensure_undertow_track();
+                                undertow_mixer(ui, state, focused_track);
+                            }
                         }
                     });
                 close_requested || dock
@@ -25185,11 +25595,19 @@ mod tests {
             EditorPanel::MediaPool.viewport_id(),
             EditorPanel::Viewer.viewport_id()
         );
+        assert_ne!(
+            EditorPanel::UndertowTools.viewport_id(),
+            EditorPanel::UndertowMixer.viewport_id()
+        );
         assert_eq!(
             EditorPanel::Timeline.title(Language::Japanese),
             "タイムライン"
         );
         assert_eq!(EditorPanel::Tools.default_size(), Vec2::new(300.0, 720.0));
+        assert_eq!(
+            EditorPanel::UndertowMixer.default_size(),
+            Vec2::new(420.0, 720.0)
+        );
     }
 
     #[test]
@@ -25217,6 +25635,132 @@ mod tests {
             restored.panel_dock(EditorPanel::Timeline),
             EditorDockSlot::Bottom
         );
+    }
+
+    #[test]
+    fn undertow_panels_detach_reattach_and_restore_without_affecting_edit_docks() {
+        let mut editor = EditorState::new(Language::English, "Undertow docks");
+        editor.set_workspace(EditorWorkspace::Undertow);
+        assert!(editor.panel_is_visible_in_active_workspace_dock(EditorPanel::Timeline));
+        editor.toggle_panel_detached(EditorPanel::UndertowTools);
+        editor.dock_panel_to(EditorPanel::UndertowMixer, EditorDockSlot::Center);
+        assert!(editor.is_panel_detached(EditorPanel::UndertowTools));
+        assert_eq!(
+            editor.panel_dock_in_workspace(EditorPanel::UndertowMixer, EditorWorkspace::Undertow),
+            EditorDockSlot::Center
+        );
+        assert_eq!(editor.panel_dock(EditorPanel::Tools), EditorDockSlot::Right);
+        editor.toggle_panel_detached(EditorPanel::Timeline);
+        assert!(!editor.panel_is_visible_in_active_workspace_dock(EditorPanel::Timeline));
+
+        let restored =
+            EditorState::restore(Language::English, "Undertow docks", editor.snapshot()).unwrap();
+        assert!(restored.is_panel_detached(EditorPanel::UndertowTools));
+        assert_eq!(
+            restored.panel_dock_in_workspace(EditorPanel::UndertowMixer, EditorWorkspace::Undertow),
+            EditorDockSlot::Center
+        );
+    }
+
+    #[test]
+    fn undertow_timeline_dock_is_independent_from_legacy_edit_dock() {
+        let mut editor = EditorState::new(Language::English, "Independent timeline docks");
+        assert_eq!(
+            editor.panel_dock(EditorPanel::Timeline),
+            EditorDockSlot::Bottom
+        );
+        editor.set_workspace(EditorWorkspace::Undertow);
+        assert_eq!(
+            editor.panel_dock_in_workspace(EditorPanel::Timeline, EditorWorkspace::Undertow),
+            EditorDockSlot::Center
+        );
+        editor.dock_panel_to(EditorPanel::Timeline, EditorDockSlot::Right);
+        assert_eq!(
+            editor.panel_dock_in_workspace(EditorPanel::Timeline, EditorWorkspace::Undertow),
+            EditorDockSlot::Right
+        );
+        assert_eq!(
+            editor.panel_dock(EditorPanel::Timeline),
+            EditorDockSlot::Bottom
+        );
+
+        let restored = EditorState::restore(
+            Language::English,
+            "Independent timeline docks",
+            editor.snapshot(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.panel_dock(EditorPanel::Timeline),
+            EditorDockSlot::Bottom
+        );
+        assert_eq!(
+            restored.panel_dock_in_workspace(EditorPanel::Timeline, EditorWorkspace::Undertow),
+            EditorDockSlot::Right
+        );
+    }
+
+    #[test]
+    fn legacy_panel_docks_keep_edit_timeline_bottom_but_default_undertow_center() {
+        let editor = EditorState::new(Language::English, "Legacy workspace docks");
+        let mut snapshot = editor.snapshot();
+        snapshot.view.undertow_panel_docks.clear();
+        snapshot.view.panel_docks = vec![EditorPanelDock {
+            panel: EditorPanel::Timeline,
+            slot: EditorDockSlot::Bottom,
+        }];
+
+        let restored =
+            EditorState::restore(Language::English, "Legacy workspace docks", snapshot).unwrap();
+        assert_eq!(
+            restored.panel_dock(EditorPanel::Timeline),
+            EditorDockSlot::Bottom
+        );
+        assert_eq!(
+            restored.panel_dock_in_workspace(EditorPanel::Timeline, EditorWorkspace::Undertow),
+            EditorDockSlot::Center
+        );
+    }
+
+    #[test]
+    fn active_dock_tabs_are_scoped_to_their_workspace() {
+        let mut editor = EditorState::new(Language::English, "Scoped dock tabs");
+        editor.dock_panel_to(EditorPanel::Viewer, EditorDockSlot::Bottom);
+        editor.dock_panel_to(EditorPanel::Timeline, EditorDockSlot::Bottom);
+        editor.select_dock_tab(EditorDockSlot::Bottom, EditorPanel::Viewer);
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Bottom),
+            Some(EditorPanel::Viewer)
+        );
+
+        editor.set_workspace(EditorWorkspace::Undertow);
+        editor.dock_panel_to(EditorPanel::UndertowTools, EditorDockSlot::Right);
+        editor.dock_panel_to(EditorPanel::UndertowMixer, EditorDockSlot::Right);
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Right),
+            Some(EditorPanel::UndertowMixer)
+        );
+        editor.set_workspace(EditorWorkspace::Edit);
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Bottom),
+            Some(EditorPanel::Viewer)
+        );
+    }
+
+    #[test]
+    fn undertow_default_minus_detached_panel_keeps_center_timeline_and_columns() {
+        let mut editor = EditorState::new(Language::English, "Undertow default columns");
+        editor.set_workspace(EditorWorkspace::Undertow);
+        editor.toggle_panel_detached(EditorPanel::UndertowTools);
+        assert_eq!(
+            editor.panel_dock_in_workspace(EditorPanel::Timeline, EditorWorkspace::Undertow),
+            EditorDockSlot::Center
+        );
+        assert_eq!(
+            editor.panel_dock_in_workspace(EditorPanel::UndertowMixer, EditorWorkspace::Undertow),
+            EditorDockSlot::Right
+        );
+        assert!(editor.panel_is_visible_in_active_workspace_dock(EditorPanel::Timeline));
     }
 
     #[test]
@@ -25303,7 +25847,7 @@ mod tests {
     }
 
     #[test]
-    fn undertow_does_not_render_detached_edit_panels() {
+    fn undertow_keeps_detached_edit_panels_visible_and_renders_shared_timeline_once() {
         let context = egui::Context::default();
         let mut editor = EditorState::new(Language::English, "Undertow render ownership");
         editor.toggle_panel_detached(EditorPanel::Timeline);
@@ -25321,6 +25865,32 @@ mod tests {
         );
 
         assert_eq!(timeline.begins, 1);
+        assert_eq!(viewer.begins, 1);
+    }
+
+    #[test]
+    fn undertow_custom_docks_render_the_shared_audio_timeline_once() {
+        let context = egui::Context::default();
+        let mut editor = EditorState::new(Language::English, "Undertow custom docks");
+        editor.set_workspace(EditorWorkspace::Undertow);
+        editor.dock_panel_to(EditorPanel::UndertowTools, EditorDockSlot::Right);
+        editor.dock_panel_to(EditorPanel::UndertowMixer, EditorDockSlot::Right);
+        let mut timeline = RecordingTimelineCanvas::default();
+        let mut viewer = RecordingViewerCanvas::default();
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_600.0, 1_000.0))),
+                ..Default::default()
+            },
+            |ui| show_editor_with_canvases(ui, &mut editor, &mut timeline, &mut viewer),
+        );
+
+        assert_eq!(timeline.begins, 1);
         assert_eq!(viewer.begins, 0);
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Right),
+            Some(EditorPanel::UndertowMixer)
+        );
     }
 }
