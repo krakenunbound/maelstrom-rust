@@ -93,6 +93,10 @@ Last updated: 2026-09-04
   the integrated two-layer full-1080p performance prerequisite. App Auto scheduling and integrated
   composition are now separately qualified at Full 640x360 to Half 320x180; presentation, DWM and
   physical scanout remain unproven. See `docs/performance-reports.md`.
+- [x] Add failed-run evidence support to the headless cross-adapter compositor harness. Runner,
+  preflight, Cargo, and report-validation failures atomically publish the distinct schema-1
+  envelope while successful schema-3 evidence remains unchanged. The non-launching fixture proves
+  collision-safe publication only; it adds no runtime or hardware qualification evidence.
 - [x] Renew the clean-HEAD Phase 0 timeline-foundation evidence at `4f4fd5e`. Ten 50,000-clip
   history trials passed at 0.2565/1.2552 ms press/edit-release p95; wide/detail/playhead CPU p95 was
   0.4885/0.3386/0.4274 ms; real H.264 plus 20,002 bars was 0.5108 ms p95. The ignored report hash is

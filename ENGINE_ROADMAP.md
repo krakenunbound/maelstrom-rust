@@ -738,6 +738,10 @@ Exit gate:
       deterministic RGBA readback on RTX 3090. The final run measured 0.0904 ms CPU encode p95 and
       0.2765 ms GPU pass p95 against the 33.333 ms frame budget. This is offscreen compositor evidence, not app
       presentation, DWM or physical scanout. See `docs/performance-reports.md`.
+- [x] Headless cross-adapter GPU failure reporting is contract-covered. Failed runner, preflight,
+      Cargo, and report-validation paths now atomically publish a schema-1 envelope without
+      altering the schema-3 success contract. The deterministic non-launching fixture is harness
+      support only; no additional runtime, adapter, or scanout evidence was collected.
 - [x] At least two layers operate on the integrated reference profile using Auto preview quality.
       The 2026-08-31 schema-1 headless app qualification starts two independent real 1920x1080
       sources with user-selected Auto resolved to Full 640x360, accepts current decoder events for

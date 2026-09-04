@@ -178,9 +178,15 @@ the unchanged CPU and 30 fps GPU budgets. The file is regenerated on every run, 
 timing-dependent SHA-256 and individual timing samples are intentionally not stable documentation
 identifiers.
 
-The schema-3 file is retained success evidence only; adapter discovery, device creation, or GPU
-execution failures can terminate before publication and remain visible in the Cargo diagnostic
-output. Machine-readable failed-run evidence is still an open qualification-harness improvement.
+The schema-3 file remains the success payload. On runner/preflight, Cargo, or schema-3 validation
+failure, the runner atomically replaces the requested output with a distinct schema-1 failed-run
+envelope scoped to `headless_cross_adapter_viewer_compositor_qualification`. It keeps unavailable
+machine/adapter/backend/driver fields null, declares both presentation observations false, and
+contains a bounded primary failure. `-ValidateOnly` performs only path, dependency, and contract
+checks without changing evidence. The test-only paired
+`-ValidateOnly -FailureReportContractFixture` seam validates failed-envelope publication, including
+a colliding sibling `.tmp` path; it creates no Cargo, GPU, FFmpeg, or GUI activity. This is harness
+support only, not new runtime or hardware evidence.
 
 ## Phase 2 integrated Auto-preview qualification
 

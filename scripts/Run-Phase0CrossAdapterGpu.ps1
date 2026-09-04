@@ -1,13 +1,73 @@
 #requires -Version 7.0
 [CmdletBinding()]
 param(
-    [string]$ReportPath
+    [string]$ReportPath,
+    [switch]$ValidateOnly,
+    # Test-only, non-launching publication seam. It is rejected unless paired with ValidateOnly.
+    [switch]$FailureReportContractFixture
 )
 
 $ErrorActionPreference = 'Stop'
 
 function Test-AbsolutePath([string]$Path) {
     [IO.Path]::IsPathRooted($Path) -and [string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-BoundedFailureMessage($ErrorRecord) {
+    $message = [string]$ErrorRecord.Exception.Message
+    if ($message.Length -gt 512) { return $message.Substring(0, 512) }
+    return $message
+}
+
+function Write-AtomicUtf8File {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Contents)
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    $temporary = Join-Path $directory ('.{0}.{1}.{2}.tmp' -f [IO.Path]::GetFileName($Path), $PID, [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($temporary, $Contents, [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Path, $null)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Publish-FailedQualificationEnvelope {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$ErrorRecord,
+        [Parameter(Mandatory = $true)][string]$Component,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        $RequestedDeviceType,
+        [Nullable[int]]$ProcessExitCode,
+        $SourceRevision
+    )
+    New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($Path)) | Out-Null
+    $envelope = [ordered]@{
+        schema_version = 1
+        status = 'failed'
+        scope = 'headless_cross_adapter_viewer_compositor_qualification'
+        source_revision = $SourceRevision
+        report_path = $Path
+        available_adapter_inventory = $null
+        machine = $null
+        renderer_backend = $null
+        renderer_driver = $null
+        physical_scanout_observed = $false
+        app_auto_preview_observed = $false
+        failure = [ordered]@{
+            component = $Component
+            stage = $Stage
+            error_type = $ErrorRecord.Exception.GetType().FullName
+            requested_device_type = $RequestedDeviceType
+            process_exit_code = $ProcessExitCode
+            message = Get-BoundedFailureMessage $ErrorRecord
+        }
+    }
+    Write-AtomicUtf8File -Path $Path -Contents (($envelope | ConvertTo-Json -Depth 4) + "`n")
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -25,6 +85,26 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedReportPath), $art
     throw "Report output must be a JSON file directly inside the ignored artifact directory: $artifactRoot"
 }
 
+$sourceRevision = $null
+try {
+    $revisionCandidate = (& git.exe -C $repoRoot rev-parse --verify HEAD 2>$null | Select-Object -First 1)
+    if ($revisionCandidate -match '^[0-9a-f]{40}$') { $sourceRevision = [string]$revisionCandidate }
+} catch {}
+$failureComponent = 'preflight'
+$failureStage = 'dependencies'
+$requestedDeviceType = $null
+$processExitCode = $null
+try {
+if ($FailureReportContractFixture) {
+    if (-not $ValidateOnly) {
+        $failureComponent = 'runner'
+        $failureStage = 'fixture_contract'
+        throw 'FailureReportContractFixture is permitted only with -ValidateOnly.'
+    }
+    $failureComponent = 'renderer'
+    $failureStage = 'device_creation'
+    throw 'Deterministic test fixture: renderer device creation failed before adapter inventory was available.'
+}
 $ffmpegRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.deps\ffmpeg-project-8.1'))
 $ffmpegBin = Join-Path $ffmpegRoot 'bin'
 $libclangCandidates = @(
@@ -50,6 +130,11 @@ foreach ($required in @(
 }
 if (-not (Test-AbsolutePath $cargo)) { throw 'Cargo must be an absolute path.' }
 
+if ($ValidateOnly) {
+    Write-Host "Phase 0 cross-adapter compositor qualification contract: PASS ($resolvedReportPath)"
+    return
+}
+
 $savedPath = $env:PATH
 $savedFfmpeg = $env:FFMPEG_DIR
 $savedLibclang = $env:LIBCLANG_PATH
@@ -57,21 +142,37 @@ $savedReport = $env:MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT
 $repoLocationPushed = $false
 try {
     New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-    Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
+    $failureComponent = 'runner'
+    $failureStage = 'report_output_preparation'
+    $reportHashBefore = if (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf) {
+        (Get-FileHash -LiteralPath $resolvedReportPath -Algorithm SHA256).Hash
+    } else { $null }
     $env:FFMPEG_DIR = $ffmpegRoot
     $env:LIBCLANG_PATH = $libclangRoot
     $env:PATH = $ffmpegBin + [IO.Path]::PathSeparator + $libclangRoot + [IO.Path]::PathSeparator + $savedPath
     $env:MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT = $resolvedReportPath
     Push-Location -LiteralPath $repoRoot
     $repoLocationPushed = $true
+    $failureComponent = 'cargo'
+    $failureStage = 'qualification_test'
     & $cargo test --release -p nle-render viewer_compositor::tests::phase0_cross_adapter_viewer_compositor_qualification -- --ignored --exact --test-threads=1
     $testExitCode = $LASTEXITCODE
+    $processExitCode = [int]$testExitCode
+    if ($testExitCode -ne 0) {
+        throw "Cross-adapter qualification process exited with code $testExitCode."
+    }
 
+    $failureComponent = 'report_validation'
+    $failureStage = 'schema3_success_payload'
     if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
         throw "Cross-adapter qualification exited with code $testExitCode without writing its report. Both DX12 IntegratedGpu and DiscreteGpu adapters are required."
     }
+    if ($testExitCode -eq 0 -and $null -ne $reportHashBefore -and
+        (Get-FileHash -LiteralPath $resolvedReportPath -Algorithm SHA256).Hash -eq $reportHashBefore) {
+        throw 'Cross-adapter qualification exited successfully without replacing the prior report.'
+    }
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw | ConvertFrom-Json
-    if ($testExitCode -ne 0 -or $report.schema_version -ne 3 -or $report.status -ne 'passed' -or
+    if ($report.schema_version -ne 3 -or $report.status -ne 'passed' -or
         $report.scope -ne 'headless_transformed_multilayer_viewer_compositor_with_post_measurement_state_scenarios' -or $report.physical_scanout_observed -ne $false -or
         $report.app_auto_preview_observed -ne $false -or $null -eq $report.machine -or $null -eq $report.workload -or
         @($report.adapters).Count -ne 2) {
@@ -232,4 +333,13 @@ finally {
     if ($null -eq $savedFfmpeg) { Remove-Item Env:FFMPEG_DIR -ErrorAction SilentlyContinue } else { $env:FFMPEG_DIR = $savedFfmpeg }
     if ($null -eq $savedLibclang) { Remove-Item Env:LIBCLANG_PATH -ErrorAction SilentlyContinue } else { $env:LIBCLANG_PATH = $savedLibclang }
     if ($null -eq $savedReport) { Remove-Item Env:MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT -ErrorAction SilentlyContinue } else { $env:MAELSTROM_PHASE0_CROSS_ADAPTER_GPU_REPORT = $savedReport }
+}
+} catch {
+    $operationError = $_
+    try {
+        Publish-FailedQualificationEnvelope -Path $resolvedReportPath -ErrorRecord $operationError -Component $failureComponent -Stage $failureStage -RequestedDeviceType $requestedDeviceType -ProcessExitCode $processExitCode -SourceRevision $sourceRevision
+    } catch {
+        Write-Warning "Could not publish Phase 0 cross-adapter failure envelope: $($_.Exception.Message)"
+    }
+    throw $operationError
 }
