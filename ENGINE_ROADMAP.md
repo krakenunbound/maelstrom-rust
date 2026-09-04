@@ -181,6 +181,12 @@ Build the evidence harness before adding engine complexity.
       cancellation suppressions, eight stale prior-generation rejections, eight fresh
       presentations, and zero final ownership/errors. The schema-2 report SHA-256 is
       `285E2523B8CF07F37256EFC13481DA5B5A4C31C708ECF246A03DFF57B701B895`.
+      The later 2026-09-04 clean-commit requalification at
+      `d2b35a5ca3e6518133cf5694ae623e3415c7b917` passed 35 complete matrices over
+      610.336 measured seconds: 245 scenario executions, 1,435 declared work iterations,
+      35 unique child-report hashes, identical clean start/end commits, and no invocation or
+      report-read failures. Its schema-2 report SHA-256 is
+      `DEE34BEA3B593237B0CF2CBC19EBA576F68F63C5924AFB4E21981EE23926ED73`.
       An opt-in packaged disruption harness is installed for eight scrub updates/eight snapshot
       restores with fresh frames, intentional offline/error/recovery, Full-quality decoded-frame
       cache eviction, and cancelled-export cleanup. Its non-launching contract proves exact

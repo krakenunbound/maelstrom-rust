@@ -156,3 +156,13 @@ schema-2 report SHA-256 is
 `285E2523B8CF07F37256EFC13481DA5B5A4C31C708ECF246A03DFF57B701B895`.
 It renews headless Software decoder and `h264_mf` encoder evidence only; GUI, live audio,
 packaged playback, renderer GPU, physical scanout, and cross-hardware qualification remain open.
+
+The later 2026-09-04 requalification embeds identical clean start/end source commit
+`d2b35a5ca3e6518133cf5694ae623e3415c7b917`. It passed for 610.336 measured matrix seconds,
+excluding 1.426 seconds of setup, with 35 complete matrix runs, 245 scenario executions, and
+1,435 declared work iterations. All seven scenarios passed all 35 runs, all 35 child-report hashes
+were unique, and no invocation or report-read failure occurred. The authoritative schema-2 report
+SHA-256 is `DEE34BEA3B593237B0CF2CBC19EBA576F68F63C5924AFB4E21981EE23926ED73`.
+This renews the headless Phase 0 matrix after the shifted Matroska-duration and shared schema-9
+validator checkpoints. It does not add GUI, live-audio, packaged-playback, renderer-GPU, physical
+scanout, or cross-hardware evidence.

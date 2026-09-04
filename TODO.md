@@ -208,6 +208,12 @@ Last updated: 2026-09-04
   fresh presentations, and zero final ownership/errors. This is headless Software/`h264_mf`
   evidence only; GUI, live audio, packaged playback, renderer GPU, scanout, and cross-hardware
   gates remain open. See `docs/phase0-scenarios.md`.
+- [x] Renew the full 600-second Phase 0 seven-scenario soak after the shifted Matroska-duration and
+  shared schema-9 validator checkpoints. At clean commit `d2b35a5`, 35 complete matrices passed
+  over 610.336 measured seconds: 245 scenario executions and 1,435 declared work iterations with
+  35 unique child-report hashes, stable clean source provenance, and no invocation/report-read
+  failures. This remains headless evidence; GUI, live audio, packaged playback, renderer GPU,
+  physical scanout, and cross-hardware gates remain open. See `docs/phase0-scenarios.md`.
 - [x] Prefer completed monitor sessions during demand-driven capacity reclamation. Source groups
   remain whole and priority-protected; within equal visual priority the least-recently-requested
   completed group is reclaimed before the established active-work fallback. A real two-permit,
