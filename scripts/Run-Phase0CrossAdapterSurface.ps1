@@ -1,11 +1,14 @@
 #requires -Version 7.0
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ExecutablePath,
+    [string]$LauncherPath = 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat',
     [string]$ReportPath,
     [ValidateRange(30, 300)]
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 90,
+    [switch]$ValidateOnly,
+    # Test-only report-publication seam. It cannot supply a package path and is rejected
+    # outside non-launching validation, so production runs cannot target arbitrary executables.
+    [switch]$FailureReportContractFixture
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,6 +95,27 @@ function Stop-TrackedProcessTree {
     try { Wait-Process -Id $Process.Id -ErrorAction SilentlyContinue } catch {}
 }
 
+function Find-OwnedPackagedEditorProcess {
+    param(
+        [Parameter(Mandatory = $true)][int]$LauncherProcessId,
+        [Parameter(Mandatory = $true)][string]$PackagedExecutable
+    )
+    # The batch launcher may insert cmd.exe/start.exe. Walk only this fresh tree, never
+    # process-name search or a same-named editor that was already running.
+    $pending = [System.Collections.Generic.Queue[int]]::new()
+    $pending.Enqueue($LauncherProcessId)
+    while ($pending.Count -gt 0) {
+        $parentId = $pending.Dequeue()
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parentId" -ErrorAction SilentlyContinue)) {
+            if ([string]::Equals([string]$child.ExecutablePath, $PackagedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+                return Get-Process -Id ([int]$child.ProcessId) -ErrorAction SilentlyContinue
+            }
+            $pending.Enqueue([int]$child.ProcessId)
+        }
+    }
+    return $null
+}
+
 function Remove-GeneratedFile {
     param([Parameter(Mandatory = $true)][string]$Path)
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
@@ -144,10 +168,16 @@ function Get-ObservedSurfaceEvidence($Surface) {
     }
 }
 
-if (-not [IO.Path]::IsPathRooted($ExecutablePath)) {
-    throw 'ExecutablePath must be the full absolute path to packaged Maelstrom.exe.'
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$approvedLauncherPath = 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
+if (-not [IO.Path]::IsPathRooted($LauncherPath)) {
+    throw "LauncherPath must be the exact full path $approvedLauncherPath."
 }
-$resolvedExecutable = [IO.Path]::GetFullPath($ExecutablePath)
+$resolvedLauncher = [IO.Path]::GetFullPath($LauncherPath)
+if (-not [string]::Equals($resolvedLauncher, $approvedLauncherPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "The only permitted launcher is $approvedLauncherPath."
+}
+$resolvedExecutable = [IO.Path]::GetFullPath((Join-Path $repoRoot 'dist\Maelstrom-Windows-x64\Maelstrom.exe'))
 $packageDirectory = [IO.Path]::GetDirectoryName($resolvedExecutable)
 $ffmpeg = Join-Path $packageDirectory 'ffmpeg.exe'
 $ffprobe = Join-Path $packageDirectory 'ffprobe.exe'
@@ -158,7 +188,6 @@ $requiredRuntimes = @(
 )
 $requiredFiles = @($ffmpeg, $ffprobe) + @($requiredRuntimes | ForEach-Object { Join-Path $packageDirectory $_ })
 
-$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-cross-adapter-surface'))
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path $artifactRoot 'phase0-cross-adapter-surface.json'
@@ -173,12 +202,41 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedReportPath), $art
     throw "Report output must be a JSON file directly inside the ignored artifact directory: $artifactRoot"
 }
 
+if ($ValidateOnly -and -not $FailureReportContractFixture) {
+    # This branch intentionally precedes artifact-directory creation, locking, FFmpeg, and
+    # environment changes: validation must leave existing qualification evidence untouched.
+    if (-not (Test-Path -LiteralPath $resolvedLauncher -PathType Leaf)) {
+        throw "Required Maelstrom launcher does not exist: $resolvedLauncher"
+    }
+    $validationLauncherHash = (Get-FileHash -LiteralPath $resolvedLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf) -or
+        [IO.Path]::GetFileName($resolvedExecutable) -ine 'Maelstrom.exe') {
+        throw "Packaged Maelstrom executable is missing or invalid: $resolvedExecutable"
+    }
+    foreach ($required in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Packaged runtime is incomplete: $required"
+        }
+    }
+    [pscustomobject]@{
+        validation = 'passed'
+        launcher_path = $resolvedLauncher
+        launcher_sha256 = $validationLauncherHash
+        executable_path = $resolvedExecutable
+        executable_sha256 = (Get-FileHash -LiteralPath $resolvedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+        ffmpeg_path = $ffmpeg
+        ffprobe_path = $ffprobe
+        launch_performed = $false
+    }
+    return
+}
+
 $savedEnvironment = @{}
 foreach ($name in @(
     'PATH', 'MAELSTROM_SMOKE_EDITOR', 'MAELSTROM_STARTUP_REPORT',
     'MAELSTROM_SURFACE_SUBMISSION_REPORT', 'MAELSTROM_MEDIA_ACCEPTANCE_PATH',
     'MAELSTROM_MEDIA_ACCEPTANCE_REPORT', 'MAELSTROM_MEDIA_ACCEPTANCE_EXPORT_PATH',
-    'MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS'
+    'MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS', 'MAELSTROM_LAUNCHER_WAIT'
 )) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
@@ -196,6 +254,8 @@ $currentArtifactPath = $null
 $currentProcessExitCode = $null
 $currentAffectedCodecs = $null
 $latestSurface = $null
+$launcherProcess = $null
+$launcherSha256 = $null
 $operationError = $null
 $publicationError = $null
 try {
@@ -209,6 +269,10 @@ try {
 
     $failureComponent = 'package'
     $failureStage = 'runtime_closure'
+    if (-not (Test-Path -LiteralPath $resolvedLauncher -PathType Leaf)) {
+        throw "Required Maelstrom launcher does not exist: $resolvedLauncher"
+    }
+    $launcherSha256 = (Get-FileHash -LiteralPath $resolvedLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
     if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf) -or
         [IO.Path]::GetFileName($resolvedExecutable) -ine 'Maelstrom.exe') {
         throw "Packaged Maelstrom executable is missing or invalid: $resolvedExecutable"
@@ -219,7 +283,12 @@ try {
             throw "Packaged runtime is incomplete: $required"
         }
     }
-
+    if ($FailureReportContractFixture) {
+        if (-not $ValidateOnly) {
+            throw 'FailureReportContractFixture is permitted only with -ValidateOnly.'
+        }
+        throw 'Validation fixture simulated an incomplete packaged runtime closure.'
+    }
     Remove-Item -LiteralPath $resolvedReportPath -Force -ErrorAction SilentlyContinue
     $failureComponent = 'package'
     $failureStage = 'runtime_load'
@@ -264,13 +333,26 @@ try {
         $env:MAELSTROM_MEDIA_ACCEPTANCE_REPORT = $mediaReportPath
         $env:MAELSTROM_MEDIA_ACCEPTANCE_EXPORT_PATH = $exportPath
         $env:MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS = $adapterClass
+        $env:MAELSTROM_LAUNCHER_WAIT = '1'
         $process = $null
         try {
             $failureComponent = 'renderer'
             $failureStage = 'startup_surface'
             $currentArtifactPath = $startupPath
-            $process = Start-Process -FilePath $resolvedExecutable -WorkingDirectory $packageDirectory -WindowStyle Normal -PassThru
+            $launcherProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', ('call "{0}"' -f $resolvedLauncher)) -WorkingDirectory $repoRoot -WindowStyle Normal -PassThru
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            while ($null -eq $process) {
+                $process = Find-OwnedPackagedEditorProcess -LauncherProcessId $launcherProcess.Id -PackagedExecutable $resolvedExecutable
+                if ($null -ne $process) { break }
+                $launcherProcess.Refresh()
+                if ($launcherProcess.HasExited) {
+                    throw "Maelstrom launcher exited before its packaged editor child was observed (code $($launcherProcess.ExitCode))."
+                }
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw 'Maelstrom launcher did not start the packaged editor within the bounded startup allowance.'
+                }
+                Start-Sleep -Milliseconds 100
+            }
             while ((-not (Test-Path -LiteralPath $startupPath -PathType Leaf) -or
                 -not (Test-Path -LiteralPath $surfacePath -PathType Leaf) -or
                 -not (Test-Path -LiteralPath $mediaReportPath -PathType Leaf)) -and
@@ -428,7 +510,9 @@ try {
                     if ($process.HasExited) { $currentProcessExitCode = [int]$process.ExitCode }
                 } catch {}
             }
-            Stop-TrackedProcessTree $process
+            # Clean only the tracked launcher root tree, including its exact editor child.
+            Stop-TrackedProcessTree $launcherProcess
+            $launcherProcess = $null
             Remove-GeneratedFile -Path $exportPath
         }
     }
@@ -440,7 +524,7 @@ try {
 } finally {
     $cleanupError = $null
     try {
-        Remove-GeneratedFile -Path $mediaPath
+        if (-not $ValidateOnly) { Remove-GeneratedFile -Path $mediaPath }
     } catch {
         $cleanupError = $_
     }
@@ -520,6 +604,8 @@ try {
                 schema_version = 2
                 status = $qualificationStatus
                 scope = 'packaged_editor_full_surface_schema9'
+                launcher_path = $resolvedLauncher
+                launcher_sha256 = $launcherSha256
                 executable_path = $resolvedExecutable
                 executable_sha256 = $executableHash
                 physical_scanout_observed = $false

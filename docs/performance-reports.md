@@ -223,7 +223,7 @@ physical scanout, or end-to-end display latency.
 ## Phase 0 cross-adapter full surface qualification
 
 The opt-in full-surface runner complements the headless compositor proof. It launches the exact
-packaged editor path once on a compatible DX12 `IntegratedGpu` and once on a compatible DX12
+packaged editor once on a compatible DX12 `IntegratedGpu` and once on a compatible DX12
 `DiscreteGpu`, using the ordinary window surface, media import, native viewer upload, audio
 callback, and cancelled Quick Export acceptance path. Each run must produce a complete
 schema-version 9 report with exercised decoder, viewer, GPU, audio, and runtime-diagnostic fields
@@ -232,16 +232,21 @@ unchanged; the adapter-class override exists only through the explicit
 `MAELSTROM_PHASE0_SURFACE_ADAPTER_CLASS` qualification seam and fails rather than falling back to a
 different adapter type.
 
-Run it only against the full absolute packaged path:
+Run it only through the exact project launcher:
 
 ```powershell
 & 'H:\Maelstrom Rust\scripts\Run-Phase0CrossAdapterSurface.ps1' `
-  -ExecutablePath 'H:\Maelstrom Rust\dist\Maelstrom-Windows-x64\Maelstrom.exe'
+  -LauncherPath 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
 ```
 
 The ignored `artifacts/phase0-cross-adapter-surface` directory retains the most recent surface
 reports, startup reports, media-acceptance reports, and a schema-version 2 wrapper containing the
-exact executable hash plus every completed child-report hash. Surface schema 9 retains the nested
+exact launcher and derived executable hashes plus every completed child-report hash. The runner
+derives the package executable only for runtime/identity checks, starts the batch launcher through
+`ComSpec /d /c call` with `MAELSTROM_LAUNCHER_WAIT=1`, finds only the exact packaged editor child
+inside that fresh launcher PID tree, and terminates only that launcher-rooted tree in cleanup.
+`-ValidateOnly` checks the fixed launcher, derived package/runtime inventory, and both hashes
+without launching the editor, FFmpeg, or FFprobe and without changing retained evidence. Surface schema 9 retains the nested
 `observation_scope`: submission, present-call CPU, and completed GPU submissions are independently
 reported, while `physical_scanout_observed` remains false until supported instrumentation exists.
 It also requires the additive `named_decoder_reopen` stage, without requiring nonzero samples in an
@@ -285,11 +290,19 @@ schema-9 windowed run remains permission-gated to the exact full-path launcher. 
 evidence is retained locally at `artifacts/package-schema9-c3cfebe/verification.json`: 3,378 bytes,
 SHA-256 `1F4F33952A321722788D728C7804C3E85C242E8A87F3EC7203528ACBF97249B7`.
 
-The focused failure-contract check creates a disposable, deliberately incomplete package without
-launching the editor and verifies the schema-2 `package` / `runtime_closure` diagnosis:
+The focused failure-contract check uses a validation-only, fixed-path synthetic runtime-closure
+seam (it cannot supply a package path or launch the editor) and verifies the schema-2 `package` /
+`runtime_closure` diagnosis:
 
 ```powershell
 & 'H:\Maelstrom Rust\scripts\Test-Phase0CrossAdapterFailureReport.ps1'
+```
+
+The launcher contract check also verifies non-launching validation preserves an existing ignored
+artifact and rejects the packaged executable when presented as a launcher:
+
+```powershell
+& 'H:\Maelstrom Rust\scripts\Test-Phase0CrossAdapterLauncherContract.ps1'
 ```
 
 The wrapper deliberately records `physical_scanout_observed: false`: a successful surface present

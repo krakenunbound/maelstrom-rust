@@ -437,6 +437,9 @@ Last updated: 2026-09-04
       `H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`. Its non-launching validation proves the
       derived packaged runtime identity without modifying retained soak evidence, and the contract
       rejects direct executable paths.
+- [x] Remove the remaining direct GUI launches from cross-adapter qualification and optional
+      package smoke. Both now bind the exact packaged editor beneath the canonical waiting launcher,
+      clean only that fresh process tree, and retain non-launching contract coverage.
 - [ ] Complete broader cross-hardware ten-minute playback and seven-scenario soak evidence.
 - [ ] Complete UI-present/cross-hardware four-source latency evidence.
       Local one/four-source CPU and exact native-layer presentation cases pass on both adapters;

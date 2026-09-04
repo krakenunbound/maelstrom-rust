@@ -7,18 +7,15 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runner = Join-Path $PSScriptRoot 'Run-Phase0CrossAdapterSurface.ps1'
 $artifactRoot = Join-Path $repoRoot 'artifacts\phase0-cross-adapter-surface'
 $testRoot = Join-Path $artifactRoot ("failure-contract-" + [Guid]::NewGuid().ToString('N'))
-$executable = Join-Path $testRoot 'Maelstrom.exe'
-$reportPath = Join-Path $artifactRoot 'phase0-cross-adapter-failure-contract.json'
+$reportPath = Join-Path $artifactRoot ("phase0-cross-adapter-failure-contract-" + [Guid]::NewGuid().ToString('N') + '.json')
 
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
-    [IO.File]::WriteAllBytes($executable, [byte[]]::new(0))
-    Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
     # A legacy fixed-temp writer collided with this sibling. The production writer must use a
     # unique same-directory temporary file and still publish the requested report atomically.
     New-Item -ItemType Directory -Path "$reportPath.tmp" -Force | Out-Null
 
-    $runnerOutput = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File $runner -ExecutablePath $executable -ReportPath $reportPath 2>&1
+    $runnerOutput = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File $runner -ValidateOnly -FailureReportContractFixture -ReportPath $reportPath 2>&1
     $runnerExitCode = $LASTEXITCODE
     if ($runnerExitCode -eq 0) {
         throw "Failure-contract fixture unexpectedly passed: $($runnerOutput -join [Environment]::NewLine)"
@@ -34,7 +31,9 @@ try {
         $null -ne $report.failure.affected_codecs -or
         $null -ne $report.failure.renderer_backend -or $null -ne $report.failure.renderer_driver -or
         $null -ne $report.failure.renderer_driver_info -or $null -ne $report.failure.decoder_backends -or
-        $null -ne $report.failure.encoder_backend) {
+        $null -ne $report.failure.encoder_backend -or
+        $report.launcher_path -ne 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat' -or
+        [string]::IsNullOrWhiteSpace([string]$report.launcher_sha256)) {
         throw 'Failure-contract report did not preserve the schema-2 package-runtime diagnosis.'
     }
     Write-Host 'Phase 0 failure-report contract: PASS'

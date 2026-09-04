@@ -27,6 +27,28 @@ function Test-JsonFiniteNumber {
     return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
 }
 
+function Find-OwnedPackagedEditorProcess {
+    param(
+        [Parameter(Mandatory = $true)][int]$LauncherProcessId,
+        [Parameter(Mandatory = $true)][string]$PackagedExecutable
+    )
+
+    # The batch launcher can insert cmd.exe/start.exe between its root and the editor.
+    # Walk only that fresh tree; a same-named executable elsewhere is never smoke evidence.
+    $pending = [System.Collections.Generic.Queue[int]]::new()
+    $pending.Enqueue($LauncherProcessId)
+    while ($pending.Count -gt 0) {
+        $parentId = $pending.Dequeue()
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parentId" -ErrorAction SilentlyContinue)) {
+            if ([string]::Equals([string]$child.ExecutablePath, $PackagedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+                return Get-Process -Id ([int]$child.ProcessId) -ErrorAction SilentlyContinue
+            }
+            $pending.Enqueue([int]$child.ProcessId)
+        }
+    }
+    return $null
+}
+
 function Resolve-VcRedistCrtDirectory {
     param(
         [string]$ExplicitDirectory
@@ -294,8 +316,16 @@ if ($SkipSmoke) {
     return (Get-Item -LiteralPath $packageExePath)
 }
 
+$approvedLauncherPath = 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
+$resolvedLauncherPath = [System.IO.Path]::GetFullPath($approvedLauncherPath)
+if (-not [string]::Equals($resolvedLauncherPath, $approvedLauncherPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not (Test-Path -LiteralPath $resolvedLauncherPath -PathType Leaf)) {
+    throw "Packaged GUI smoke requires the exact project launcher: $approvedLauncherPath"
+}
+
 $savedSmokePath = $env:PATH
 $savedSmokeEditor = $env:MAELSTROM_SMOKE_EDITOR
+$savedLauncherWait = $env:MAELSTROM_LAUNCHER_WAIT
 $savedStartupReport = $env:MAELSTROM_STARTUP_REPORT
 $savedSurfaceSubmissionReport = $env:MAELSTROM_SURFACE_SUBMISSION_REPORT
 $savedMediaAcceptancePath = $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH
@@ -311,7 +341,8 @@ Remove-Item -LiteralPath $surfaceSubmissionReportPath -Force -ErrorAction Silent
 Remove-Item -LiteralPath $mediaAcceptanceReportPath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $smokeMediaPath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $smokeExportPath -Force -ErrorAction SilentlyContinue
-$smokeProcess = $null
+$launcherProcess = $null
+$editorProcess = $null
 try {
     $env:PATH = 'C:\Windows\System32;C:\Windows'
     $env:MAELSTROM_SMOKE_EDITOR = '1'
@@ -320,6 +351,8 @@ try {
     $env:MAELSTROM_MEDIA_ACCEPTANCE_PATH = $smokeMediaPath
     $env:MAELSTROM_MEDIA_ACCEPTANCE_REPORT = $mediaAcceptanceReportPath
     $env:MAELSTROM_MEDIA_ACCEPTANCE_EXPORT_PATH = $smokeExportPath
+    # Keep the batch launcher alive so the smoke owns one bounded process tree.
+    $env:MAELSTROM_LAUNCHER_WAIT = '1'
     & (Join-Path $output 'ffmpeg.exe') -hide_banner -version *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Packaged ffmpeg.exe could not load using bundled DLLs.' }
     & (Join-Path $output 'ffprobe.exe') -hide_banner -version *> $null
@@ -343,17 +376,30 @@ try {
     # scheduling interval before measuring presentation cadence; thresholds and sample count stay
     # unchanged, so sustained renderer regressions still fail the gate.
     Start-Sleep -Milliseconds 2000
-    $smokeProcess = Start-Process -FilePath (Join-Path $output 'Maelstrom.exe') `
-        -WorkingDirectory $output -WindowStyle Normal -PassThru
+    $launcherProcess = Start-Process -FilePath $env:ComSpec `
+        -ArgumentList @('/d', '/c', ('call "{0}"' -f $resolvedLauncherPath)) `
+        -WorkingDirectory $repoRoot -WindowStyle Normal -PassThru
     $smokeDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ($null -eq $editorProcess) {
+        $editorProcess = Find-OwnedPackagedEditorProcess -LauncherProcessId $launcherProcess.Id -PackagedExecutable $packageExePath
+        if ($null -ne $editorProcess) { break }
+        $launcherProcess.Refresh()
+        if ($launcherProcess.HasExited) {
+            throw "Maelstrom launcher exited before its packaged editor child was observed (code $($launcherProcess.ExitCode))."
+        }
+        if ([DateTime]::UtcNow -ge $smokeDeadline) {
+            throw 'Maelstrom launcher did not start the exact packaged editor within the startup allowance.'
+        }
+        Start-Sleep -Milliseconds 100
+    }
     while ((-not (Test-Path -LiteralPath $startupReportPath) -or
         -not (Test-Path -LiteralPath $surfaceSubmissionReportPath) -or
         -not (Test-Path -LiteralPath $mediaAcceptanceReportPath)) -and
         [DateTime]::UtcNow -lt $smokeDeadline) {
         Start-Sleep -Milliseconds 100
-        $smokeProcess.Refresh()
-        if ($smokeProcess.HasExited) {
-            throw "Packaged Maelstrom.exe exited during startup with code $($smokeProcess.ExitCode)."
+        $editorProcess.Refresh()
+        if ($editorProcess.HasExited) {
+            throw "Packaged Maelstrom.exe exited during startup with code $($editorProcess.ExitCode)."
         }
     }
     if (-not (Test-Path -LiteralPath $startupReportPath)) {
@@ -628,16 +674,16 @@ try {
     $packageStatus.smoke_status = 'passed'
     $packageStatus | ConvertTo-Json | Set-Content -LiteralPath $packageStatusPath -Encoding utf8
 } finally {
-    if ($smokeProcess) {
+    if ($launcherProcess) {
         try {
-            # Terminate the exact package-smoke process tree. Force-killing only the GUI parent
-            # can bypass ExportJob::Drop and leave its FFmpeg child consuming system resources.
-            & "$env:SystemRoot\System32\taskkill.exe" /PID $smokeProcess.Id /T /F *> $null
+            # This fresh launcher is the sole smoke root. Its /T cleanup reaches the exact editor
+            # and any export child while never touching another Maelstrom installation.
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $launcherProcess.Id /T /F *> $null
         } catch {
             # The app may have exited between the last refresh and cleanup.
         }
         try {
-            Wait-Process -Id $smokeProcess.Id -ErrorAction SilentlyContinue
+            Wait-Process -Id $launcherProcess.Id -ErrorAction SilentlyContinue
         } catch {
         }
     }
@@ -646,6 +692,11 @@ try {
         Remove-Item Env:MAELSTROM_SMOKE_EDITOR -ErrorAction SilentlyContinue
     } else {
         $env:MAELSTROM_SMOKE_EDITOR = $savedSmokeEditor
+    }
+    if ($null -eq $savedLauncherWait) {
+        Remove-Item Env:MAELSTROM_LAUNCHER_WAIT -ErrorAction SilentlyContinue
+    } else {
+        $env:MAELSTROM_LAUNCHER_WAIT = $savedLauncherWait
     }
     if ($null -eq $savedStartupReport) {
         Remove-Item Env:MAELSTROM_STARTUP_REPORT -ErrorAction SilentlyContinue
