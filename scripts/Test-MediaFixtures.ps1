@@ -7,6 +7,7 @@ param(
     [switch]$ManifestOnly,
     [switch]$ManifestCoverageContractFixture,
     [switch]$ManifestImageContractFixture,
+    [switch]$Manifest4kCoverageContractFixture,
     [switch]$IncludeRealCorpus
 )
 
@@ -21,7 +22,7 @@ if ($manifest.schema_version -ne 3 -or [string]::IsNullOrWhiteSpace($manifest.ar
     throw 'Unsupported or incomplete media fixture manifest.'
 }
 if ($manifest.artifact_root -ne 'artifacts/media-fixtures') { throw 'Unexpected fixture artifact root.' }
-if (($ManifestCoverageContractFixture -or $ManifestImageContractFixture) -and -not $ManifestOnly) {
+if (($ManifestCoverageContractFixture -or $ManifestImageContractFixture -or $Manifest4kCoverageContractFixture) -and -not $ManifestOnly) {
     throw 'Manifest contract fixtures are permitted only with -ManifestOnly.'
 }
 if ($ManifestImageContractFixture) {
@@ -88,6 +89,13 @@ if ($ManifestCoverageContractFixture) {
         -not ($_.PSObject.Properties.Name -contains 'audio') -or [int]$_.audio.channels -le 2
     })
 }
+if ($Manifest4kCoverageContractFixture) {
+    # Test the real coverage assertion against an in-memory-only corpus with no 4K-class video.
+    $manifest.fixtures = @($manifest.fixtures | Where-Object {
+        -not ($_.PSObject.Properties.Name -contains 'video') -or
+        [int]$_.video.width -lt 3840 -or [int]$_.video.height -lt 2160
+    })
+}
 
 function Assert-ManifestAudioCoverage([object[]]$Fixtures) {
     $audioFixtures = @($Fixtures | Where-Object { $_.PSObject.Properties.Name -contains 'audio' })
@@ -107,7 +115,18 @@ function Assert-ManifestAudioCoverage([object[]]$Fixtures) {
     }
 }
 
+function Assert-Manifest4kVideoCoverage([object[]]$Fixtures) {
+    $has4kVideo = @($Fixtures | Where-Object {
+        $_.PSObject.Properties.Name -contains 'video' -and
+        [int]$_.video.width -ge 3840 -and [int]$_.video.height -ge 2160
+    }).Count -gt 0
+    if (-not $has4kVideo) {
+        throw 'Manifest video coverage requires at least one 4K-class fixture (minimum 3840x2160).'
+    }
+}
+
 Assert-ManifestAudioCoverage @($manifest.fixtures)
+Assert-Manifest4kVideoCoverage @($manifest.fixtures)
 if ($ManifestOnly) { Write-Output 'Media fixture manifest schema: PASS'; exit 0 }
 
 if ([string]::IsNullOrWhiteSpace($FfmpegRoot)) { throw 'Pass -FfmpegRoot with an absolute FFmpeg bundle root or set FFMPEG_DIR.' }

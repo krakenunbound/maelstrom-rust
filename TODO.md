@@ -67,6 +67,10 @@ Last updated: 2026-09-04
   IHDR/chunks/alpha coverage, byte size, and hash. The manifest-only negative contract proves
   required image metadata cannot be omitted. This is corpus evidence only, not still-image import,
   alpha compositing, preview, or export parity.
+- [x] Add bounded deterministic 4K video corpus coverage. The generated four-frame 3840×2160/24
+  MPEG-4 fixture pins yuv420p, two-frame GOP/keyframes, duration, size, and hash; ManifestOnly
+  rejects removal of all 4K-class video in memory. It is not part of default long soaks and makes
+  no playback-quality, package, decode-performance, or hardware claim.
 - [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 9 now
   distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
   from physical scanout, which remains explicitly false, and carries the optional named-decoder

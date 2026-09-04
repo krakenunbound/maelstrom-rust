@@ -111,6 +111,14 @@ Invoke-FixtureFfmpeg @(
     '-metadata', 'creation_time=1970-01-01T00:00:00Z'
 ) $avPath
 
+# Four frames keep 4K coverage bounded while retaining an observable two-frame GOP.
+$fourKPath = Join-Path $outputPath 'bars-4k-mpeg4-24.mp4'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=24', '-frames:v', '4', '-an',
+    '-c:v', 'mpeg4', '-q:v', '8', '-g', '2', '-bf', '0', '-pix_fmt', 'yuv420p',
+    '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-movflags', '+faststart'
+) $fourKPath
+
 # Select source frames at deliberately uneven millisecond timestamps.  The select
 # filter preserves the 1/1000-second input PTS and -fps_mode vfr prevents the
 # muxer from filling those gaps with CFR duplicates.

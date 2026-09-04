@@ -86,6 +86,10 @@ Build the evidence harness before adding engine complexity.
       irregular VFR presentation timing and an MPEG-2 transport-stream fixture with observable
       B-frame packet reordering. This corpus gate validates fixture metadata and probe evidence;
       it does not establish preview or export behavior.
+- [x] Add a bounded deterministic 3840×2160 MPEG-4 fixture to the generated corpus. Four 24 fps
+      frames retain a two-frame GOP and pinned probe/timing evidence; manifest-only validation
+      rejects loss of 4K-class video coverage. It is excluded from default long soaks and makes no
+      playback-quality, packaging, decoder-performance, or hardware claim.
 - [x] Add deterministic mono, stereo, and multichannel audio coverage to the generated corpus.
       The six-channel PCM fixture uses distinct 5.1 tones and pins its FFprobe layout, size, and
       hash; manifest-only validation rejects loss of any audio layout class. Mixer and export

@@ -56,3 +56,23 @@ if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).
     throw 'Manifest image contract fixture mutated fixtures/media/manifest.json.'
 }
 Write-Output 'Manifest image contract fixture: PASS (rejected incomplete in-memory image metadata; manifest hash unchanged)'
+
+$fourKOutput = @()
+$fourKRejected = $false
+try {
+    $fourKOutput = @(& $validator -ManifestOnly -Manifest4kCoverageContractFixture 2>&1)
+}
+catch {
+    $fourKRejected = $true
+    $fourKOutput = @($_.Exception.Message)
+}
+if (-not $fourKRejected) {
+    throw 'Manifest 4K coverage contract fixture unexpectedly passed.'
+}
+if (($fourKOutput -join [Environment]::NewLine) -notmatch 'Manifest video coverage requires at least one 4K-class fixture') {
+    throw 'Manifest 4K coverage contract fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest 4K coverage contract fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest 4K coverage contract fixture: PASS (rejected in-memory 4K removal; manifest hash unchanged)'

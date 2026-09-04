@@ -30,6 +30,11 @@ types, and requires observable packet reordering. Both are generated, not downlo
 no third-party video or audio content. The validator scans the exact timing contract; it does not
 infer VFR from `r_frame_rate`.
 
+`bars-4k-mpeg4-24.mp4` adds four 3840×2160/24 fps MPEG-4 frames with a two-frame GOP and no
+B-frames. Its manifest and probe contract pin dimensions, yuv420p pixels, I/P keyframe pattern,
+duration, hash, and size. This is a short generated corpus fixture, excluded from default long
+soaks; it makes no playback-quality, decode-performance, packaging, or hardware claim.
+
 The generated audio set now covers mono, stereo, and multichannel layouts. The 5.1 PCM WAV carries
 six distinct one-second tones in standard order (FL 220 Hz, FR 330 Hz, FC 440 Hz, LFE 55 Hz,
 BL 550 Hz, BR 660 Hz), so future decode, mixer, routing, and export checks can distinguish channels
