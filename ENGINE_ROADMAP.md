@@ -490,7 +490,8 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       software-only container/codec checkpoint: eight 320x180 yuv420p VFR frames,
       no audio, a nine-second source origin, exact scrub CLI-reference pixels,
       normalized 542 ms clip/video-strip duration with raw container metadata retained,
-      bidirectional app floor/hold mapping, and 44 production-graph export source
+      bidirectional app floor/hold mapping, save/reopen reconstruction of the deliberately
+      runtime-only frame index through real asynchronous analysis, and 44 production-graph export source
       identities across ten 30/1 and 30000/1001 cases. It does not close this
       broad VFR item or establish hardware, long-GOP, color, GUI, or performance parity.
       The complete 14-fixture Phase 0 matrix and 906-test serial release workspace pass;

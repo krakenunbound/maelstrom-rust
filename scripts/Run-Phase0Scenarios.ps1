@@ -137,6 +137,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Shifted FFVHUFF VFR decode regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_vfr_fixtures_route_preview_to_local_boundaries -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted VFR app regression failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-app --release tests::supplied_shifted_vfr_fixture_reopen_rebuilds_exact_local_boundaries -- --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Shifted VFR project-reopen regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_ffv1_analysis_normalizes_clip_and_strip_duration -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted FFV1 media-analysis duration regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_video_reopens_with_cached_proxy_and_persists_validated_preference -- --exact --test-threads=1

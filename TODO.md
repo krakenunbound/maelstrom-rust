@@ -547,7 +547,9 @@ Last updated: 2026-09-04
   Generated FFV1 level-3 Matroska now adds a software-only eight-frame 320x180 yuv420p
   VFR case with a nine-second source origin, no audio, and exact fixture identity. Its
   local presentation boundaries pass CLI-reference scrub, app floor/hold routing, and
-  production-graph source-identity tests. Import reconciles the source, placed clip, and
+  production-graph source-identity tests. A real save/reopen regression proves the runtime-only
+  frame index is omitted from project JSON and reconstructed by asynchronous media analysis with
+  identical exact-boundary, hold, and timeline-end addressing. Import reconciles the source, placed clip, and
   video strip to 542 ms while retaining the 9.542-second raw container duration for
   inspection. This is one intra-only lossless/container
   checkpoint; the 14-fixture Phase 0 matrix and 906-test serial release workspace pass,

@@ -7,7 +7,8 @@ The runner requires an explicit absolute FFmpeg 8.1 bundle path. It generates an
 tracked fixture contract, validates/rebuilds the separately pinned local-only AOM AV1 fixture, then
 passes exact absolute fixture paths through environment variables. Before the seven-scenario matrix,
 focused Cargo tests gate waveform timestamp-origin normalization, software or qualified named decode
-against independent CLI pixels, app preview floor/hold addressing, and source-identity export across
+against independent CLI pixels, app preview floor/hold addressing, save/reopen reconstruction of the
+runtime-only shifted-VFR frame index, and source-identity export across
 the reordered TS, shifted/reordered MPEG-4, shifted 10-bit MOV, shifted FFV1/Matroska,
 shifted FFVHUFF/Matroska, and shifted AV1 fixtures. FFV1 and FFVHUFF use
 `MAELSTROM_FFV1_VFR_TEST_MEDIA` and `MAELSTROM_FFVHUFF_VFR_TEST_MEDIA`; the runner restores them
