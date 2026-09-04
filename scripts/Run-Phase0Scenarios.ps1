@@ -152,6 +152,27 @@ try {
         $failedEvidence = @($failedScenarios | ForEach-Object { "$($_.name): $($_.evidence)" }) -join '; '
         throw "Phase 0 scenario matrix failed with exit code $testExitCode; preserved report: $resolvedReportPath. $failedEvidence"
     }
+    $rapidSwitching = @($report.scenarios | Where-Object { $_.name -eq 'rapid_editor_state_switching' })
+    if ($rapidSwitching.Count -ne 1 -or [int]$rapidSwitching[0].iterations -ne 8 -or $rapidSwitching[0].decoder_backend -ne 'Software' -or $null -ne $rapidSwitching[0].encoder_backend) {
+        throw 'Phase 0 rapid editor-state switching scenario is missing its exact iteration/backend contract.'
+    }
+    $rapidEvidence = [string]$rapidSwitching[0].evidence
+    # Keep this anchored and ordered so duplicate, contradictory, or unknown evidence is rejected.
+    $rapidPattern = '^switch_count=(?<switch_count>\d+)\s+stale_real_event_rejections=(?<stale_real_event_rejections>\d+)\s+generation_advances=(?<generation_advances>\d+)\s+media_epoch_advances=(?<media_epoch_advances>\d+)\s+monitor_errors=(?<monitor_errors>\d+)\s+post_release_sessions=(?<post_release_sessions>\d+)\s+post_release_groups=(?<post_release_groups>\d+)\s+post_release_live_actors=(?<post_release_live_actors>\d+)\s+post_release_retiring_actors=(?<post_release_retiring_actors>\d+)$'
+    $rapidMatch = [regex]::Match($rapidEvidence, $rapidPattern)
+    if (-not $rapidMatch.Success) {
+        throw "Phase 0 rapid editor-state switching evidence is missing required fields: $rapidEvidence"
+    }
+    foreach ($field in @('switch_count', 'stale_real_event_rejections', 'generation_advances', 'media_epoch_advances')) {
+        if ([int64]$rapidMatch.Groups[$field].Value -ne 8) {
+            throw "Phase 0 rapid editor-state switching evidence has an unexpected ${field}: $rapidEvidence"
+        }
+    }
+    foreach ($field in @('monitor_errors', 'post_release_sessions', 'post_release_groups', 'post_release_live_actors', 'post_release_retiring_actors')) {
+        if ([int64]$rapidMatch.Groups[$field].Value -ne 0) {
+            throw "Phase 0 rapid editor-state switching evidence has a nonzero ${field}: $rapidEvidence"
+        }
+    }
     $memoryPressure = @($report.scenarios | Where-Object { $_.name -eq 'runtime_video_strip_cache_eviction' })
     if ($memoryPressure.Count -ne 1 -or [int]$memoryPressure[0].iterations -ne 5) {
         throw 'Phase 0 memory-pressure scenario is missing or has an unexpected iteration count.'

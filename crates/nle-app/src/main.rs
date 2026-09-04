@@ -21252,7 +21252,11 @@ mod tests {
                 Ok((backend, "six decreasing source ticks accepted by the public latest-wins decoder; the final 160x90 frame reached 300000 microseconds or the next declared source frame".to_owned()))
             },
         ));
-        scenarios.push(phase0_run_scenario("rapid_editor_state_switching", 8, None, || {
+        scenarios.push(phase0_run_scenario(
+            "rapid_editor_state_switching",
+            8,
+            Some(Phase0BackendRole::Decoder),
+            || {
             let mut first = EditorState::new(Language::English, "Phase 0 A");
             first.add_media_paths([media.clone()]);
             if !first.add_selected_to_timeline() {
@@ -21266,20 +21270,125 @@ mod tests {
             }
             second.set_playhead(nle_timeline::Tick(500_000));
             let second_snapshot = second.snapshot();
-            let mut app = App::new_with_catalog(false, None);
+
+            // This headless contract deliberately owns neither startup nor audio resources. It
+            // captures a real completed Software frame before each project reset, then proves
+            // that the production generation gate cannot present that delayed event afterward.
+            let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+            app.show_editor_screen(
+                "Phase 0 A".to_owned(),
+                Language::English,
+                Some(first_snapshot.clone()),
+                ProjectSettings::default(),
+                false,
+            );
+            app.editor.force_software_decode = true;
+            let mut stale_real_event_rejections = 0_u32;
+            let mut generation_advances = 0_u32;
+            let mut media_epoch_advances = 0_u32;
             for index in 0..8 {
+                let mut preview = preview_request(&app.editor);
+                preview.output_size = [160, 90];
+                app.submit_monitor_decode_request(preview);
+                let request_id = app.monitor_latest_request_ids[0];
+                let captured_event = phase0_wait_for_monitor_event(&app.monitor_decoders[0], request_id)?;
+                match &captured_event {
+                    nle_decode::DecodeEvent::Frame(frame) => {
+                        if (frame.width, frame.height) != (160, 90) {
+                            return Err(format!(
+                                "editor state switch {index} captured {}x{} instead of 160x90",
+                                frame.width, frame.height
+                            ));
+                        }
+                        if frame.backend.map(|backend| backend.display_name()) != Some("Software") {
+                            return Err(format!(
+                                "editor state switch {index} did not capture a Software decoder frame"
+                            ));
+                        }
+                    }
+                    nle_decode::DecodeEvent::Error(error) => {
+                        return Err(format!(
+                            "editor state switch {index} monitor decode failed before reset: {}",
+                            error.message
+                        ));
+                    }
+                }
+
+                let prior_generation = app.monitor_generations[0];
+                let prior_media_epoch = app.media_analysis_epoch;
                 let (name, snapshot, expected_tick) = if index % 2 == 0 {
-                    ("Phase 0 A", first_snapshot.clone(), 0)
-                } else {
                     ("Phase 0 B", second_snapshot.clone(), 500_000)
+                } else {
+                    ("Phase 0 A", first_snapshot.clone(), 0)
                 };
                 app.show_editor_screen(name.to_owned(), Language::English, Some(snapshot), ProjectSettings::default(), false);
+                app.editor.force_software_decode = true;
+                if app.monitor_generations[0] == prior_generation {
+                    return Err(format!("editor state switch {index} did not advance the monitor generation"));
+                }
+                generation_advances += 1;
+                if app.media_analysis_epoch == prior_media_epoch {
+                    return Err(format!("editor state switch {index} did not advance the media-analysis epoch"));
+                }
+                media_epoch_advances += 1;
                 if app.editor.playhead.0 != expected_tick || app.editor.media.first().map(|item| &item.path) != Some(&media) {
                     return Err(format!("editor state switch {index} did not restore the expected snapshot"));
                 }
+                if app.editor.monitor_frame_for_layer(0).is_some() || app.editor.media_is_offline(1) {
+                    return Err(format!("editor state switch {index} did not reset active project monitor pixels/error"));
+                }
+                let errors_before_stale_apply = app.runtime_diagnostics().monitor_errors;
+                let mut adaptive_quality_changed = false;
+                if app.apply_monitor_decode_event(0, captured_event, &mut adaptive_quality_changed) {
+                    return Err(format!("editor state switch {index} accepted a stale real monitor frame"));
+                }
+                stale_real_event_rejections += 1;
+                if app.editor.monitor_frame_for_layer(0).is_some()
+                    || app.editor.media_is_offline(1)
+                    || app.runtime_diagnostics().monitor_errors != errors_before_stale_apply
+                {
+                    return Err(format!("editor state switch {index} stale real frame changed active project pixels/error"));
+                }
             }
-            Ok((None, "eight alternating App editor restores retained the fixture path and each snapshot playhead".to_owned()))
-        }));
+            let mut release_preview = preview_request(&app.editor);
+            release_preview.sources = [None; MONITOR_LAYER_COUNT];
+            app.submit_monitor_decode_request(release_preview);
+            let release_deadline = Instant::now() + Duration::from_secs(5);
+            let (post_release_sessions, post_release_groups, post_release_live_actors, post_release_retiring_actors) = loop {
+                app.poll_monitor_decoder();
+                let sessions = app.monitor_session_pool.diagnostics();
+                let sources = app.monitor_source_coordinator.diagnostics();
+                if sessions.active_sticky_sessions == 0
+                    && sources.live_source_groups == 0
+                    && sources.live_lane_actors == 0
+                    && sources.retiring_lane_actors == 0
+                {
+                    break (
+                        sessions.active_sticky_sessions,
+                        sources.live_source_groups,
+                        sources.live_lane_actors,
+                        sources.retiring_lane_actors,
+                    );
+                }
+                if Instant::now() >= release_deadline {
+                    return Err(format!("editor state switch resources did not release before deadline: sessions={sessions:?} sources={sources:?}"));
+                }
+                thread::sleep(Duration::from_millis(5));
+            };
+            if app.runtime_diagnostics().monitor_errors != 0 {
+                return Err("editor state switching recorded a monitor error".to_owned());
+            }
+            if app.observed_decoder_backends.iter().any(|backend| backend != "Software") {
+                return Err(format!("editor state switching observed a non-Software decoder backend: {:?}", app.observed_decoder_backends));
+            }
+            Ok((
+                Some("Software".to_owned()),
+                format!(
+                    "switch_count=8 stale_real_event_rejections={stale_real_event_rejections} generation_advances={generation_advances} media_epoch_advances={media_epoch_advances} monitor_errors=0 post_release_sessions={post_release_sessions} post_release_groups={post_release_groups} post_release_live_actors={post_release_live_actors} post_release_retiring_actors={post_release_retiring_actors}"
+                ),
+            ))
+        },
+        ));
         scenarios.push(phase0_run_scenario("offline_media_detection_and_recovery", 1, Some(Phase0BackendRole::Decoder), || {
             let restored = report_path
                 .parent()

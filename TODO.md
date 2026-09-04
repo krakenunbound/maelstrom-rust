@@ -62,6 +62,12 @@ Last updated: 2026-09-04
   pins six distinct 5.1 channels, layout, duration, byte size, and hash. Manifest-only validation
   now requires mono, stereo, and multichannel classes and proves missing multichannel coverage is
   rejected without touching files or running FFmpeg. This is corpus evidence, not mixer/export parity.
+- [x] Strengthen the finite Phase 0 rapid editor-state-switch scenario. Its eight headless Software
+  switches capture a real 160x90 monitor frame before each reset, prove generation and media-analysis
+  epoch advancement plus stale-event rejection, and wait for zero post-release session/source/live-
+  and retiring-actor ownership. This is delayed-event/session-lifecycle evidence only: it does not
+  claim active decode during switching, GUI/audio/hardware/scanout, playback quality, or broader
+  cross-hardware qualification.
 - [x] Add a deterministic RGBA PNG still-image fixture to the Phase 0 corpus. FFprobe proves only
   PNG codec/container on the pinned build; direct PNG validation proves the 160×90 8-bit RGBA
   IHDR/chunks/alpha coverage, byte size, and hash. The manifest-only negative contract proves

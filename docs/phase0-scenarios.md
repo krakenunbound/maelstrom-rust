@@ -21,7 +21,8 @@ iteration count, elapsed milliseconds, observable decoder backend when one was
 produced, observable encoder backend when one was produced, and explicit
 pass/failure evidence. Decoder and encoder evidence use separate nullable fields
 so an encoder can never be reported as a decoder. The matrix covers public monitor
-decoder reverse scrubs, editor-state switching, offline-media recovery,
+decoder reverse scrubs, headless Software delayed-event editor-state switching,
+offline-media recovery,
 runtime video-strip eviction, and cancellation of an actual FFmpeg export with
 no output left behind. The cache checkpoint allocates five deterministic 70 MiB
 RGBA strips (350 MiB cumulative, 280 MiB live before eviction), checks the 256
@@ -30,6 +31,15 @@ strips 3–5 (210 MiB retained). Its evidence records `cumulative_bytes`,
 `retained_bytes`, `cap_bytes`, and `peak_live_bytes`. The peak is modeled live
 RGBA payload, not an operating-system RSS/commit measurement. Allow roughly
 280 MiB plus test-process overhead; this opt-in matrix is intentionally serial.
+
+`rapid_editor_state_switching` initializes one project, then performs exactly eight alternating
+snapshot restores. Before each restore it captures (without applying) one real 160x90 Software
+monitor frame, proves the monitor generation and media-analysis epoch advanced, and proves that
+the captured prior-generation event cannot update the new project's pixels or error state. It then
+waits for zero session, source-group, live-actor, and retiring-actor ownership. This is headless
+Software delayed-event/session-lifecycle evidence: because the event is captured before the switch,
+it does not claim active decode during switching, GUI/audio/hardware/scanout behavior, playback
+quality, or broader cross-hardware qualification.
 
 The `four_source_decoded_frame_cache_pressure` scenario runs one bounded pass using four distinct
 fixture paths; its `iterations: 4` field counts the four exercised sources. It sizes the decoded-frame cache for exactly three 160x90 RGBA frames (57,600 bytes

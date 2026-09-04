@@ -128,6 +128,12 @@ Build the evidence harness before adding engine complexity.
       equal visual priority. A real two-permit/three-source scenario proves exact deferred-request
       identity, preservation of the newer resident, and zero final ownership. This is demand-driven,
       not a general time-based idle reaper; broader cross-hardware pressure remains open. The exact
+      rapid editor-state-switch scenario now initializes one snapshot and executes eight alternating
+      restores after capturing (but not applying) a real 160x90 Software frame each time. It proves
+      generation/media-analysis epoch advancement, stale-frame rejection, and zero post-release
+      sessions/source groups/live and retiring actors. This is headless Software delayed-event and
+      session-lifecycle evidence, not active decode during switching, GUI/audio/hardware/scanout,
+      playback-quality, or broader cross-hardware proof.
       packaged executable passed the 600-second Full/Full real A/V loop soak on 2026-08-30 with 10 loops, 18,023 native
       uploads, zero held/late frames, zero monitor errors/fallback uploads, zero audio
       underruns/lock failures/late discards, and 12.242 ms rolling request-turnaround p95. Its
