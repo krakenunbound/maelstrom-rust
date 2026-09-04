@@ -173,6 +173,39 @@
       "expected": "success"
     },
     {
+      "id": "vfr-ffv1-shifted-matroska",
+      "path": "vfr-ffv1-shifted.mkv",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 filter; eight deliberately selected frames with a nine-second presentation origin; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "testsrc2=size=320x180:rate=24; select frames 0,1,3,4,6,8,11,12; setpts=PTS+9/TB; -fps_mode vfr; FFV1 level 3 Matroska, yuv420p, slice CRC, no audio, bitexact flags",
+      "sha256": "CE5D21A1C375A254B626C0CEF398FC4627191FA1184F27071844EBE0DF61E6CD",
+      "byte_size": 51767,
+      "container": "matroska,webm",
+      "video": {
+        "codec": "ffv1",
+        "pixel_format": "yuv420p",
+        "rate": "24/1",
+        "width": 320,
+        "height": 180,
+        "gop": 1,
+        "has_b_frames": 0,
+        "keyframe_positions": [0],
+        "picture_types": ["I", "I", "I", "I", "I", "I", "I", "I"],
+        "software_decode_frames": 8,
+        "timing": {
+          "vfr": true,
+          "reordered": false,
+          "frame_count": 8,
+          "first_pts_us": 9000000,
+          "last_pts_us": 9500000,
+          "expected_gap_us": [42000, 83000, 125000],
+          "pts_sha256": "210290A8D73432CCE666266259B8E4DE6B385325741618AE7303A0375CCA9DBC"
+        }
+      },
+      "duration_seconds": 9.542,
+      "expected": "success"
+    },
+    {
       "id": "vfr-prores-10bit-shifted-mov",
       "path": "vfr-prores-10bit-shifted.mov",
       "source": "generated",

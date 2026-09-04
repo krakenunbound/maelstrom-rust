@@ -148,11 +148,12 @@ Last updated: 2026-09-04
   SHA-256 `AE41C32043A3CDA34EA3B944EC292D461B5ECABF4F1A86A3E7B408E7E8C0A608`.
   This is headless CPU/decode evidence only; GUI, package, GPU, physical input/scanout, and
   cross-hardware proof remain open. See `docs/performance-reports.md`.
-- [x] Remove the remaining Windows fixture-deletion race from the coordinated-decoder diagnostic
-  test. Teardown now waits for the asynchronous source reaper, live source ownership, and sticky
-  FFmpeg session count to reach zero before deleting the temporary file. Twenty focused release
-  repetitions passed, followed by the full serial release workspace (900 passed, 36 opt-in
-  ignored), strict all-target Clippy, and formatting. No editor was launched.
+- [x] Remove Windows fixture-deletion races from the coordinated-decoder diagnostic and
+  actor-budget tests. Teardown now waits for the asynchronous source reaper, live source
+  ownership, and sticky FFmpeg session count to reach zero before deleting temporary files.
+  Twenty focused release repetitions of each repaired path and ten consecutive complete decoder
+  suites pass; the final serial release workspace reports 904 passed and 36 opt-in ignored,
+  together with strict all-target Clippy and formatting. No editor was launched.
 - [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
   EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
   part of monitor request, cache, sticky scaler and hardware-transfer identity without changing
@@ -518,6 +519,14 @@ Last updated: 2026-09-04
   Qualified locally through exact cache/session peaks; whole-app RAM and actor accounting are separate.
 - [ ] Expand VFR qualification across additional codecs, reorder patterns, containers, and decoder
   backends.
+  Generated FFV1 level-3 Matroska now adds a software-only eight-frame 320x180 yuv420p
+  VFR case with a nine-second source origin, no audio, and exact fixture identity. Its
+  local presentation boundaries pass CLI-reference scrub, app floor/hold routing, and
+  production-graph source-identity tests. Import reconciles the source, placed clip, and
+  video strip to 542 ms while retaining the 9.542-second raw container duration for
+  inspection. This is one intra-only lossless/container
+  checkpoint; the 13-fixture Phase 0 matrix and 904-test serial release workspace pass,
+  while broad VFR qualification remains open.
   Generated shifted/reordered MPEG-4 MP4 now adds one deterministic case combining irregular VFR,
   a three-second stream origin, B-frame packet reordering, and exact waveform/decode/app local-time
   checks. Generated ProRes/DNxHR 10-bit MOV and supplied HEVC Main 10 also have exact local Software

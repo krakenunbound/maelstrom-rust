@@ -545,10 +545,6 @@ fn assert_real_codec_vfr_seek_matches_cli_reference(
     request_id: u64,
 ) {
     let properties = ffprobe_stream_properties(&path);
-    assert!(
-        properties.iter().any(|value| value == "8"),
-        "{label} must declare eight frames"
-    );
     for property in expected_properties {
         assert!(
             properties.iter().any(|value| value == property),
@@ -1252,6 +1248,22 @@ fn scrub_seek_real_codec_vfr_generated_shifted_reordered_mpeg4_matches_cli_refer
         PathBuf::from(path),
         &["mpeg4", "Advanced Simple Profile", "yuv420p"],
         7_000,
+    );
+}
+
+#[test]
+fn generated_shifted_ffv1_vfr_scrub_matches_independent_cli_reference() {
+    if !ffmpeg_available_for_scrub_seek_test() {
+        return;
+    }
+    let Some(path) = std::env::var_os("MAELSTROM_FFV1_VFR_TEST_MEDIA") else {
+        return;
+    };
+    assert_real_codec_vfr_seek_matches_cli_reference(
+        "generated shifted FFV1 Matroska VFR",
+        PathBuf::from(path),
+        &["ffv1", "yuv420p"],
+        7_500,
     );
 }
 

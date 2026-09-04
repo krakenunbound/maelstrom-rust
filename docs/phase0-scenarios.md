@@ -8,8 +8,8 @@ tracked fixture contract, validates/rebuilds the separately pinned local-only AO
 passes exact absolute fixture paths through environment variables. Before the seven-scenario matrix,
 focused Cargo tests gate waveform timestamp-origin normalization, software or qualified named decode
 against independent CLI pixels, app preview floor/hold addressing, and source-identity export across
-the reordered TS, shifted/reordered MPEG-4, shifted 10-bit MOV, and shifted AV1 fixtures. AV1 uses
-`MAELSTROM_AV1_VFR_TEST_MEDIA`; the runner restores it with every other altered variable. The JSON
+the reordered TS, shifted/reordered MPEG-4, shifted 10-bit MOV, shifted FFV1/Matroska, and shifted AV1 fixtures. FFV1 uses
+`MAELSTROM_FFV1_VFR_TEST_MEDIA`; the runner restores it with every other altered variable. The JSON
 report is written atomically to the ignored `artifacts/phase0-scenarios/` directory.
 
 ```powershell

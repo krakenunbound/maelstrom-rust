@@ -1298,6 +1298,52 @@ fn scrub_preview_frame_count(duration_seconds: f64) -> usize {
     ) as usize
 }
 
+/// Returns the editable local source duration while retaining FFprobe's raw container duration
+/// for metadata display. Matroska/WebM durations are measured from timestamp zero, so a shifted
+/// stream can include its positive presentation origin. Only normalize when a complete VFR index
+/// proves that the origin-subtracted span still contains every decoded presentation boundary.
+fn effective_media_duration_seconds(
+    metadata: &nle_waveform::MediaMetadata,
+    frame_timing: Option<&nle_waveform::FrameTiming>,
+) -> Option<f64> {
+    let container_duration = metadata
+        .duration_seconds
+        .filter(|duration| duration.is_finite() && *duration > 0.0)?;
+    let is_matroska = metadata.container.as_deref().is_some_and(|container| {
+        container
+            .split(',')
+            .any(|name| matches!(name.trim(), "matroska" | "webm"))
+    });
+    let Some(nle_waveform::FrameTiming::Variable(index)) = frame_timing else {
+        return Some(container_duration);
+    };
+    if !is_matroska {
+        return Some(container_duration);
+    }
+    let Some(origin) = metadata
+        .streams
+        .iter()
+        .filter_map(|stream| stream.start_seconds)
+        .filter(|start| start.is_finite() && *start >= 0.0)
+        .min_by(f64::total_cmp)
+    else {
+        return Some(container_duration);
+    };
+    if origin <= 0.0 {
+        return Some(container_duration);
+    }
+    let local_duration = ((container_duration - origin) * 1_000_000.0).round() / 1_000_000.0;
+    let Some(final_boundary) = index.pts().last().copied() else {
+        return Some(container_duration);
+    };
+    let final_boundary = final_boundary as f64 / 1_000_000.0;
+    if local_duration.is_finite() && local_duration > final_boundary {
+        Some(local_duration)
+    } else {
+        Some(container_duration)
+    }
+}
+
 fn timeline_texture_id(project_epoch: u64, media_id: u32) -> u64 {
     project_epoch.wrapping_shl(32) | u64::from(media_id)
 }
@@ -9995,10 +10041,20 @@ impl App {
                                 .as_ref()
                                 .map_err(Clone::clone)
                                 .and_then(|duration| {
+                                    let duration = metadata
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(|metadata| {
+                                            effective_media_duration_seconds(
+                                                metadata,
+                                                frame_timing.as_ref().ok(),
+                                            )
+                                        })
+                                        .unwrap_or(*duration);
                                     nle_waveform::extract_video_strip_cancellable(
                                         &path,
-                                        *duration,
-                                        scrub_preview_frame_count(*duration),
+                                        duration,
+                                        scrub_preview_frame_count(duration),
                                         SCRUB_PREVIEW_FRAME_HEIGHT,
                                         Arc::clone(&worker_cancellation),
                                     )
@@ -10065,6 +10121,9 @@ impl App {
             {
                 probe.record_analysis(result.metadata.is_ok(), 0);
             }
+            let effective_duration_seconds = result.metadata.as_ref().ok().and_then(|metadata| {
+                effective_media_duration_seconds(metadata, result.frame_timing.as_ref().ok())
+            });
             match result.metadata {
                 Ok(mut metadata) => {
                     let timing_is_constant = matches!(
@@ -10096,7 +10155,8 @@ impl App {
                     self.editor.set_media_metadata(
                         media_id,
                         nle_ui_core::MediaMetadata {
-                            duration_seconds: metadata.duration_seconds,
+                            duration_seconds: effective_duration_seconds,
+                            container_duration_seconds: metadata.duration_seconds,
                             file_size: metadata.file_size,
                             container: metadata.container,
                             overall_bit_rate: metadata.overall_bit_rate,
@@ -16088,6 +16148,28 @@ mod tests {
     }
 
     #[test]
+    fn media_duration_keeps_container_value_without_complete_vfr_timing() {
+        let metadata = nle_waveform::MediaMetadata {
+            duration_seconds: Some(9.542),
+            container: Some("matroska,webm".into()),
+            streams: vec![nle_waveform::MediaStreamMetadata {
+                kind: Some("video".into()),
+                start_seconds: Some(9.0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_media_duration_seconds(&metadata, None),
+            Some(9.542)
+        );
+        assert_eq!(
+            effective_media_duration_seconds(&metadata, Some(&nle_waveform::FrameTiming::Constant)),
+            Some(9.542)
+        );
+    }
+
+    #[test]
     fn scrub_cancellation_invalidates_a_racing_monitor_frame() {
         let mut app = App::new_with_catalog(false, None);
         let invalidated_layer = MONITOR_LAYER_COUNT - 1;
@@ -17208,11 +17290,12 @@ mod tests {
 
     #[test]
     fn supplied_shifted_vfr_fixtures_route_preview_to_local_boundaries() {
-        for (variable, codec, origin, duration, boundaries, tail_tick) in [
+        for (variable, codec, origin, container_duration, local_duration, boundaries, tail_tick) in [
             (
                 "MAELSTROM_PRORES_VFR_TEST_MEDIA",
                 "prores",
                 7.0,
+                0.541_667,
                 0.541_667,
                 [
                     0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
@@ -17224,6 +17307,7 @@ mod tests {
                 "dnxhd",
                 7.0,
                 0.541_667,
+                0.541_667,
                 [
                     0, 41_667, 125_000, 166_667, 250_000, 333_333, 458_333, 500_000,
                 ],
@@ -17234,16 +17318,29 @@ mod tests {
                 "mpeg4",
                 3.0,
                 0.433_333,
+                0.433_333,
                 [
                     0, 33_333, 100_000, 133_333, 200_000, 266_667, 366_667, 400_000,
                 ],
                 433_332,
             ),
             (
+                "MAELSTROM_FFV1_VFR_TEST_MEDIA",
+                "ffv1",
+                9.0,
+                9.542,
+                0.542,
+                [
+                    0, 42_000, 125_000, 167_000, 250_000, 333_000, 458_000, 500_000,
+                ],
+                542_000,
+            ),
+            (
                 "MAELSTROM_AV1_VFR_TEST_MEDIA",
                 "av1",
                 5.0,
                 5.433,
+                0.433,
                 [
                     0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
                 ],
@@ -17262,14 +17359,18 @@ mod tests {
                 .find(|stream| stream.kind.as_deref() == Some("video"))
                 .expect("fixture video stream");
             assert_eq!(video.start_seconds, Some(origin));
-            assert!((metadata.duration_seconds.unwrap() - duration).abs() < 0.000_001);
+            assert!((metadata.duration_seconds.unwrap() - container_duration).abs() < 0.000_001);
             let timing =
                 nle_waveform::analyze_frame_timing(&path).expect("scan shifted VFR fixture");
             let nle_waveform::FrameTiming::Variable(index) = &timing else {
                 panic!("{codec} fixture did not retain its irregular presentation timing");
             };
             assert_eq!(index.pts(), boundaries, "{codec} local presentation index");
-
+            assert_eq!(
+                effective_media_duration_seconds(&metadata, Some(&timing)),
+                Some(local_duration),
+                "{codec} effective local duration"
+            );
             let mut app = App::new_with_catalog(false, None);
             app.editor.add_media_paths([path]);
             assert!(app.editor.add_selected_to_timeline());
@@ -17286,7 +17387,24 @@ mod tests {
                 })
                 .expect("queue shifted 10-bit analysis");
             app.poll_media_analysis();
-
+            let local_duration_tick =
+                nle_timeline::Tick((local_duration * 1_000_000.0).round() as i64);
+            assert_eq!(app.editor.media[0].duration, Some(local_duration_tick));
+            let clip_id = app
+                .editor
+                .selected_timeline_clip
+                .expect("analysis retains the imported clip selection");
+            assert_eq!(
+                app.editor.timeline.clip(clip_id).unwrap().duration,
+                local_duration_tick,
+                "{codec} imported clip duration"
+            );
+            let stored_metadata = app.editor.media_metadata(1).unwrap();
+            assert_eq!(stored_metadata.duration_seconds, Some(local_duration));
+            assert_eq!(
+                stored_metadata.container_duration_seconds,
+                Some(container_duration)
+            );
             // Exercise both directions, each exact boundary, and the final microsecond
             // before the next boundary. The final frame has no invented CFR duration.
             for reverse in [false, true] {
@@ -17310,6 +17428,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn supplied_shifted_ffv1_analysis_normalizes_clip_and_strip_duration() {
+        let Some(path) = std::env::var_os("MAELSTROM_FFV1_VFR_TEST_MEDIA").map(PathBuf::from)
+        else {
+            return;
+        };
+        let mut app = App::new_without_startup_or_audio_for_monitor_contract();
+        app.editor.add_media_paths([path.clone()]);
+        assert!(app.editor.add_selected_to_timeline());
+        app.request_media_analysis(1, path);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !app.media_analysis_in_flight.is_empty() || !app.media_analysis_pending.is_empty() {
+            app.poll_media_analysis();
+            assert!(Instant::now() < deadline, "FFV1 media analysis timed out");
+            thread::sleep(Duration::from_millis(2));
+        }
+        app.poll_media_analysis();
+
+        let local_duration = nle_timeline::Tick(542_000);
+        assert_eq!(app.editor.media[0].duration, Some(local_duration));
+        let imported_clip_durations = app
+            .editor
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.media == nle_timeline::MediaId(1))
+            .map(|clip| clip.duration)
+            .collect::<Vec<_>>();
+        assert_eq!(imported_clip_durations.len(), 2);
+        assert!(
+            imported_clip_durations
+                .iter()
+                .all(|duration| *duration == local_duration),
+            "every linked clip must use local duration: {imported_clip_durations:?}"
+        );
+        assert_eq!(
+            app.editor.cached_video_strip_layout(1).unwrap().duration,
+            local_duration
+        );
+        let metadata = app.editor.media_metadata(1).unwrap();
+        assert_eq!(metadata.duration_seconds, Some(0.542));
+        assert_eq!(metadata.container_duration_seconds, Some(9.542));
+
+        app.editor.set_playhead(nle_timeline::Tick(541_999));
+        assert_eq!(
+            preview_request(&app.editor).sources[0]
+                .expect("final local frame remains addressable")
+                .source_tick,
+            500_000
+        );
+        assert_eq!(
+            app.editor.timeline_end(),
+            local_duration,
+            "container origin must not extend the editable timeline"
+        );
     }
 
     #[test]

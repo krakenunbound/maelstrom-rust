@@ -1289,7 +1289,10 @@ pub struct CachedWaveform {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaMetadata {
+    /// Editable local source duration after container-origin normalization.
     pub duration_seconds: Option<f64>,
+    /// Raw duration reported by the container, retained when it differs from local source time.
+    pub container_duration_seconds: Option<f64>,
     pub file_size: Option<u64>,
     pub container: Option<String>,
     pub overall_bit_rate: Option<u64>,
@@ -4258,6 +4261,15 @@ impl EditorState {
 
     pub fn cached_waveform(&self, media_id: MediaId) -> Option<&CachedWaveform> {
         self.waveforms.get(&media_id).map(Arc::as_ref)
+    }
+
+    pub fn media_metadata(&self, media_id: MediaId) -> Option<&MediaMetadata> {
+        self.media_metadata.get(&media_id)
+    }
+
+    #[doc(hidden)]
+    pub fn cached_video_strip_layout(&self, media_id: MediaId) -> Option<VideoStripLayout> {
+        self.video_strips.get(&media_id).map(|strip| strip.layout)
     }
 
     fn rebuild_timeline_media_draw_slots_if_stale(&mut self) {
@@ -12839,6 +12851,20 @@ fn metadata_details(ui: &mut Ui, state: &mut EditorState) {
                     .map(format_duration)
                     .unwrap_or_else(|| "—".into()),
             );
+            if let Some(container_duration) = metadata
+                .and_then(|value| value.container_duration_seconds)
+                .filter(|container_duration| {
+                    metadata
+                        .and_then(|value| value.duration_seconds)
+                        .is_some_and(|duration| (container_duration - duration).abs() > 0.000_001)
+                })
+            {
+                metadata_row(
+                    ui,
+                    &t(state.language, "Container duration", "コンテナの長さ"),
+                    &format_duration(container_duration),
+                );
+            }
             metadata_row(
                 ui,
                 &t(state.language, "Video", "映像"),

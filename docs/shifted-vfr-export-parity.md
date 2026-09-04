@@ -1,11 +1,37 @@
 # Shifted VFR export source identity
 
+## FFV1/Matroska follow-up — 2026-09-04
+
+The generated lossless FFV1 level-3 Matroska fixture adds a distinct container and
+codec path without proprietary media: 320x180 yuv420p, eight selected irregular
+24 fps frames, no audio, and a nine-second stream origin. Its local boundaries are
+`0, 42000, 125000, 167000, 250000, 333000, 458000, 500000` microseconds.
+
+The existing production-graph source-identity harness passes its ten
+head/trim/slip/exclusive-tail/final-frame cases at 30/1 and 30000/1001. Those 44
+exported frames select the same independently decoded source frame as preview and
+retain the rational output timestamp grid. The accompanying software scrub check
+passes 19 exact CLI-reference seeks, and the app boundary test verifies
+bidirectional floor/hold routing. The Phase 0 runner now supplies and restores the
+fixture variable before invoking those focused regressions. Combined with the
+ProRes, DNxHR, shifted/reordered MPEG-4, and AV1 fixtures, the current gate has
+50 cases and 222 exported source-identity frames.
+
+Matroska exposes a 9.542-second raw container duration because its timestamps begin
+at nine seconds. The shared media-analysis path now verifies the complete VFR index,
+stores 542 ms as the editable source/clip and video-strip duration, and retains the
+raw container value separately for the EN/JA metadata inspector. The regression
+proves the imported clip no longer holds its final frame for the nine-second origin.
+
+This is bounded local Software evidence. It does not prove FFV1 export, hardware
+decode, long-GOP behavior, color fidelity, GUI presentation, or broad VFR parity.
+
 ## AV1 input-decoder parity follow-up — 2026-09-01
 
 The local 352x288 AOM AV1 Main fixture adds ten head/trim/slip/exclusive-tail/final-frame cases at
 30/1 and 30000/1001. All 46 exported frames resolve to the same eight decoded source identities as
-preview. Combined with ProRes, DNxHR, and shifted/reordered MPEG-4, the production-graph gate now
-covers 40 cases and 178 exported frames.
+preview. At that checkpoint, combined with ProRes, DNxHR, and shifted/reordered
+MPEG-4, the production-graph gate covered 40 cases and 178 exported frames.
 
 The fixture now stream-copies the first eight visually distinct all-intra frames from AOM's pinned
 39-frame `av1-1-b8-02-allintra.ivf` vector. An earlier four-quantizer prototype had eight different

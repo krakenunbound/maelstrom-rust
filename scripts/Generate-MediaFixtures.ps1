@@ -160,6 +160,17 @@ Invoke-FixtureFfmpeg @(
     '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-movflags', '+faststart'
 ) $shiftedReorderedVfrPath
 
+# Matroska's millisecond time base makes this lossless FFV1 fixture a distinct
+# VFR/container case: it has a nine-second stream origin and eight local frame
+# boundaries at 0, 42, 125, 167, 250, 333, 458, and 500 ms.
+$shiftedFfv1VfrPath = Join-Path $outputPath 'vfr-ffv1-shifted.mkv'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
+    '-vf', "select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)',setpts=PTS+9/TB",
+    '-frames:v', '8', '-fps_mode', 'vfr', '-an', '-c:v', 'ffv1', '-level', '3', '-slicecrc', '1',
+    '-pix_fmt', 'yuv420p', '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1'
+) $shiftedFfv1VfrPath
+
 # Intra-frame professional formats with 10-bit 4:2:2 pixels and a nonzero MOV
 # presentation origin. Their local frame timing must still begin at zero.
 foreach ($codec in @('prores', 'dnxhr')) {

@@ -60,8 +60,18 @@ distinguish presentation origin from local clip time.
 The two shifted 10-bit MOV fixtures add ProRes Standard and DNxHR HQX coverage,
 eight all-intra frames with the same irregular 24 fps selection and a seven-second
 presentation origin. Their manifest pins 10-bit 4:2:2 pixels and exact timestamps.
-Independent CLI pixel/seek comparisons and app local-time mapping are described in
-[codec/color qualification](codec-color-qualification.md).
+
+The generated `vfr-ffv1-shifted.mkv` adds a lossless FFV1/Matroska container
+case encoded with the pinned level-3 recipe: eight 320x180 yuv420p selected frames,
+no audio, and a nine-second stream origin. Matroska's millisecond timestamps normalize to local boundaries
+`0, 42000, 125000, 167000, 250000, 333000, 458000, 500000` microseconds. The
+pinned FFmpeg 8.1 generation is 51,767 bytes with SHA-256
+`CE5D21A1C375A254B626C0CEF398FC4627191FA1184F27071844EBE0DF61E6CD`.
+FFprobe reports a 9.542-second raw container duration because this Matroska file retains
+its nonzero origin. Media analysis preserves that raw value for inspection while reconciling
+clips and extracting the video strip against the 542 ms local source span. Independent CLI
+pixel/seek comparisons, app ingestion, and export mapping are described in
+[shifted VFR export parity](shifted-vfr-export-parity.md).
 The harness is deliberately independent of the editor executable. Normal Cargo tests do not depend
 on generated binaries; the opt-in Phase 0 runner passes the generated reordered TS by its exact
 absolute path through `MAELSTROM_REORDERED_VFR_TEST_MEDIA` to focused waveform, monitor-decode,

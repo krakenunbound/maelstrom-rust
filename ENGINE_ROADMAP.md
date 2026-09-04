@@ -114,10 +114,11 @@ Build the evidence harness before adding engine complexity.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
 - [x] Keep the ordinary release workspace gate deterministic on Windows. The coordinated-decoder
-      diagnostic test now waits for its asynchronous source reaper and sticky FFmpeg session to
-      reach zero before deleting the temporary media fixture. Twenty focused repetitions and the
-      full serial release workspace passed on 2026-09-04: 900 tests passed, 36 opt-in tests were
-      ignored, strict all-target Clippy and formatting were clean, and no editor was launched.
+      diagnostic and actor-budget tests now wait for their asynchronous source reapers, live
+      actors, and sticky FFmpeg sessions to reach zero before deleting temporary media. Twenty
+      focused repetitions of each repaired path, ten consecutive complete decoder-suite runs, and
+      the final serial release workspace passed on 2026-09-04: 904 tests passed, 36 opt-in tests
+      were ignored, strict all-target Clippy and formatting were clean, and no editor was launched.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
       A finite prerequisite matrix covers the listed behavioral scenarios and includes a bounded
@@ -466,6 +467,15 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       export graph with a test MPEG-4 encoder, not proof of H.264/hardware/color parity.
       That historical two-MOV checkpoint passed 775 release tests, Clippy, fixture validation
       and the updated Phase 0 runner. See `docs/shifted-vfr-export-parity.md`.
+      Generated FFV1 level-3 Matroska adds a distinct lossless, intra-only,
+      software-only container/codec checkpoint: eight 320x180 yuv420p VFR frames,
+      no audio, a nine-second source origin, exact scrub CLI-reference pixels,
+      normalized 542 ms clip/video-strip duration with raw container metadata retained,
+      bidirectional app floor/hold mapping, and 44 production-graph export source
+      identities across ten 30/1 and 30000/1001 cases. It does not close this
+      broad VFR item or establish hardware, long-GOP, color, GUI, or performance parity.
+      The complete 13-fixture Phase 0 matrix and 904-test serial release workspace pass;
+      the editor executable was not launched.
       The shifted/reordered MPEG-4 MP4 now passes the same ten cases with its three-second
       origin and irregular B-frame presentation order, bringing the gate to 30 cases and
       132 exported frames without a production graph change. Export now also preserves original

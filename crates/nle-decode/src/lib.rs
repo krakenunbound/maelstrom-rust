@@ -5532,7 +5532,7 @@ mod tests {
         }
         let path = tiny_media();
         let pool = MonitorSessionPool::new(1, 3);
-        let coordinator = MonitorSourceCoordinator::new(1, pool);
+        let coordinator = MonitorSourceCoordinator::new(1, pool.clone());
         let foreground =
             MonitorDecoder::new_with_notifier_and_frame_cache_pool_and_source_coordinator(
                 || {},
@@ -5599,9 +5599,25 @@ mod tests {
         };
         assert_frame_reaches_target(&frame, &replacement);
 
+        background.release_live_sessions().unwrap();
+        foreground.release_live_sessions().unwrap();
         drop(background);
         drop(foreground);
         drop(barrier);
+        let final_deadline = Instant::now() + Duration::from_secs(2);
+        while (pool.diagnostics().active_sticky_sessions != 0
+            || coordinator.diagnostics().live_source_groups != 0
+            || coordinator.diagnostics().live_lane_actors != 0
+            || coordinator.diagnostics().retiring_lane_actors != 0)
+            && Instant::now() < final_deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(pool.diagnostics().active_sticky_sessions, 0);
+        let final_diagnostics = coordinator.diagnostics();
+        assert_eq!(final_diagnostics.live_source_groups, 0);
+        assert_eq!(final_diagnostics.live_lane_actors, 0);
+        assert_eq!(final_diagnostics.retiring_lane_actors, 0);
         fs::remove_file(path).unwrap();
     }
 

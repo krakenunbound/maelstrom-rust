@@ -461,6 +461,23 @@ fn supplied_shifted_reordered_mpeg4_vfr_export_matches_preview_source_identity()
 }
 
 #[test]
+fn generated_shifted_ffv1_vfr_export_matches_preview_source_identity() {
+    shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
+        variable: "MAELSTROM_FFV1_VFR_TEST_MEDIA",
+        codec: "ffv1",
+        origin: 9_000_000,
+        pix_fmt: "yuv420p",
+        size: [320, 180],
+        local_pts: &[
+            0, 42_000, 125_000, 167_000, 250_000, 333_000, 458_000, 500_000,
+        ],
+        source_duration: 542_000,
+        exclusive_tail: (333_000, 3),
+        final_frame_source_in: 500_000,
+    });
+}
+
+#[test]
 fn supplied_av1_vfr_export_matches_preview_source_identity() {
     shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
         variable: "MAELSTROM_AV1_VFR_TEST_MEDIA",
