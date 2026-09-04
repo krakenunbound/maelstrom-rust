@@ -294,6 +294,33 @@
           "picture_type_counts": { "I": 13, "P": 50, "B": 87 }
         },
         "encoder_intent": { "g": 12, "bf": 2, "idr_interval": 999 }
+      },
+      {
+        "id": "codec-vfr-hevc-main10-bt709-1080p-hardware",
+        "filename": "codec-vfr-hevc-main10-bt709-1080p-hardware.mp4",
+        "source": "local_only",
+        "provenance": "docs/hardware-decode-parity.md lines 218-229 local hardware-codec fixture recipe; never copied into Git.",
+        "generation_recipe": "testsrc2=size=1920x1080:rate=24; select='eq(n,0)+eq(n,1)+eq(n,3)+eq(n,4)+eq(n,6)+eq(n,8)+eq(n,11)+eq(n,12)',format=p010le,setpts=PTS+7/TB; 8 frames; -fps_mode vfr -an; hevc_qsv -profile:v main10 -global_quality 20 -g 8 -bf 2 -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -map_metadata -1.",
+        "local_only": true,
+        "permission_policy": "Keep outside Git; validate only when the operator has permission to retain and test this local file.",
+        "sha256": "1AF892D8C40634E354A05FD80A446298C5501914D2E39ECD641D792B6538C486",
+        "byte_size": 475588,
+        "container": "mov,mp4,m4a,3gp,3g2,mj2",
+        "duration_seconds": 0.541667,
+        "video": {
+          "codec": "hevc",
+          "profile": "Main 10",
+          "pixel_format": "yuv420p10le",
+          "color_space": "bt709",
+          "rate": "24/1",
+          "width": 1920,
+          "height": 1080,
+          "has_b_frames": 1,
+          "frame_count": 8,
+          "keyframe_count": 1,
+          "picture_type_counts": { "I": 1, "P": 0, "B": 7 }
+        },
+        "encoder_intent": { "g": 8, "bf": 2 }
       }
     ]
   }

@@ -71,11 +71,13 @@ function Assert-LocalCorpusContractSchema([object]$Corpus) {
         foreach ($field in 'codec', 'profile', 'pixel_format', 'rate', 'width', 'height', 'has_b_frames', 'frame_count', 'keyframe_count', 'picture_type_counts') {
             if ($null -eq $fixture.video.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.video.$field)) { throw "Required local video fixture is missing ${field}: $($fixture.id)." }
         }
+        if (($fixture.video.PSObject.Properties.Name -contains 'color_space') -and [string]::IsNullOrWhiteSpace([string]$fixture.video.color_space)) { throw "Required local video color-space metadata is invalid: $($fixture.id)." }
         if ([string]$fixture.video.rate -notmatch '^([1-9]\d{0,17})/([1-9]\d{0,17})$' -or -not (Test-LocalContractInteger $fixture.video.width 1 16384) -or -not (Test-LocalContractInteger $fixture.video.height 1 16384) -or -not (Test-LocalContractInteger $fixture.video.has_b_frames 0 16) -or -not (Test-LocalContractInteger $fixture.video.frame_count 1 1000000) -or -not (Test-LocalContractInteger $fixture.video.keyframe_count 1 1000000)) { throw "Required local video metadata is invalid: $($fixture.id)." }
         foreach ($pictureType in 'I', 'P', 'B') { if (-not (Test-LocalContractInteger $fixture.video.picture_type_counts.$pictureType 0 1000000)) { throw "Required local video picture-type count is invalid: $($fixture.id)." } }
         $pictureTypeTotal = [int64]$fixture.video.picture_type_counts.I + [int64]$fixture.video.picture_type_counts.P + [int64]$fixture.video.picture_type_counts.B
         if ($pictureTypeTotal -ne [int64]$fixture.video.frame_count -or [int64]$fixture.video.keyframe_count -gt [int64]$fixture.video.picture_type_counts.I -or (($fixture.video.picture_type_counts.B -gt 0) -ne ($fixture.video.has_b_frames -gt 0))) { throw "Required local video frame evidence is inconsistent: $($fixture.id)." }
-        if (-not (Test-LocalContractInteger $fixture.encoder_intent.g 1 1000000) -or -not (Test-LocalContractInteger $fixture.encoder_intent.bf 0 16) -or -not (Test-LocalContractInteger $fixture.encoder_intent.idr_interval 0 1000000)) { throw "Required local encoder intent is invalid: $($fixture.id)." }
+        foreach ($field in 'g', 'bf') { if ($null -eq $fixture.encoder_intent.$field) { throw "Required local encoder intent is missing ${field}: $($fixture.id)." } }
+        if (-not (Test-LocalContractInteger $fixture.encoder_intent.g 1 1000000) -or -not (Test-LocalContractInteger $fixture.encoder_intent.bf 0 16) -or (($fixture.encoder_intent.PSObject.Properties.Name -contains 'idr_interval') -and -not (Test-LocalContractInteger $fixture.encoder_intent.idr_interval 0 1000000))) { throw "Required local encoder intent is invalid: $($fixture.id)." }
     }
 }
 
@@ -424,6 +426,7 @@ if ($IncludeRealCorpus) {
         Assert-LocalContractEqual $video.codec_name $fixture.video.codec $fixture.id 'video codec mismatch'
         Assert-LocalContractEqual $video.profile $fixture.video.profile $fixture.id 'video profile mismatch'
         Assert-LocalContractEqual $video.pix_fmt $fixture.video.pixel_format $fixture.id 'video pixel-format mismatch'
+        if ($fixture.video.PSObject.Properties.Name -contains 'color_space') { Assert-LocalContractEqual $video.color_space $fixture.video.color_space $fixture.id 'video color-space mismatch' }
         Assert-LocalContractEqual $video.r_frame_rate $fixture.video.rate $fixture.id 'video rate mismatch'
         Assert-LocalContractEqual $video.width $fixture.video.width $fixture.id 'video width mismatch'
         Assert-LocalContractEqual $video.height $fixture.video.height $fixture.id 'video height mismatch'

@@ -76,6 +76,10 @@ Last updated: 2026-09-04
   validated only when opted in; it is input to the separately run Software scrub test, not a scrub
   test itself. The file remains outside Git and establishes no hardware, package, playback-quality,
   or performance evidence.
+- [x] Pin the local-only HEVC Main 10 BT.709 source under the same corpus root. Its identity,
+  color, frame/keyframe, and I/P/B evidence are validated only when opted in; recorded QSV encoder
+  intent is provenance, not proof. It is input to the separately run Software HEVC seek test and
+  establishes no GPU, package, playback-quality, or performance evidence.
 - [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 9 now
   distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
   from physical scanout, which remains explicitly false, and carries the optional named-decoder

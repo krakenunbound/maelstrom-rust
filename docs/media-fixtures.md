@@ -86,6 +86,13 @@ counts, and I/P/B evidence. It pins the local input used by the separately opt-i
 scrub test; the validator itself does not run a scrub test. It makes no hardware, package,
 playback-quality, or performance claim.
 
+`codec-vfr-hevc-main10-bt709-1080p-hardware.mp4` is the second required local-only contract. It
+pins the HEVC Main 10/yuv420p10le/BT.709 1920×1080 source identity, frame/keyframe/I-P-B evidence,
+and recorded QSV encoder intent from the hardware-decode recipe. Encoder intent is provenance, not
+observable proof. This pins input for the separately run existing Software HEVC seek test; the
+fixture validator neither runs that test nor establishes GPU, hardware, package, playback-quality,
+or performance evidence.
+
 `Test-MediaFixtures.ps1 -ManifestOnly` is the fast schema/path/uniqueness validation used when
 FFmpeg is unavailable. The Phase 0 measurement gate remains incomplete: it gates the reordered
 fixture's waveform/decode/preview source-time path, the two generated 10-bit MOV paths, and

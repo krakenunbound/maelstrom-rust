@@ -104,6 +104,10 @@ Build the evidence harness before adding engine complexity.
       Its exact filename, identity, stream, frame/keyframe, and I/P/B evidence are validated below
       an explicit corpus root; it is never added to Git and makes no hardware, package, playback,
       or performance claim.
+- [x] Pin one opt-in local-only HEVC Main 10 BT.709 fixture as input to the separately run Software
+      HEVC seek test. Its exact source identity, color, and frame evidence are corpus metadata;
+      recorded QSV encoder intent is provenance rather than observable proof, and no GPU, package,
+      playback, or performance claim follows.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
