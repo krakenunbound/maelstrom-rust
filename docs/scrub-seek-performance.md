@@ -108,6 +108,12 @@ further retry was used to conceal these failures. All instances/owned children c
   FFprobe confirms 150 frames (13 I, 50 P, 87 B) and two-frame reordering;
   `trace_headers` confirms one IDR NAL in the clip. Long traversal remains necessary for this fixture's
   sparse random-access points; no H.264 latency improvement is claimed.
+
+The local H.264 input is additionally pinned by the opt-in real-media fixture contract in
+`fixtures/media/manifest.json`. `Test-MediaFixtures.ps1 -IncludeRealCorpus` requires its exact
+filename, hash, stream, duration, frame/keyframe, and I/P/B evidence below
+`MAELSTROM_REAL_MEDIA_ROOT`; it pins the input for the separately run Software scrub test rather
+than executing that test itself, and it neither creates media nor enables a hardware or package claim.
 - `cargo test --workspace --release` passes 735 tests (16 opt-in ignored), with
   `MAELSTROM_SCRUB_H264_TEST_MEDIA` and `MAELSTROM_REORDERED_VFR_TEST_MEDIA` supplied.
   Strict all-target release Clippy, formatting, and independent reviews pass.

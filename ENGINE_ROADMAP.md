@@ -99,6 +99,11 @@ Build the evidence harness before adding engine complexity.
       size, and hash. This remains corpus-only evidence, not editor import, alpha compositing, or
       export parity.
 - [x] Add an opt-in real-media corpus runner for large local files.
+- [x] Pin one opt-in local-only H.264 High long-GOP fixture as input to the separately run Software
+      scrub test.
+      Its exact filename, identity, stream, frame/keyframe, and I/P/B evidence are validated below
+      an explicit corpus root; it is never added to Git and makes no hardware, package, playback,
+      or performance claim.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,

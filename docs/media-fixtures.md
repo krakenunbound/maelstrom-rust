@@ -79,6 +79,13 @@ The corpus hook only probes local files; it does not copy, upload, hash into the
 assert a license. Record acquisition source, license/permission, and intended coverage alongside
 the local corpus. Do not add any file without redistribution permission to Git.
 
+The required local long-GOP contract is `scrub-seek-open-gop-qsv-h264.mp4`, located exactly once
+anywhere below `MAELSTROM_REAL_MEDIA_ROOT`. It is never copied to Git. When opted in, the validator
+pins its hash, size, H.264 High/yuv420p 320×180 30 fps stream, five-second duration, frame/keyframe
+counts, and I/P/B evidence. It pins the local input used by the separately opt-in existing Software
+scrub test; the validator itself does not run a scrub test. It makes no hardware, package,
+playback-quality, or performance claim.
+
 `Test-MediaFixtures.ps1 -ManifestOnly` is the fast schema/path/uniqueness validation used when
 FFmpeg is unavailable. The Phase 0 measurement gate remains incomplete: it gates the reordered
 fixture's waveform/decode/preview source-time path, the two generated 10-bit MOV paths, and

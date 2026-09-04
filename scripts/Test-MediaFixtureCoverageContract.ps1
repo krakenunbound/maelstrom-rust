@@ -76,3 +76,43 @@ if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).
     throw 'Manifest 4K coverage contract fixture mutated fixtures/media/manifest.json.'
 }
 Write-Output 'Manifest 4K coverage contract fixture: PASS (rejected in-memory 4K removal; manifest hash unchanged)'
+
+$localCorpusOutput = @()
+$localCorpusRejected = $false
+try {
+    $localCorpusOutput = @(& $validator -ManifestOnly -ManifestLocalCorpusContractSchemaFixture 2>&1)
+}
+catch {
+    $localCorpusRejected = $true
+    $localCorpusOutput = @($_.Exception.Message)
+}
+if (-not $localCorpusRejected) {
+    throw 'Manifest local-corpus schema contract fixture unexpectedly passed.'
+}
+if (($localCorpusOutput -join [Environment]::NewLine) -notmatch 'Required local video picture-type count is invalid') {
+    throw 'Manifest local-corpus schema contract fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest local-corpus schema contract fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest local-corpus schema contract fixture: PASS (rejected in-memory metadata; manifest hash unchanged)'
+
+$localDurationOutput = @()
+$localDurationRejected = $false
+try {
+    $localDurationOutput = @(& $validator -ManifestOnly -ManifestLocalCorpusDurationSchemaFixture 2>&1)
+}
+catch {
+    $localDurationRejected = $true
+    $localDurationOutput = @($_.Exception.Message)
+}
+if (-not $localDurationRejected) {
+    throw 'Manifest local-corpus duration schema fixture unexpectedly passed.'
+}
+if (($localDurationOutput -join [Environment]::NewLine) -notmatch 'Required local fixture identity is invalid') {
+    throw 'Manifest local-corpus duration schema fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest local-corpus duration schema fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest local-corpus duration schema fixture: PASS (rejected non-numeric in-memory duration; manifest hash unchanged)'

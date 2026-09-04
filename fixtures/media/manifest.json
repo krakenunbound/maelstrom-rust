@@ -267,6 +267,34 @@
   "real_media_corpus": {
     "environment_variable": "MAELSTROM_REAL_MEDIA_ROOT",
     "redistribution": "never include proprietary or licensed media in this repository",
-    "usage": "Test-MediaFixtures.ps1 -IncludeRealCorpus reads only files already present below this explicit local root."
+    "usage": "Test-MediaFixtures.ps1 -IncludeRealCorpus validates only required local contracts already present below this explicit local root.",
+    "required_local_fixtures": [
+      {
+        "id": "scrub-seek-open-gop-qsv-h264",
+        "filename": "scrub-seek-open-gop-qsv-h264.mp4",
+        "source": "local_only",
+        "provenance": "Existing local Phase 1 scrub-seek fixture; never copied into Git.",
+        "generation_recipe": "5 seconds of 320x180 30 fps testsrc2 encoded locally with h264_qsv -g 12 -bf 2 -idr_interval 999.",
+        "local_only": true,
+        "permission_policy": "Keep outside Git; validate only when the operator has permission to retain and test this local file.",
+        "sha256": "FAD2B5B4FC3162B78032FF517CB6C3FDB8717979E101D011DAF2A8B146E042D1",
+        "byte_size": 225618,
+        "container": "mov,mp4,m4a,3gp,3g2,mj2",
+        "duration_seconds": 5.0,
+        "video": {
+          "codec": "h264",
+          "profile": "High",
+          "pixel_format": "yuv420p",
+          "rate": "30/1",
+          "width": 320,
+          "height": 180,
+          "has_b_frames": 1,
+          "frame_count": 150,
+          "keyframe_count": 1,
+          "picture_type_counts": { "I": 13, "P": 50, "B": 87 }
+        },
+        "encoder_intent": { "g": 12, "bf": 2, "idr_interval": 999 }
+      }
+    ]
   }
 }

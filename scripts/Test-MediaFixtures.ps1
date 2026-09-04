@@ -8,6 +8,8 @@ param(
     [switch]$ManifestCoverageContractFixture,
     [switch]$ManifestImageContractFixture,
     [switch]$Manifest4kCoverageContractFixture,
+    [switch]$ManifestLocalCorpusContractSchemaFixture,
+    [switch]$ManifestLocalCorpusDurationSchemaFixture,
     [switch]$IncludeRealCorpus
 )
 
@@ -22,7 +24,7 @@ if ($manifest.schema_version -ne 3 -or [string]::IsNullOrWhiteSpace($manifest.ar
     throw 'Unsupported or incomplete media fixture manifest.'
 }
 if ($manifest.artifact_root -ne 'artifacts/media-fixtures') { throw 'Unexpected fixture artifact root.' }
-if (($ManifestCoverageContractFixture -or $ManifestImageContractFixture -or $Manifest4kCoverageContractFixture) -and -not $ManifestOnly) {
+if (($ManifestCoverageContractFixture -or $ManifestImageContractFixture -or $Manifest4kCoverageContractFixture -or $ManifestLocalCorpusContractSchemaFixture -or $ManifestLocalCorpusDurationSchemaFixture) -and -not $ManifestOnly) {
     throw 'Manifest contract fixtures are permitted only with -ManifestOnly.'
 }
 if ($ManifestImageContractFixture) {
@@ -30,6 +32,54 @@ if ($ManifestImageContractFixture) {
     if ($imageFixtures.Count -lt 1) { throw 'Manifest image contract fixture requires at least one image fixture.' }
     $imageFixtures[0].image.pixel_format = $null
 }
+if ($ManifestLocalCorpusContractSchemaFixture) {
+    $manifest.real_media_corpus.required_local_fixtures[0].video.picture_type_counts.B = 'invalid'
+}
+if ($ManifestLocalCorpusDurationSchemaFixture) {
+    $manifest.real_media_corpus.required_local_fixtures[0].duration_seconds = '5'
+}
+
+function Test-LocalContractInteger([object]$Value, [int64]$Minimum, [int64]$Maximum) {
+    if ($null -eq $Value) { return $false }
+    $integerTypes = @([sbyte], [byte], [int16], [uint16], [int], [uint32], [int64], [uint64])
+    if ($Value.GetType() -notin $integerTypes) { return $false }
+    $integer = [int64]$Value
+    return $integer -ge $Minimum -and $integer -le $Maximum
+}
+function Test-LocalContractFiniteNumber([object]$Value) {
+    if ($null -eq $Value) { return $false }
+    $numericTypes = @([sbyte], [byte], [int16], [uint16], [int], [uint32], [int64], [uint64], [single], [double], [decimal])
+    if ($Value.GetType() -notin $numericTypes) { return $false }
+    $number = [double]$Value
+    return [double]::IsFinite($number)
+}
+function Assert-LocalCorpusContractSchema([object]$Corpus) {
+    foreach ($field in 'environment_variable', 'redistribution', 'usage') {
+        if ($null -eq $Corpus.$field -or [string]::IsNullOrWhiteSpace([string]$Corpus.$field)) { throw "Real-media corpus is missing $field." }
+    }
+    if ($null -eq $Corpus.required_local_fixtures -or @($Corpus.required_local_fixtures).Count -lt 1) { throw 'Real-media corpus is missing required_local_fixtures.' }
+    $seenIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $seenNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($fixture in @($Corpus.required_local_fixtures)) {
+        foreach ($field in 'id', 'filename', 'source', 'provenance', 'generation_recipe', 'local_only', 'permission_policy', 'sha256', 'byte_size', 'container', 'duration_seconds', 'video', 'encoder_intent') {
+            if ($null -eq $fixture.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.$field)) { throw "Required local fixture is missing $field." }
+        }
+        if ($fixture.source -ne 'local_only' -or $fixture.local_only -isnot [bool] -or -not $fixture.local_only) { throw "Required local fixture must be local-only: $($fixture.id)." }
+        if (-not $seenIds.Add([string]$fixture.id) -or -not $seenNames.Add([string]$fixture.filename)) { throw "Duplicate required local fixture id or filename: $($fixture.id)." }
+        if ([IO.Path]::IsPathRooted($fixture.filename) -or [IO.Path]::GetFileName([string]$fixture.filename) -ne $fixture.filename -or $fixture.filename -in @('.', '..')) { throw "Required local fixture filename is unsafe: $($fixture.id)." }
+        if ([string]$fixture.sha256 -notmatch '^[A-F0-9]{64}$' -or -not (Test-LocalContractInteger $fixture.byte_size 1 ([int64]::MaxValue)) -or -not (Test-LocalContractFiniteNumber $fixture.duration_seconds) -or [double]$fixture.duration_seconds -le 0) { throw "Required local fixture identity is invalid: $($fixture.id)." }
+        foreach ($field in 'codec', 'profile', 'pixel_format', 'rate', 'width', 'height', 'has_b_frames', 'frame_count', 'keyframe_count', 'picture_type_counts') {
+            if ($null -eq $fixture.video.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.video.$field)) { throw "Required local video fixture is missing ${field}: $($fixture.id)." }
+        }
+        if ([string]$fixture.video.rate -notmatch '^([1-9]\d{0,17})/([1-9]\d{0,17})$' -or -not (Test-LocalContractInteger $fixture.video.width 1 16384) -or -not (Test-LocalContractInteger $fixture.video.height 1 16384) -or -not (Test-LocalContractInteger $fixture.video.has_b_frames 0 16) -or -not (Test-LocalContractInteger $fixture.video.frame_count 1 1000000) -or -not (Test-LocalContractInteger $fixture.video.keyframe_count 1 1000000)) { throw "Required local video metadata is invalid: $($fixture.id)." }
+        foreach ($pictureType in 'I', 'P', 'B') { if (-not (Test-LocalContractInteger $fixture.video.picture_type_counts.$pictureType 0 1000000)) { throw "Required local video picture-type count is invalid: $($fixture.id)." } }
+        $pictureTypeTotal = [int64]$fixture.video.picture_type_counts.I + [int64]$fixture.video.picture_type_counts.P + [int64]$fixture.video.picture_type_counts.B
+        if ($pictureTypeTotal -ne [int64]$fixture.video.frame_count -or [int64]$fixture.video.keyframe_count -gt [int64]$fixture.video.picture_type_counts.I -or (($fixture.video.picture_type_counts.B -gt 0) -ne ($fixture.video.has_b_frames -gt 0))) { throw "Required local video frame evidence is inconsistent: $($fixture.id)." }
+        if (-not (Test-LocalContractInteger $fixture.encoder_intent.g 1 1000000) -or -not (Test-LocalContractInteger $fixture.encoder_intent.bf 0 16) -or -not (Test-LocalContractInteger $fixture.encoder_intent.idr_interval 0 1000000)) { throw "Required local encoder intent is invalid: $($fixture.id)." }
+    }
+}
+
+Assert-LocalCorpusContractSchema $manifest.real_media_corpus
 $seenIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $seenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($fixture in $manifest.fixtures) {
@@ -141,6 +191,7 @@ $expectedArtifactPath = Join-Path $repoRoot 'artifacts\media-fixtures'
 if (-not [string]::Equals($artifactPath, $expectedArtifactPath, [StringComparison]::OrdinalIgnoreCase)) { throw "Fixture artifacts must be the ignored local artifact directory: $expectedArtifactPath" }
 
 function Assert-Equal([object]$Actual, [object]$Expected, [string]$Label) { if ([string]$Actual -ne [string]$Expected) { throw "$Label expected $Expected, got $Actual." } }
+function Assert-LocalContractEqual([object]$Actual, [object]$Expected, [string]$FixtureId, [string]$Label) { if ([string]$Actual -ne [string]$Expected) { throw "Required local fixture $FixtureId validation failed: $Label." } }
 function Get-Sha256Hex([string]$Text) {
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try { return ([Convert]::ToHexString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))) }
@@ -349,10 +400,42 @@ foreach ($fixture in $manifest.fixtures) {
 if ($IncludeRealCorpus) {
     $corpusRoot = $env:MAELSTROM_REAL_MEDIA_ROOT
     if ([string]::IsNullOrWhiteSpace($corpusRoot)) { throw 'Set MAELSTROM_REAL_MEDIA_ROOT to an explicit local corpus directory.' }
-    $resolvedCorpus = (Resolve-Path -LiteralPath $corpusRoot).Path
-    $files = Get-ChildItem -LiteralPath $resolvedCorpus -File -Recurse
-    if ($files.Count -eq 0) { throw "Real-media corpus is empty: $resolvedCorpus" }
-    foreach ($file in $files) { & $ffprobe -v error -show_format -of json $file.FullName *> $null; if ($LASTEXITCODE -ne 0) { throw "Real-media corpus probe failed: $($file.FullName)" } }
-    Write-Output "Real-media corpus: PASS ($($files.Count) files)"
+    try { $resolvedCorpus = (Resolve-Path -LiteralPath $corpusRoot).Path }
+    catch { throw 'Real-media corpus root is unavailable.' }
+    $resolvedPrefix = $resolvedCorpus.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($fixture in @($manifest.real_media_corpus.required_local_fixtures)) {
+        try { $matches = @(Get-ChildItem -LiteralPath $resolvedCorpus -File -Recurse | Where-Object { $_.Name -ceq $fixture.filename }) }
+        catch { throw "Required local fixture discovery failed: $($fixture.id)." }
+        if ($matches.Count -eq 0) { throw "Missing required local fixture: $($fixture.filename)." }
+        if ($matches.Count -ne 1) { throw "Required local fixture filename is not unique: $($fixture.filename)." }
+        try { $path = (Resolve-Path -LiteralPath $matches[0].FullName).Path }
+        catch { throw "Required local fixture resolution failed: $($fixture.id)." }
+        if (-not $path.StartsWith($resolvedPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Required local fixture escaped corpus root: $($fixture.filename)." }
+        Assert-LocalContractEqual (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $fixture.sha256 $fixture.id 'hash mismatch'
+        Assert-LocalContractEqual (Get-Item -LiteralPath $path).Length $fixture.byte_size $fixture.id 'byte-size mismatch'
+        $json = & $ffprobe -v error -show_streams -show_format -of json $path 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "ffprobe failed for required local fixture: $($fixture.id)" }
+        $probe = $json | ConvertFrom-Json
+        Assert-LocalContractEqual $probe.format.format_name $fixture.container $fixture.id 'container mismatch'
+        $duration = [double]$probe.format.duration
+        if ([Math]::Abs($duration - [double]$fixture.duration_seconds) -gt 0.01) { throw "Required local fixture $($fixture.id) validation failed: duration mismatch." }
+        $video = @($probe.streams | Where-Object codec_type -eq 'video')[0]
+        if ($null -eq $video) { throw "Missing video stream for required local fixture: $($fixture.id)" }
+        Assert-LocalContractEqual $video.codec_name $fixture.video.codec $fixture.id 'video codec mismatch'
+        Assert-LocalContractEqual $video.profile $fixture.video.profile $fixture.id 'video profile mismatch'
+        Assert-LocalContractEqual $video.pix_fmt $fixture.video.pixel_format $fixture.id 'video pixel-format mismatch'
+        Assert-LocalContractEqual $video.r_frame_rate $fixture.video.rate $fixture.id 'video rate mismatch'
+        Assert-LocalContractEqual $video.width $fixture.video.width $fixture.id 'video width mismatch'
+        Assert-LocalContractEqual $video.height $fixture.video.height $fixture.id 'video height mismatch'
+        Assert-LocalContractEqual $video.has_b_frames $fixture.video.has_b_frames $fixture.id 'video B-frame mismatch'
+        Assert-LocalContractEqual $video.nb_frames $fixture.video.frame_count $fixture.id 'video frame-count mismatch'
+        $frameJson = & $ffprobe -v error -select_streams v:0 -show_frames -show_entries frame=key_frame,pict_type -of json $path 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "ffprobe frame scan failed for required local fixture: $($fixture.id)" }
+        $frames = @((($frameJson | ConvertFrom-Json).frames) | Where-Object { $_.pict_type -in @('I', 'P', 'B') })
+        Assert-LocalContractEqual $frames.Count $fixture.video.frame_count $fixture.id 'scanned frame-count mismatch'
+        Assert-LocalContractEqual @($frames | Where-Object { [int]$_.key_frame -eq 1 }).Count $fixture.video.keyframe_count $fixture.id 'keyframe-count mismatch'
+        foreach ($pictureType in 'I', 'P', 'B') { Assert-LocalContractEqual @($frames | Where-Object pict_type -eq $pictureType).Count $fixture.video.picture_type_counts.$pictureType $fixture.id "${pictureType}-frame-count mismatch" }
+    }
+    Write-Output "Real-media corpus: PASS ($(@($manifest.real_media_corpus.required_local_fixtures).Count) required local fixtures)"
 }
 Write-Output "Media fixtures: PASS ($($manifest.fixtures.Count) fixtures)"
