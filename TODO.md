@@ -171,7 +171,7 @@ Last updated: 2026-09-04
   actor-budget tests. Teardown now waits for the asynchronous source reaper, live source
   ownership, and sticky FFmpeg session count to reach zero before deleting temporary files.
   Twenty focused release repetitions of each repaired path and ten consecutive complete decoder
-  suites pass; the current serial release workspace reports 906 passed and 36 opt-in ignored,
+  suites pass; the current serial release workspace reports 910 passed and 36 opt-in ignored,
   together with strict all-target Clippy and formatting. No editor was launched.
 - [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
   EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
@@ -552,7 +552,7 @@ Last updated: 2026-09-04
   identical exact-boundary, hold, and timeline-end addressing. Import reconciles the source, placed clip, and
   video strip to 542 ms while retaining the 9.542-second raw container duration for
   inspection. This is one intra-only lossless/container
-  checkpoint; the 14-fixture Phase 0 matrix and 906-test serial release workspace pass,
+  checkpoint; the 14-fixture Phase 0 matrix and 910-test serial release workspace pass,
   while broad VFR qualification remains open.
   Generated FFVHUFF Matroska now adds a clean software-only 160×90 lossless
   RGB-family/BGRA VFR path with eight selected frames, a five-second origin, and
@@ -643,14 +643,17 @@ Last updated: 2026-09-04
   [Vulkan capability contract](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html).
 - [ ] Keep the compact EN/JA interface, default panel sizing, border padding, nested menus, and
   draggable/scrubbable numeric controls consistent as features land.
-- [x] Add real detachable/re-dockable native frames for Media Pool, Viewer, Timeline, the complete
-  right sidebar, and Undertow. Support cross-monitor movement, saved workspace placement,
+- [x] Add real detachable/re-dockable native frames for Media Pool, Viewer, Timeline, every
+  Inspector/Audio/Color/Effects/Media section, and Undertow. Support cross-monitor movement, saved workspace placement,
   close-to-reattach, safe recovery when a monitor disappears, and one shared editor/undo/render
   authority. Keep the current organized panel sizing as the single-window default and prove that
   detaching does not duplicate decode work or break interaction budgets.
-  - [x] Ship the first native Edit slice for Media Pool, Viewer, Timeline, and the complete right
-    sidebar, including four dock regions, tab groups, cross-window transition drops, local monitor
+  - [x] Ship the native Edit panels for Media Pool, Viewer, Timeline, and each right-sidebar
+    section, including four dock regions, tab groups, cross-window transition drops, local monitor
     geometry, mixed-DPI resize handling, and close-to-reattach behavior.
+  - [x] Preserve the compact five-tab right sidebar as the organized default while allowing each
+    tab to detach independently. Migrate the legacy combined Tools dock/detach and machine-local
+    geometry without overwriting newer per-panel placements.
   - [x] Extend the native host contract to independent Undertow Tools and Mixer frames while
     reusing the one authoritative Timeline. Edit/Undertow dock positions and active tabs remain
     isolated, legacy projects migrate safely, and default-minus-detached layouts retain the

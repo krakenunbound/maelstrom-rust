@@ -103,7 +103,20 @@ fn load_detached_geometry() -> HashMap<String, DetachedPanelGeometry> {
     fs::read(detached_geometry_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .map(migrate_legacy_tools_geometry)
         .unwrap_or_default()
+}
+
+fn migrate_legacy_tools_geometry(
+    mut geometry: HashMap<String, DetachedPanelGeometry>,
+) -> HashMap<String, DetachedPanelGeometry> {
+    if let Some(legacy) = geometry.get(EditorPanel::Tools.id()).cloned() {
+        geometry
+            .entry(EditorPanel::Inspector.id().to_owned())
+            .or_insert(legacy);
+    }
+    geometry.remove(EditorPanel::Tools.id());
+    geometry
 }
 
 impl NativeViewportHost {
@@ -229,6 +242,39 @@ mod native_viewport_host_tests {
         assert_eq!(decoded["viewer"].size, [960.0, 720.0]);
         assert_eq!(decoded["viewer"].scale_factor, 1.5);
         assert_eq!(decoded["viewer"].monitor_name.as_deref(), Some("Secondary"));
+    }
+
+    #[test]
+    fn legacy_tools_geometry_moves_to_inspector_without_overwriting_new_placement() {
+        let legacy = DetachedPanelGeometry {
+            position: Some([1920.0, 40.0]),
+            size: [300.0, 720.0],
+            scale_factor: 1.5,
+            monitor_name: Some("Secondary".to_owned()),
+        };
+        let explicit = DetachedPanelGeometry {
+            position: Some([80.0, 60.0]),
+            size: [420.0, 640.0],
+            scale_factor: 1.0,
+            monitor_name: Some("Primary".to_owned()),
+        };
+        let migrated_legacy_only = migrate_legacy_tools_geometry(HashMap::from([(
+            EditorPanel::Tools.id().to_owned(),
+            legacy.clone(),
+        )]));
+        let inspector = &migrated_legacy_only[EditorPanel::Inspector.id()];
+        assert_eq!(inspector.position, Some([1920.0, 40.0]));
+        assert_eq!(inspector.monitor_name.as_deref(), Some("Secondary"));
+
+        let migrated = migrate_legacy_tools_geometry(HashMap::from([
+            (EditorPanel::Tools.id().to_owned(), legacy),
+            (EditorPanel::Inspector.id().to_owned(), explicit),
+        ]));
+
+        assert!(!migrated.contains_key(EditorPanel::Tools.id()));
+        let inspector = &migrated[EditorPanel::Inspector.id()];
+        assert_eq!(inspector.position, Some([80.0, 60.0]));
+        assert_eq!(inspector.monitor_name.as_deref(), Some("Primary"));
     }
 }
 

@@ -6,12 +6,16 @@ decode, undo, autosave, or export state.
 
 ## Available detachable sections
 
-The Edit workspace exposes four independently detachable sections:
+The Edit workspace exposes eight independently detachable sections:
 
 - Media Pool
 - Viewer
 - Timeline
-- Tools (Inspector, Audio, Color, Effects, and Media tabs)
+- Inspector
+- Audio
+- Color
+- Effects
+- Media details
 
 Undertow exposes two additional native sections while reusing the same detachable Timeline:
 
@@ -23,7 +27,9 @@ is saved separately for Edit and Undertow: Bottom remains the Edit default, whil
 the Undertow default. Active dock tabs are also scoped per workspace, so arranging audio panels
 does not rearrange or change the selected tabs in Edit.
 
-The existing organized single-window layout remains the default. A detached section disappears
+The existing organized single-window layout remains the default, including its compact five-tab
+right sidebar. Detaching any sidebar tab promotes only that tab into its own native window; the
+other tabs remain available and independently detachable. A detached section disappears
 from that layout and the remaining sections expand into the released space. Its native window can
 be moved or resized on any connected monitor. The View > Panels menu and detached-panel Dock menu
 can return it to the Left, Center, Right, or Bottom region. Panels sharing a region become tabs;
@@ -63,13 +69,18 @@ The slice is complete only when:
 3. child close does not exit the application and root close still does;
 4. edits made in any panel use the same selection, undo, autosave, and project snapshot;
 5. Viewer and Timeline surfaces keep their retained native rendering path;
-6. transition drag can begin in detached Tools, end in detached Timeline, apply once, and undo;
+6. transition drag can begin in detached Effects, end in detached Timeline, apply once, and undo;
 7. focused unit and workspace tests pass through the project runtime runner; and
 8. no Maelstrom, Cargo, compiler, FFmpeg, or test process is left running.
 
 ## Workspace persistence
 
-Dock destinations and detached membership are backward-compatible project view state. Edit and
+Dock destinations and detached membership are backward-compatible project view state. Projects
+saved by the earlier combined-Tools build migrate that dock destination to all five sidebar
+sections. If the combined Tools window was detached, its runtime-only tab selection would have
+restored to Inspector, so the migration detaches Inspector and leaves the other four sections
+docked. The old machine-local Tools geometry follows Inspector and never overwrites a newer
+Inspector placement. Edit and
 Undertow dock maps are stored independently; older projects retain their Edit layout and receive
 the organized Undertow defaults. Native
 window geometry is saved separately in the machine-local Maelstrom preferences as desktop-space

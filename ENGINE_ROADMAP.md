@@ -117,7 +117,7 @@ Build the evidence harness before adding engine complexity.
       diagnostic and actor-budget tests now wait for their asynchronous source reapers, live
       actors, and sticky FFmpeg sessions to reach zero before deleting temporary media. Twenty
       focused repetitions of each repaired path, ten consecutive complete decoder-suite runs, and
-      the current serial release workspace passed on 2026-09-04: 906 tests passed, 36 opt-in tests
+      the current serial release workspace passed on 2026-09-04: 910 tests passed, 36 opt-in tests
       were ignored, strict all-target Clippy and formatting were clean, and no editor was launched.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
@@ -494,7 +494,7 @@ Turn the single topmost-source monitor into a scheduler capable of feeding a com
       runtime-only frame index through real asynchronous analysis, and 44 production-graph export source
       identities across ten 30/1 and 30000/1001 cases. It does not close this
       broad VFR item or establish hardware, long-GOP, color, GUI, or performance parity.
-      The complete 14-fixture Phase 0 matrix and 906-test serial release workspace pass;
+      The complete 14-fixture Phase 0 matrix and 910-test serial release workspace pass;
       the editor executable was not launched.
       Generated FFVHUFF Matroska adds a clean lossless RGB-family/BGRA
       source/container checkpoint with eight selected 160×90 VFR frames, a
@@ -1086,15 +1086,18 @@ Improve information density without coupling it to live decode.
 - [ ] Make Project Hub collections persistent and allow projects to be moved/copied between them.
 - [ ] Add workspace presets and persist every explicit panel choice without overriding defaults.
 - [x] Add detachable, re-dockable native frames for every major editor section: Media Pool,
-      Viewer, Timeline, the Inspector/Audio/Color/Effects/Media sidebar, and Undertow. Detached
+      Viewer, Timeline, each of Inspector, Audio, Color, Effects, and Media, plus Undertow. Detached
       frames must move independently across monitors, share one authoritative editor state, and
       restore their saved workspace placement without replacing the organized single-window
       default. Closing a detached frame reattaches its section; monitor removal clamps it safely
       onto an available display instead of losing the panel off-screen.
-      The native host now covers the four Edit sections plus independent Undertow Tools and Mixer
-      frames while reusing the one Timeline surface/state authority. Edit and Undertow persist
+      The native host now covers eight independent Edit sections plus Undertow Tools and Mixer
+      frames while reusing the one Timeline surface/state authority. The compact default still
+      presents the five right-side sections as tabs; any one can be promoted to its own window.
+      Edit and Undertow persist
       separate dock maps and session tab selections; legacy projects keep Edit's Bottom Timeline
-      and receive Undertow's Center Timeline default. Native geometry remains machine-local, and
+      and receive Undertow's Center Timeline default. Legacy combined-Tools layouts migrate to the
+      individual sidebar panels without reintroducing duplicate state. Native geometry remains machine-local, and
       unavailable monitor placement is recovered onto an available display. Full UI/app tests,
       strict Clippy, and an independent regression review pass without launching the editor. See
       `docs/detachable-workspaces.md`.

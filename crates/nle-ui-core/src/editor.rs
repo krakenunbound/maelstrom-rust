@@ -1007,6 +1007,12 @@ pub enum EditorPanel {
     MediaPool,
     Viewer,
     Timeline,
+    Inspector,
+    Audio,
+    Color,
+    Effects,
+    MediaDetails,
+    /// Legacy serialized sidebar destination. Migrated on restore; never rendered live.
     Tools,
     UndertowTools,
     UndertowMixer,
@@ -1029,15 +1035,28 @@ pub struct EditorPanelDock {
 }
 
 impl EditorPanel {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
         Self::MediaPool,
         Self::Viewer,
         Self::Timeline,
-        Self::Tools,
+        Self::Inspector,
+        Self::Audio,
+        Self::Color,
+        Self::Effects,
+        Self::MediaDetails,
         Self::UndertowTools,
         Self::UndertowMixer,
     ];
-    pub const EDIT: [Self; 4] = [Self::MediaPool, Self::Viewer, Self::Timeline, Self::Tools];
+    pub const EDIT: [Self; 8] = [
+        Self::MediaPool,
+        Self::Viewer,
+        Self::Timeline,
+        Self::Inspector,
+        Self::Audio,
+        Self::Color,
+        Self::Effects,
+        Self::MediaDetails,
+    ];
     pub const UNDERTOW: [Self; 3] = [Self::UndertowTools, Self::Timeline, Self::UndertowMixer];
 
     pub const fn id(self) -> &'static str {
@@ -1045,6 +1064,11 @@ impl EditorPanel {
             Self::MediaPool => "media-pool",
             Self::Viewer => "viewer",
             Self::Timeline => "timeline",
+            Self::Inspector => "inspector",
+            Self::Audio => "audio",
+            Self::Color => "color",
+            Self::Effects => "effects",
+            Self::MediaDetails => "media-details",
             Self::Tools => "tools",
             Self::UndertowTools => "undertow-tools",
             Self::UndertowMixer => "undertow-mixer",
@@ -1059,6 +1083,16 @@ impl EditorPanel {
             (Language::Japanese, Self::Viewer) => "ビューア",
             (Language::English, Self::Timeline) => "Timeline",
             (Language::Japanese, Self::Timeline) => "タイムライン",
+            (Language::English, Self::Inspector) => "Inspector",
+            (Language::Japanese, Self::Inspector) => "インスペクタ",
+            (Language::English, Self::Audio) => "Audio",
+            (Language::Japanese, Self::Audio) => "音声",
+            (Language::English, Self::Color) => "Color",
+            (Language::Japanese, Self::Color) => "カラー",
+            (Language::English, Self::Effects) => "Effects",
+            (Language::Japanese, Self::Effects) => "エフェクト",
+            (Language::English, Self::MediaDetails) => "Media",
+            (Language::Japanese, Self::MediaDetails) => "メディア",
             (Language::English, Self::Tools) => "Tools",
             (Language::Japanese, Self::Tools) => "ツール",
             (Language::English, Self::UndertowTools) => "Undertow Tools",
@@ -1073,6 +1107,10 @@ impl EditorPanel {
             Self::MediaPool => Vec2::new(420.0, 720.0),
             Self::Viewer => Vec2::new(960.0, 720.0),
             Self::Timeline => Vec2::new(1280.0, 440.0),
+            Self::Inspector => Vec2::new(360.0, 720.0),
+            Self::Audio | Self::Effects => Vec2::new(420.0, 720.0),
+            Self::Color => Vec2::new(440.0, 760.0),
+            Self::MediaDetails => Vec2::new(380.0, 720.0),
             Self::Tools => Vec2::new(300.0, 720.0),
             Self::UndertowTools => Vec2::new(360.0, 720.0),
             Self::UndertowMixer => Vec2::new(420.0, 720.0),
@@ -1094,6 +1132,9 @@ impl EditorPanel {
             Self::MediaPool => EditorDockSlot::Left,
             Self::Viewer => EditorDockSlot::Center,
             Self::Timeline => EditorDockSlot::Bottom,
+            Self::Inspector | Self::Audio | Self::Color | Self::Effects | Self::MediaDetails => {
+                EditorDockSlot::Right
+            }
             Self::Tools => EditorDockSlot::Right,
             Self::UndertowTools => EditorDockSlot::Left,
             Self::UndertowMixer => EditorDockSlot::Right,
@@ -1114,7 +1155,14 @@ impl EditorPanel {
         match workspace {
             EditorWorkspace::Edit => matches!(
                 self,
-                Self::MediaPool | Self::Viewer | Self::Timeline | Self::Tools
+                Self::MediaPool
+                    | Self::Viewer
+                    | Self::Timeline
+                    | Self::Inspector
+                    | Self::Audio
+                    | Self::Color
+                    | Self::Effects
+                    | Self::MediaDetails
             ),
             EditorWorkspace::Undertow => matches!(
                 self,
@@ -2092,6 +2140,9 @@ impl EditorState {
     }
 
     pub fn toggle_panel_detached(&mut self, panel: EditorPanel) {
+        if !EditorPanel::ALL.contains(&panel) {
+            return;
+        }
         if !self.detached_panels.insert(panel) {
             self.detached_panels.remove(&panel);
             let workspace = self.dock_workspace_for_panel(panel);
@@ -2200,6 +2251,11 @@ impl EditorState {
             && !self.is_panel_detached(panel)
         {
             self.active_dock_tabs.insert((workspace, slot), panel);
+            if workspace == EditorWorkspace::Edit
+                && let Some(tab) = RightSidebarTab::from_panel(panel)
+            {
+                self.right_sidebar_tab = tab;
+            }
         }
     }
 
@@ -2829,7 +2885,26 @@ impl EditorState {
             .saturating_add(1)
             .max(1);
         state.selected_media = snapshot.view.selected_media.filter(|id| ids.contains(id));
-        state.detached_panels = snapshot.view.detached_panels.into_iter().collect();
+        let legacy_tools_detached = snapshot.view.detached_panels.contains(&EditorPanel::Tools);
+        state.detached_panels = snapshot
+            .view
+            .detached_panels
+            .into_iter()
+            .filter(|panel| {
+                *panel != EditorPanel::Tools
+                    && (panel.belongs_to_workspace(EditorWorkspace::Edit)
+                        || panel.belongs_to_workspace(EditorWorkspace::Undertow))
+            })
+            .collect();
+        if legacy_tools_detached {
+            state.detached_panels.insert(EditorPanel::Inspector);
+        }
+        let legacy_tools_dock = snapshot
+            .view
+            .panel_docks
+            .iter()
+            .find(|dock| dock.panel == EditorPanel::Tools)
+            .map(|dock| dock.slot);
         state.panel_docks = snapshot
             .view
             .panel_docks
@@ -2839,10 +2914,20 @@ impl EditorState {
             .map(|dock| (dock.panel, dock.slot))
             .collect();
         for panel in EditorPanel::EDIT {
-            state
-                .panel_docks
-                .entry(panel)
-                .or_insert_with(|| panel.default_dock_slot());
+            state.panel_docks.entry(panel).or_insert_with(|| {
+                if matches!(
+                    panel,
+                    EditorPanel::Inspector
+                        | EditorPanel::Audio
+                        | EditorPanel::Color
+                        | EditorPanel::Effects
+                        | EditorPanel::MediaDetails
+                ) {
+                    legacy_tools_dock.unwrap_or_else(|| panel.default_dock_slot())
+                } else {
+                    panel.default_dock_slot()
+                }
+            });
         }
         state.undertow_panel_docks = snapshot
             .view
@@ -5021,7 +5106,7 @@ impl EditorState {
         self.record_timeline_history(before);
         self.selected_timeline_clip = Some(left);
         self.selected_title = None;
-        self.right_sidebar_tab = RightSidebarTab::Effects;
+        select_right_sidebar_tab(self, RightSidebarTab::Effects);
         self.mark_durable_edit();
         true
     }
@@ -7090,6 +7175,11 @@ fn dock_region(
                     timeline_with_canvas(ui, state, ui.available_height(), timeline_canvas)
                 }
                 EditorPanel::Tools => details(ui, state),
+                EditorPanel::Inspector
+                | EditorPanel::Audio
+                | EditorPanel::Color
+                | EditorPanel::Effects
+                | EditorPanel::MediaDetails => right_sidebar_panel(ui, state, panel),
                 EditorPanel::UndertowTools => undertow_tools_and_tracks(ui, state),
                 EditorPanel::UndertowMixer => {
                     let focused_track = state.ensure_undertow_track();
@@ -7429,6 +7519,11 @@ fn show_detached_panels(
                                 );
                             }
                             EditorPanel::Tools => details(ui, state),
+                            EditorPanel::Inspector
+                            | EditorPanel::Audio
+                            | EditorPanel::Color
+                            | EditorPanel::Effects
+                            | EditorPanel::MediaDetails => right_sidebar_panel(ui, state, panel),
                             EditorPanel::UndertowTools => undertow_tools_and_tracks(ui, state),
                             EditorPanel::UndertowMixer => {
                                 let focused_track = state.ensure_undertow_track();
@@ -9270,6 +9365,27 @@ impl RightSidebarTab {
         Self::Effects,
         Self::Media,
     ];
+
+    const fn panel(self) -> EditorPanel {
+        match self {
+            Self::Inspector => EditorPanel::Inspector,
+            Self::Audio => EditorPanel::Audio,
+            Self::Color => EditorPanel::Color,
+            Self::Effects => EditorPanel::Effects,
+            Self::Media => EditorPanel::MediaDetails,
+        }
+    }
+
+    const fn from_panel(panel: EditorPanel) -> Option<Self> {
+        match panel {
+            EditorPanel::Inspector => Some(Self::Inspector),
+            EditorPanel::Audio => Some(Self::Audio),
+            EditorPanel::Color => Some(Self::Color),
+            EditorPanel::Effects => Some(Self::Effects),
+            EditorPanel::MediaDetails => Some(Self::Media),
+            _ => None,
+        }
+    }
 
     fn label(self, language: Language) -> &'static str {
         match (language, self) {
@@ -12398,6 +12514,29 @@ fn details(ui: &mut Ui, state: &mut EditorState) {
         });
 }
 
+/// Custom/detached sidebar panels intentionally omit the legacy five-tab header; the dock tab
+/// itself is their selector. Default layout continues to use `details` unchanged.
+fn right_sidebar_panel(ui: &mut Ui, state: &mut EditorState, panel: EditorPanel) {
+    let tab = match panel {
+        EditorPanel::Inspector => RightSidebarTab::Inspector,
+        EditorPanel::Audio => RightSidebarTab::Audio,
+        EditorPanel::Color => RightSidebarTab::Color,
+        EditorPanel::Effects => RightSidebarTab::Effects,
+        EditorPanel::MediaDetails => RightSidebarTab::Media,
+        _ => return,
+    };
+    egui::ScrollArea::vertical()
+        .id_salt(tab.scroll_id())
+        .auto_shrink([false, false])
+        .show(ui, |ui| match tab {
+            RightSidebarTab::Inspector => inspector_details(ui, state),
+            RightSidebarTab::Audio => audio_details(ui, state),
+            RightSidebarTab::Color => color_details(ui, state),
+            RightSidebarTab::Effects => transition_details(ui, state),
+            RightSidebarTab::Media => metadata_details(ui, state),
+        });
+}
+
 fn right_sidebar_tabs(ui: &mut Ui, state: &mut EditorState) {
     let accent = Color32::from_rgb(83, 190, 226);
     ui.columns(5, |columns| {
@@ -12430,6 +12569,13 @@ fn right_sidebar_tabs(ui: &mut Ui, state: &mut EditorState) {
 
 fn select_right_sidebar_tab(state: &mut EditorState, tab: RightSidebarTab) {
     state.right_sidebar_tab = tab;
+    let panel = tab.panel();
+    if !state.is_panel_detached(panel) {
+        let slot = state.panel_dock(panel);
+        state
+            .active_dock_tabs
+            .insert((EditorWorkspace::Edit, slot), panel);
+    }
 }
 
 fn focus_audio_track_in_audio_tab(state: &mut EditorState, track_id: TrackId) {
@@ -14035,7 +14181,7 @@ fn timeline_with_canvas_presentation(
         {
             state.selected_timeline_clip = Some(left_clip);
             state.selected_title = None;
-            state.right_sidebar_tab = RightSidebarTab::Effects;
+            select_right_sidebar_tab(state, RightSidebarTab::Effects);
             state.mark_durable_edit();
         } else if let Some((title_id, _)) =
             hit_title.filter(|_| pointer.is_some_and(|point| title_lane.contains(point)))
@@ -22908,7 +23054,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_drag_crosses_detached_tools_and_timeline_contexts() {
+    fn transition_drag_crosses_detached_effects_and_timeline_contexts() {
         let mut editor = EditorState::new(Language::English, "Cross-window transition drag");
         editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
         editor.media[0].duration = Some(Tick(6_000_000));
@@ -22967,12 +23113,12 @@ mod tests {
             Some((track, left, right))
         );
 
-        let tools_context = egui::Context::default();
-        let tools_screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 180.0));
+        let effects_context = egui::Context::default();
+        let effects_screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 180.0));
         let mut catalog_rect = Rect::NOTHING;
-        let _ = tools_context.run_ui(
+        let _ = effects_context.run_ui(
             egui::RawInput {
-                screen_rect: Some(tools_screen),
+                screen_rect: Some(effects_screen),
                 ..Default::default()
             },
             |ui| {
@@ -22987,9 +23133,9 @@ mod tests {
             },
         );
         let source = catalog_rect.center();
-        let _ = tools_context.run_ui(
+        let _ = effects_context.run_ui(
             egui::RawInput {
-                screen_rect: Some(tools_screen),
+                screen_rect: Some(effects_screen),
                 events: vec![
                     egui::Event::PointerMoved(source),
                     egui::Event::PointerButton {
@@ -24549,6 +24695,21 @@ mod tests {
     }
 
     #[test]
+    fn right_sidebar_selection_tracks_each_panels_actual_custom_dock() {
+        let mut editor = EditorState::new(Language::English, "Sidebar dock selection");
+        editor.dock_panel_to(EditorPanel::Color, EditorDockSlot::Left);
+        select_right_sidebar_tab(&mut editor, RightSidebarTab::Color);
+        assert_eq!(
+            editor.active_dock_tab_in_workspace(EditorWorkspace::Edit, EditorDockSlot::Left),
+            Some(EditorPanel::Color)
+        );
+
+        editor.dock_panel_to(EditorPanel::Audio, EditorDockSlot::Bottom);
+        editor.select_dock_tab(EditorDockSlot::Bottom, EditorPanel::Audio);
+        assert_eq!(editor.right_sidebar_tab, RightSidebarTab::Audio);
+    }
+
+    #[test]
     fn right_sidebar_tabs_click_and_keep_long_metadata_within_minimum_width() {
         let context = egui::Context::default();
         let mut editor = EditorState::new(Language::English, "Right sidebar layout");
@@ -25675,7 +25836,12 @@ mod tests {
         editor.dock_panel(EditorPanel::MediaPool);
         assert!(!editor.is_panel_detached(EditorPanel::MediaPool));
         editor.toggle_panel_detached(EditorPanel::Timeline);
+        editor.toggle_panel_detached(EditorPanel::Inspector);
         editor.toggle_panel_detached(EditorPanel::Tools);
+        assert!(
+            !editor.is_panel_detached(EditorPanel::Tools),
+            "the legacy aggregate must never re-enter live panel state"
+        );
         editor.reset_workspace_layout();
         assert_eq!(editor.detached_panels().count(), 0);
         assert_ne!(
@@ -25690,10 +25856,135 @@ mod tests {
             EditorPanel::Timeline.title(Language::Japanese),
             "タイムライン"
         );
-        assert_eq!(EditorPanel::Tools.default_size(), Vec2::new(300.0, 720.0));
+        assert_eq!(
+            EditorPanel::Inspector.default_size(),
+            Vec2::new(360.0, 720.0)
+        );
         assert_eq!(
             EditorPanel::UndertowMixer.default_size(),
             Vec2::new(420.0, 720.0)
+        );
+    }
+
+    #[test]
+    fn individual_sidebar_panels_detach_redock_and_round_trip() {
+        let sidebar = [
+            EditorPanel::Inspector,
+            EditorPanel::Audio,
+            EditorPanel::Color,
+            EditorPanel::Effects,
+            EditorPanel::MediaDetails,
+        ];
+        let mut editor = EditorState::new(Language::English, "Individual sidebar panels");
+
+        for (index, panel) in sidebar.into_iter().enumerate() {
+            assert_eq!(panel.default_dock_slot(), EditorDockSlot::Right);
+            assert_ne!(panel.viewport_id(), EditorPanel::Tools.viewport_id());
+            assert_eq!(
+                EditorPanel::from_viewport_id(panel.viewport_id()),
+                Some(panel)
+            );
+            assert!(
+                sidebar
+                    .iter()
+                    .skip(index + 1)
+                    .all(|other| panel.viewport_id() != other.viewport_id())
+            );
+            editor.toggle_panel_detached(panel);
+            assert!(editor.is_panel_detached(panel));
+            let slot = [
+                EditorDockSlot::Left,
+                EditorDockSlot::Center,
+                EditorDockSlot::Right,
+                EditorDockSlot::Bottom,
+                EditorDockSlot::Left,
+            ][index];
+            editor.dock_panel_to(panel, slot);
+            assert!(!editor.is_panel_detached(panel));
+            assert_eq!(editor.panel_dock(panel), slot);
+            editor.toggle_panel_detached(panel);
+        }
+        assert_eq!(
+            EditorPanel::from_viewport_id(EditorPanel::Tools.viewport_id()),
+            None
+        );
+
+        let snapshot = editor.snapshot();
+        assert!(!snapshot.view.detached_panels.contains(&EditorPanel::Tools));
+        assert!(
+            snapshot
+                .view
+                .panel_docks
+                .iter()
+                .all(|dock| dock.panel != EditorPanel::Tools)
+        );
+        let restored =
+            EditorState::restore(Language::Japanese, "Individual sidebar panels", snapshot)
+                .unwrap();
+        assert!(
+            sidebar
+                .iter()
+                .all(|panel| restored.is_panel_detached(*panel))
+        );
+        assert_eq!(
+            EditorPanel::Inspector.title(Language::Japanese),
+            "インスペクタ"
+        );
+        assert_eq!(EditorPanel::Effects.title(Language::English), "Effects");
+        assert_eq!(
+            EditorPanel::MediaDetails.title(Language::Japanese),
+            "メディア"
+        );
+    }
+
+    #[test]
+    fn legacy_tools_workspace_migrates_to_individual_sidebar_panels_once() {
+        let mut snapshot = EditorState::new(Language::English, "Legacy Tools").snapshot();
+        snapshot.view.detached_panels = vec![EditorPanel::Tools];
+        snapshot.view.panel_docks.retain(|dock| {
+            !matches!(
+                dock.panel,
+                EditorPanel::Inspector
+                    | EditorPanel::Audio
+                    | EditorPanel::Color
+                    | EditorPanel::Effects
+                    | EditorPanel::MediaDetails
+            )
+        });
+        snapshot.view.panel_docks.push(EditorPanelDock {
+            panel: EditorPanel::Tools,
+            slot: EditorDockSlot::Center,
+        });
+
+        let restored = EditorState::restore(Language::English, "Legacy Tools", snapshot).unwrap();
+        assert!(restored.is_panel_detached(EditorPanel::Inspector));
+        assert!(!restored.is_panel_detached(EditorPanel::Tools));
+        for panel in [
+            EditorPanel::Inspector,
+            EditorPanel::Audio,
+            EditorPanel::Color,
+            EditorPanel::Effects,
+            EditorPanel::MediaDetails,
+        ] {
+            assert_eq!(restored.panel_dock(panel), EditorDockSlot::Center);
+        }
+        for panel in [
+            EditorPanel::Audio,
+            EditorPanel::Color,
+            EditorPanel::Effects,
+            EditorPanel::MediaDetails,
+        ] {
+            assert!(!restored.is_panel_detached(panel));
+        }
+
+        let migrated = restored.snapshot();
+        assert!(!migrated.view.detached_panels.contains(&EditorPanel::Tools));
+        assert!(
+            migrated
+                .view
+                .panel_docks
+                .iter()
+                .all(|dock| dock.panel != EditorPanel::Tools)
         );
     }
 
