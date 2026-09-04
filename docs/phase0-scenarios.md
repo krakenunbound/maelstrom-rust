@@ -10,9 +10,12 @@ focused Cargo tests gate waveform timestamp-origin normalization, software or qu
 against independent CLI pixels, app preview floor/hold addressing, save/reopen reconstruction of the
 runtime-only shifted-VFR frame index, and source-identity export across
 the reordered TS, shifted/reordered MPEG-4, shifted 10-bit MOV, shifted FFV1/Matroska,
-shifted FFVHUFF/Matroska, and shifted AV1 fixtures. FFV1 and FFVHUFF use
+shifted FFVHUFF/Matroska, and shifted AOM AV1 Matroska/WebM fixtures. The two AV1 containers use
+`MAELSTROM_AV1_VFR_TEST_MEDIA` and `MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA`; both must preserve the
+same eight decoder-derived local presentation boundaries, source origin, save/reopen reconstruction,
+and export identities. FFV1 and FFVHUFF use
 `MAELSTROM_FFV1_VFR_TEST_MEDIA` and `MAELSTROM_FFVHUFF_VFR_TEST_MEDIA`; the runner restores them
-with every other altered variable. The JSON
+and both AV1 variables with every other altered variable. The JSON
 report is written atomically to the ignored `artifacts/phase0-scenarios/` directory.
 
 ```powershell

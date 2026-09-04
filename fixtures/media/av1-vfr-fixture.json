@@ -1,36 +1,69 @@
 {
-  "schema_version": 1,
-  "id": "vfr-av1-aom-shifted-mkv",
+  "schema_version": 2,
+  "id": "vfr-av1-aom-shifted-containers",
   "artifact_root": "artifacts/media-fixtures",
-  "output": {
-    "path": "vfr-av1-aom-shifted.mkv",
-    "sha256": "B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21",
-    "byte_size": 306777,
-    "container": "matroska,webm",
-    "start_time": "5.000000",
-    "duration": "5.433000",
-    "stream": {
-      "codec": "av1",
-      "profile": "Main",
-      "pixel_format": "yuv420p",
-      "width": 352,
-      "height": 288,
-      "has_b_frames": 0,
-      "time_base": "1/1000",
-      "r_frame_rate": "30000/1001",
-      "avg_frame_rate": "3/1"
+  "outputs": [
+    {
+      "id": "matroska",
+      "path": "vfr-av1-aom-shifted.mkv",
+      "sha256": "B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21",
+      "byte_size": 306777,
+      "container": "matroska,webm",
+      "start_time": "5.000000",
+      "duration": "5.433000",
+      "stream": {
+        "codec": "av1",
+        "profile": "Main",
+        "pixel_format": "yuv420p",
+        "width": 352,
+        "height": 288,
+        "has_b_frames": 0,
+        "time_base": "1/1000",
+        "r_frame_rate": "30000/1001",
+        "avg_frame_rate": "3/1"
+      },
+      "packets": [
+        { "pts": 5000, "dts": 5000, "duration": 33, "flags": "K__" },
+        { "pts": 5033, "dts": 5033, "duration": 33, "flags": "K__" },
+        { "pts": 5100, "dts": 5100, "duration": 33, "flags": "K__" },
+        { "pts": 5133, "dts": 5133, "duration": 33, "flags": "K__" },
+        { "pts": 5200, "dts": 5200, "duration": 33, "flags": "K__" },
+        { "pts": 5267, "dts": 5267, "duration": 33, "flags": "K__" },
+        { "pts": 5367, "dts": 5367, "duration": 33, "flags": "K__" },
+        { "pts": 5400, "dts": 5400, "duration": 33, "flags": "K__" }
+      ]
     },
-    "packets": [
-      { "pts": 5000, "dts": 5000, "duration": 33, "flags": "K__" },
-      { "pts": 5033, "dts": 5033, "duration": 33, "flags": "K__" },
-      { "pts": 5100, "dts": 5100, "duration": 33, "flags": "K__" },
-      { "pts": 5133, "dts": 5133, "duration": 33, "flags": "K__" },
-      { "pts": 5200, "dts": 5200, "duration": 33, "flags": "K__" },
-      { "pts": 5267, "dts": 5267, "duration": 33, "flags": "K__" },
-      { "pts": 5367, "dts": 5367, "duration": 33, "flags": "K__" },
-      { "pts": 5400, "dts": 5400, "duration": 33, "flags": "K__" }
-    ]
-  },
+    {
+      "id": "webm",
+      "path": "vfr-av1-aom-shifted.webm",
+      "sha256": "F2060CAA819113F94113065C817B44FF646ED23533FE67CAD66ABC0456A1B664",
+      "byte_size": 306686,
+      "container": "matroska,webm",
+      "start_time": "5.000000",
+      "duration": "5.433000",
+      "stream": {
+        "codec": "av1",
+        "profile": "Main",
+        "pixel_format": "yuv420p",
+        "width": 352,
+        "height": 288,
+        "has_b_frames": 0,
+        "time_base": "1/1000",
+        "r_frame_rate": "30000/1001",
+        "avg_frame_rate": "3/1"
+      },
+      "packets": [
+        { "pts": 5000, "dts": 5000, "duration": 33, "flags": "K__" },
+        { "pts": 5033, "dts": 5033, "duration": 33, "flags": "K__" },
+        { "pts": 5100, "dts": 5100, "duration": 33, "flags": "K__" },
+        { "pts": 5133, "dts": 5133, "duration": 33, "flags": "K__" },
+        { "pts": 5200, "dts": 5200, "duration": 33, "flags": "K__" },
+        { "pts": 5267, "dts": 5267, "duration": 33, "flags": "K__" },
+        { "pts": 5367, "dts": 5367, "duration": 33, "flags": "K__" },
+        { "pts": 5400, "dts": 5400, "duration": 33, "flags": "K__" }
+      ]
+    }
+  ],
   "inputs": [
     {
       "path": "aom-av1-1-b8-02-allintra.ivf",
@@ -62,7 +95,8 @@
     "source_frames": "first 8 of 39 all-intra frames",
     "stream_copy": true,
     "bitstream_filter": "setts with time_base=1/1000 and prescale=1",
-    "ffmpeg_options": ["-fflags +bitexact", "-flags:v +bitexact", "-map_metadata -1"]
+    "ffmpeg_options": ["-fflags +bitexact", "-flags:v +bitexact", "-map_metadata -1"],
+    "webm_remux": "stream-copy the validated temporary Matroska fixture with -copyts and explicit -f webm"
   },
   "upstream_checksum_manifest": "https://aomedia.googlesource.com/aom/+/a40ed1ea9e4ecc3df58a5bccb76623f2c94ae727/test/test-data.sha1",
   "redistribution": "local-only AOM test inputs and derived artifact; this repository does not redistribute either and makes no licensing claim"

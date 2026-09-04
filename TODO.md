@@ -522,6 +522,14 @@ Last updated: 2026-09-04
 
 ## Phase 0–1 verification queue
 
+- [x] Add the local-only shifted AOM AV1 WebM sibling without weakening the existing Matroska
+  contract. FFmpeg 8.1 stream-copies the validated temporary Matroska artifact with `-copyts` and
+  explicit WebM muxing; separate output hashes/sizes and all eight shifted packet timestamps are
+  pinned before either artifact is published. The Phase 0 runner routes and restores
+  `MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA`; waveform, preview, save/reopen, and export source-identity
+  tests prove matching local timing/identity across both containers. This is local container coverage,
+  not broad WebM/AV1 or hardware qualification.
+
 - [x] Route the packaged playback-soak harness exclusively through
       `H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat`. Its non-launching validation proves the
       derived packaged runtime identity without modifying retained soak evidence, and the contract

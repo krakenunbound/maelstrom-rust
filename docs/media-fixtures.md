@@ -132,24 +132,32 @@ real-media, display, or cross-machine coverage.
 fixture. It records AOM checksum manifest commit `a40ed1ea9e4ecc3df58a5bccb76623f2c94ae727`
 as immutable provenance and pins the official 39-frame
 `av1-1-b8-02-allintra.ivf` test vector and MD5 manifest by URL, SHA-1, SHA-256, and size. The first
-eight published frame MD5 values are distinct. The derived `vfr-av1-aom-shifted.mkv` is 306,777
-bytes with SHA-256 `B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21`.
-The script stream-copies the first eight all-intra frames, then uses `setts`
+eight published frame MD5 values are distinct. The contract separately pins the derived
+`vfr-av1-aom-shifted.mkv` (306,777 bytes, SHA-256
+`B8C8092F924CFC743510A3CCC6EEFB627854963D0232497DBB413FCA177ECD21`) and its
+`vfr-av1-aom-shifted.webm` stream-copy sibling (306,686 bytes, SHA-256
+`F2060CAA819113F94113065C817B44FF646ED23533FE67CAD66ABC0456A1B664`). The script
+stream-copies the first eight all-intra frames into temporary Matroska, then uses `setts`
 (`time_base=1/1000`, `prescale=1`) to assign PTS/DTS of 5000, 5033, 5100, 5133, 5200, 5267, 5367,
-and 5400 ms. It does not decode and does not need a GPU.
+and 5400 ms. It remuxes that validated temporary Matroska fixture with `-copyts` and explicit
+`-f webm`; both containers must retain all eight packet identities, the 5.000-second origin, and
+the 5.433-second container duration before either local artifact is replaced. Fixture construction
+does not decode and does not need a GPU.
 
-The AOM inputs and resulting MKV stay only in ignored `artifacts/media-fixtures`; this repository
+The AOM inputs and resulting Matroska/WebM artifacts stay only in ignored `artifacts/media-fixtures`; this repository
 does not redistribute them and makes no licensing claim. Obtain and use the source under its own
 terms.
 
-The opt-in `MAELSTROM_AV1_VFR_TEST_MEDIA` waveform and app checks keep timing decoder-derived:
+The opt-in `MAELSTROM_AV1_VFR_TEST_MEDIA` (Matroska) and
+`MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA` (WebM) waveform and app checks keep timing decoder-derived:
 the normal bounded decoded-frame scan runs first, then AV1 alone retries the production named-decoder
 order (`av1_cuvid`, then `av1_qsv`) when the bundled default decoder produces no usable frames.
 No packet-to-frame assumption is used. The resulting local presentation index is
-0/33/100/133/200/267/367/400 ms, and app preview routing is checked at every boundary in both
-directions. The export gate also checks head, trim, slip, exclusive-tail, and final-frame identity at
-30/1 and 30000/1001. This proves the local fixture and usable decoder paths on this host, not
-arbitrary AV1 conformance or physical-adapter identity.
+0/33/100/133/200/267/367/400 ms for both containers, and app preview routing plus save/reopen
+reconstruction are checked at every boundary in both directions. The export gate also checks head,
+trim, slip, exclusive-tail, and final-frame identity at 30/1 and 30000/1001 for each container.
+This proves these local fixture/container and usable decoder paths on this host, not arbitrary AV1
+conformance, WebM interoperability, or physical-adapter identity.
 
 With already acquired local inputs, run:
 
@@ -168,5 +176,9 @@ To fetch the pinned inputs explicitly from `https://storage.googleapis.com/aom-t
 
 The preparation script accepts no FFmpeg override and requires exactly
 `H:\Maelstrom Rust\.deps\ffmpeg-project-8.1` (FFmpeg 8.1). Downloads and the
-derived output are verified at temporary paths and moved into place only after the complete
-contract passes, so a failed fetch or remux does not replace a known-good local artifact.
+derived outputs are verified at temporary paths and published only after both sibling contracts pass.
+The pair publication retains rollback paths until both moves succeed. A failed fetch, Matroska
+build, WebM remux, or publication move restores the prior sibling pair when possible; if filesystem
+recovery itself fails, the untouched rollback file is preserved and its exact path is reported.
+A named local mutex rejects concurrent preparation before either sibling can be generated or
+published, so two processes cannot interleave their backup and replacement moves.

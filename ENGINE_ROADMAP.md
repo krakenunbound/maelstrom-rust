@@ -111,6 +111,11 @@ Build the evidence harness before adding engine complexity.
       HEVC seek test. Its exact source identity, color, and frame evidence are corpus metadata;
       recorded QSV encoder intent is provenance rather than observable proof, and no GPU, package,
       playback, or performance claim follows.
+- [x] Add a separately pinned local-only WebM stream-copy sibling for the shifted AOM AV1 Matroska
+      fixture. Both containers preserve the five-second origin and all eight PTS/DTS identities;
+      decoder-derived waveform timing, app boundary routing/save-reopen reconstruction, and
+      production export source identity cover each container. This is one local AV1 container seam,
+      not general WebM/AV1 interoperability, hardware, display, or performance qualification.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
 - [x] Keep the ordinary release workspace gate deterministic on Windows. The coordinated-decoder

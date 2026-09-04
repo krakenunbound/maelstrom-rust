@@ -511,3 +511,20 @@ fn supplied_av1_vfr_export_matches_preview_source_identity() {
         final_frame_source_in: 400_000,
     });
 }
+
+#[test]
+fn supplied_av1_webm_vfr_export_matches_preview_source_identity() {
+    shifted_vfr_export_matches_preview(&ShiftedVfrFixture {
+        variable: "MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA",
+        codec: "av1",
+        origin: 5_000_000,
+        pix_fmt: "yuv420p",
+        size: [352, 288],
+        local_pts: &[
+            0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+        ],
+        source_duration: 433_000,
+        exclusive_tail: (267_000, 4),
+        final_frame_source_in: 400_000,
+    });
+}

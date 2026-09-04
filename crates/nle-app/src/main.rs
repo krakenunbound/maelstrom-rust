@@ -17403,6 +17403,17 @@ mod tests {
                 ],
                 433_000,
             ),
+            (
+                "MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA",
+                "av1",
+                5.0,
+                5.433,
+                0.433,
+                [
+                    0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+                ],
+                433_000,
+            ),
         ] {
             let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
                 continue;
@@ -17551,119 +17562,168 @@ mod tests {
 
     #[test]
     fn supplied_shifted_vfr_fixture_reopen_rebuilds_exact_local_boundaries() {
-        let Some(media_path) = std::env::var_os("MAELSTROM_FFV1_VFR_TEST_MEDIA").map(PathBuf::from)
-        else {
-            return;
-        };
-        let catalog = test_catalog_path("shifted-vfr-reopen");
-        let root = catalog.parent().expect("owned test root").to_path_buf();
-        let project_path;
-        let boundaries = [
-            0, 42_000, 125_000, 167_000, 250_000, 333_000, 458_000, 500_000,
-        ];
-        {
-            let mut app = App::new_with_catalog(false, Some(catalog.clone()));
-            app.handle_hub_action(HubAction::NewProject {
-                name: "Shifted VFR".to_owned(),
-                template: nle_ui_core::TemplateId::FullHd1080p,
-                language: Language::English,
-            });
-            app.project_writer.flush();
-            app.editor.add_media_paths([media_path.clone()]);
-            assert!(app.editor.add_selected_to_timeline());
-            app.request_media_analysis(1, media_path.clone());
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !app.media_analysis_in_flight.is_empty() || !app.media_analysis_pending.is_empty()
+        for (
+            variable,
+            local_duration_micros,
+            container_duration,
+            source_origin,
+            final_frame_source_in,
+            boundaries,
+        ) in [
+            (
+                "MAELSTROM_FFV1_VFR_TEST_MEDIA",
+                542_000,
+                9.542,
+                9.0,
+                500_000,
+                [
+                    0, 42_000, 125_000, 167_000, 250_000, 333_000, 458_000, 500_000,
+                ],
+            ),
+            (
+                "MAELSTROM_AV1_VFR_TEST_MEDIA",
+                433_000,
+                5.433,
+                5.0,
+                400_000,
+                [
+                    0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+                ],
+            ),
+            (
+                "MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA",
+                433_000,
+                5.433,
+                5.0,
+                400_000,
+                [
+                    0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+                ],
+            ),
+        ] {
+            let Some(media_path) = std::env::var_os(variable).map(PathBuf::from) else {
+                continue;
+            };
+            let catalog = test_catalog_path("av1-container-vfr-reopen");
+            let root = catalog.parent().expect("owned test root").to_path_buf();
+            let project_path;
             {
+                let mut app = App::new_with_catalog(false, Some(catalog.clone()));
+                app.handle_hub_action(HubAction::NewProject {
+                    name: "Shifted VFR".to_owned(),
+                    template: nle_ui_core::TemplateId::FullHd1080p,
+                    language: Language::English,
+                });
+                app.project_writer.flush();
+                app.editor.add_media_paths([media_path.clone()]);
+                assert!(app.editor.add_selected_to_timeline());
+                app.request_media_analysis(1, media_path.clone());
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !app.media_analysis_in_flight.is_empty()
+                    || !app.media_analysis_pending.is_empty()
+                {
+                    app.poll_media_analysis();
+                    assert!(
+                        Instant::now() < deadline,
+                        "initial {variable} analysis timed out"
+                    );
+                    thread::sleep(Duration::from_millis(2));
+                }
                 app.poll_media_analysis();
-                assert!(Instant::now() < deadline, "initial FFV1 analysis timed out");
+                assert_eq!(
+                    app.editor.media[0].duration,
+                    Some(nle_timeline::Tick(local_duration_micros))
+                );
+                assert_eq!(
+                    app.editor
+                        .media_metadata(1)
+                        .unwrap()
+                        .container_duration_seconds,
+                    Some(container_duration)
+                );
+                app.flush_project_autosave();
+                project_path = app
+                    .project_path_for_id(app.current_project_id.expect("current project ID"))
+                    .expect("current project path");
+            }
+            let project_json = fs::read_to_string(&project_path).expect("saved project JSON");
+            assert!(
+                !project_json.contains("source_frame_time_indexes"),
+                "runtime index must not serialize"
+            );
+            let mut reopened = App::new_with_catalog(false, Some(catalog));
+            reopened.request_project_load(None, project_path, None, Language::English);
+            wait_for_project_open(&mut reopened);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !reopened.media_analysis_in_flight.is_empty()
+                || !reopened.media_analysis_pending.is_empty()
+            {
+                reopened.poll_media_analysis();
+                assert!(
+                    Instant::now() < deadline,
+                    "reopen {variable} analysis timed out"
+                );
                 thread::sleep(Duration::from_millis(2));
             }
-            app.poll_media_analysis();
+            reopened.poll_media_analysis();
             assert_eq!(
-                app.editor.media[0].duration,
-                Some(nle_timeline::Tick(542_000))
+                reopened.editor.media[0].duration,
+                Some(nle_timeline::Tick(local_duration_micros))
             );
             assert_eq!(
-                app.editor
+                reopened.editor.timeline.tracks[0].clips[0].duration,
+                nle_timeline::Tick(local_duration_micros)
+            );
+            assert_eq!(
+                reopened
+                    .editor
                     .media_metadata(1)
                     .unwrap()
                     .container_duration_seconds,
-                Some(9.542)
+                Some(container_duration)
             );
-            app.flush_project_autosave();
-            project_path = app
-                .project_path_for_id(app.current_project_id.expect("current project ID"))
-                .expect("current project path");
-        }
-        let project_json = fs::read_to_string(&project_path).expect("saved project JSON");
-        assert!(
-            !project_json.contains("source_frame_time_indexes"),
-            "runtime index must not serialize"
-        );
-        let mut reopened = App::new_with_catalog(false, Some(catalog));
-        reopened.request_project_load(None, project_path, None, Language::English);
-        wait_for_project_open(&mut reopened);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !reopened.media_analysis_in_flight.is_empty()
-            || !reopened.media_analysis_pending.is_empty()
-        {
-            reopened.poll_media_analysis();
-            assert!(Instant::now() < deadline, "reopen FFV1 analysis timed out");
-            thread::sleep(Duration::from_millis(2));
-        }
-        reopened.poll_media_analysis();
-        assert_eq!(
-            reopened.editor.media[0].duration,
-            Some(nle_timeline::Tick(542_000))
-        );
-        assert_eq!(
-            reopened.editor.timeline.tracks[0].clips[0].duration,
-            nle_timeline::Tick(542_000)
-        );
-        assert_eq!(
-            reopened
-                .editor
-                .media_metadata(1)
-                .unwrap()
-                .container_duration_seconds,
-            Some(9.542)
-        );
-        assert_eq!(
-            reopened.editor.media_metadata(1).unwrap().duration_seconds,
-            Some(0.542)
-        );
-        assert_eq!(
-            reopened
-                .editor
-                .media_metadata(1)
-                .unwrap()
-                .streams
-                .iter()
-                .find(|stream| stream.kind.as_deref() == Some("video"))
-                .and_then(|stream| stream.start_seconds),
-            Some(9.0),
-            "container origin remains metadata while edit timing is local"
-        );
-        for (index, boundary) in boundaries.into_iter().enumerate() {
-            let next = boundaries.get(index + 1).copied();
-            for tick in [boundary, next.map_or(541_999, |next| next - 1)] {
-                reopened.editor.set_playhead(nle_timeline::Tick(tick));
-                let source =
-                    preview_request(&reopened.editor).sources[0].expect("reopened VFR source");
-                assert_eq!(source.source_tick, boundary);
-                assert_eq!(
-                    source.source_frame_duration_tick,
-                    next.map(|next| next - boundary)
-                );
+            assert_eq!(
+                reopened.editor.media_metadata(1).unwrap().duration_seconds,
+                Some(local_duration_micros as f64 / 1_000_000.0)
+            );
+            assert_eq!(
+                reopened
+                    .editor
+                    .media_metadata(1)
+                    .unwrap()
+                    .streams
+                    .iter()
+                    .find(|stream| stream.kind.as_deref() == Some("video"))
+                    .and_then(|stream| stream.start_seconds),
+                Some(source_origin),
+                "container origin remains metadata while edit timing is local"
+            );
+            for (index, boundary) in boundaries.into_iter().enumerate() {
+                let next = boundaries.get(index + 1).copied();
+                for tick in [
+                    boundary,
+                    next.map_or(local_duration_micros - 1, |next| next - 1),
+                ] {
+                    reopened.editor.set_playhead(nle_timeline::Tick(tick));
+                    let source =
+                        preview_request(&reopened.editor).sources[0].expect("reopened VFR source");
+                    assert_eq!(source.source_tick, boundary);
+                    assert_eq!(
+                        source.source_frame_duration_tick,
+                        next.map(|next| next - boundary)
+                    );
+                }
             }
+            reopened
+                .editor
+                .set_playhead(nle_timeline::Tick(local_duration_micros));
+            let exact_end =
+                preview_request(&reopened.editor).sources[0].expect("exact-end VFR source");
+            assert_eq!(exact_end.source_tick, final_frame_source_in, "{variable}");
+            assert_eq!(exact_end.source_frame_duration_tick, None);
+            drop(reopened);
+            fs::remove_dir_all(root).expect("remove owned VFR reopen root");
         }
-        reopened.editor.set_playhead(nle_timeline::Tick(542_000));
-        let exact_end = preview_request(&reopened.editor).sources[0].expect("exact-end VFR source");
-        assert_eq!(exact_end.source_tick, 500_000);
-        assert_eq!(exact_end.source_frame_duration_tick, None);
-        drop(reopened);
-        fs::remove_dir_all(root).expect("remove owned VFR reopen root");
     }
 
     #[test]

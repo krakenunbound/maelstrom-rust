@@ -1790,21 +1790,27 @@ mod tests {
 
     #[test]
     fn supplied_av1_vfr_fixture_publishes_local_decoded_presentation_timestamps() {
-        let Some(path) = std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA") else {
-            return;
-        };
-        let path = PathBuf::from(path);
-        let metadata = probe_media_metadata(&path).expect("probe supplied AV1 VFR fixture");
-        assert_eq!(metadata.video_codec.as_deref(), Some("av1"));
-        let timing = analyze_frame_timing(&path).expect("scan supplied AV1 VFR fixture");
-        assert_eq!(
-            timing,
-            FrameTiming::Variable(FrameTimeIndex {
-                pts_microseconds: vec![
-                    0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
-                ],
-            })
-        );
+        for variable in [
+            "MAELSTROM_AV1_VFR_TEST_MEDIA",
+            "MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA",
+        ] {
+            let Some(path) = std::env::var_os(variable) else {
+                continue;
+            };
+            let path = PathBuf::from(path);
+            let metadata = probe_media_metadata(&path).expect("probe supplied AV1 VFR fixture");
+            assert_eq!(metadata.video_codec.as_deref(), Some("av1"), "{variable}");
+            let timing = analyze_frame_timing(&path).expect("scan supplied AV1 VFR fixture");
+            assert_eq!(
+                timing,
+                FrameTiming::Variable(FrameTimeIndex {
+                    pts_microseconds: vec![
+                        0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000,
+                    ],
+                }),
+                "{variable}"
+            );
+        }
     }
 
     #[test]
