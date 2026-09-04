@@ -522,6 +522,18 @@ Last updated: 2026-09-04
 
 ## Phase 0–1 verification queue
 
+- [x] Add a real software AV1 fallback to the pinned Windows runtime. Decoder-only static libaom
+  v3.13.0 is source-pinned, license/checksum-gated, selected explicitly after hardware candidates,
+  and shared by monitor decode, waveform timing, and export input. The shifted Matroska and WebM
+  fixtures each pass 19 exact forward/reverse/final/fresh seek-and-pixel comparisons against an
+  independent `libaom-av1` CLI reference; the Phase 0 runner now requires both tests. No playback
+  resolution policy changed. Native AV1 lookup keeps D3D11VA/DXVA2 distinct after libaom registration;
+  the local hardware rerun passes 12 tests/456 exact cases, while the serial workspace passes 914
+  tests with 38 intentionally ignored. A fresh no-smoke package passes the full-path launcher runtime
+  check and contains the decoder/notices without an encoder or libaom DLL. Broader AV1 media and
+  sustained 1080p software performance remain open.
+  See `docs/software-av1-fallback.md`.
+
 - [x] Add the local-only shifted AOM AV1 WebM sibling without weakening the existing Matroska
   contract. FFmpeg 8.1 stream-copies the validated temporary Matroska artifact with `-copyts` and
   explicit WebM muxing; separate output hashes/sizes and all eight shifted packet timestamps are
@@ -574,7 +586,9 @@ Last updated: 2026-09-04
   timing/pixel evidence. ProRes/DNxHR and shifted/reordered MPEG-4 now also pass 30
   export-graph source-identity cases with a test MPEG-4 encoder. Named CUVID/QSV H.264, HEVC, and
   AV1 now join D3D11VA/DXVA2 in the exact local hardware matrix; shifted AV1 analysis/app routing is
-  also covered. Broader AV1/camera sources, QSV reverse performance, cross-machine hardware/color
+  also covered. A pinned static `libaom-av1` decoder now supplies the independently tested software
+  fallback for both shifted AV1 containers without changing preview resolution. Broader AV1/camera
+  sources, sustained 1080p software performance, QSV reverse performance, cross-machine hardware/color
   parity, and production-encoder conformance remain open.
 
 ## Phase 2 implementation queue

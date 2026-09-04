@@ -360,6 +360,66 @@ fn cli_sequential_reference_with_filter(
     }
 }
 
+fn cli_libaom_av1_reference(path: &Path, frame_count: usize) -> CliSequentialReference {
+    // AV1 frame best-effort timestamps are unavailable with the fixture's default decoder.
+    // Packet PTS are the source timestamps consumed by the explicit libaom decoder path.
+    let raw_timestamps = ffprobe_packet_timestamps(path);
+    assert_eq!(
+        raw_timestamps.len(),
+        frame_count,
+        "FFprobe AV1 packet count for {}",
+        path.display()
+    );
+    let stream_origin = *raw_timestamps
+        .first()
+        .expect("nonempty FFprobe AV1 packet timestamp list");
+    let timestamps = raw_timestamps
+        .into_iter()
+        .map(|timestamp| timestamp - stream_origin)
+        .collect();
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-c:v", "libaom-av1", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            "scale=59:48:flags=bicubic+accurate_rnd,format=rgba,pad=64:48:2:0:color=black@0",
+            "-frames:v",
+            &frame_count.to_string(),
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .expect("start independent libaom AV1 FFmpeg reference decode");
+    assert!(
+        output.status.success(),
+        "FFmpeg libaom-av1 could not create AV1 reference for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes_per_frame = 64 * 48 * 4;
+    assert_eq!(
+        output.stdout.len(),
+        frame_count * bytes_per_frame,
+        "independent libaom AV1 reference byte count for {}",
+        path.display()
+    );
+    CliSequentialReference {
+        stream_origin,
+        timestamps,
+        rgba: output
+            .stdout
+            .chunks_exact(bytes_per_frame)
+            .map(Arc::<[u8]>::from)
+            .collect(),
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn cli_av1_hardware_reference_with_filter(
     path: &Path,
@@ -632,6 +692,113 @@ fn assert_real_codec_vfr_seek_matches_cli_reference(
         "{label}: {} VFR boundaries, {cases} exact CLI-reference seek cases",
         reference.timestamps.len()
     );
+}
+
+fn assert_forced_software_libaom_av1_vfr_seek_matches_cli_reference(
+    label: &str,
+    path: PathBuf,
+    request_id: u64,
+) {
+    if ffmpeg::decoder::find_by_name("libaom-av1").is_none() {
+        panic!("{label}: active FFmpeg runtime does not provide libaom-av1");
+    }
+    let reference = cli_libaom_av1_reference(&path, 8);
+    assert_eq!(reference.stream_origin, 5_000_000, "{label} stream origin");
+    assert_eq!(
+        reference.timestamps,
+        [
+            0, 33_000, 100_000, 133_000, 200_000, 267_000, 367_000, 400_000
+        ],
+        "{label} normalized AV1 packet PTS"
+    );
+    let properties = ffprobe_stream_properties(&path);
+    for property in ["av1", "Main", "yuv420p"] {
+        assert!(
+            properties.iter().any(|value| value == property),
+            "{label} expected FFprobe property {property:?}, got {properties:?}"
+        );
+    }
+
+    let mut first = scrub_request(path.clone(), request_id);
+    first.source_tick = 0;
+    first.source_frame_duration_tick = None;
+    first.acceleration = AccelerationPreference::Software;
+    let pool = MonitorSessionPool::new(1, 0);
+    let timings = DecoderStageTimingAccumulators::default();
+    let mut monitor = open_sticky_monitor(&first, &pool, 0, false)
+        .expect("open forced-software libaom monitor")
+        .expect("forced-software libaom foreground permit");
+    assert_eq!(monitor.backend, DecodeBackend::Software, "{label} backend");
+    assert_eq!(
+        monitor.fallback_reason,
+        Some(DecodeFallbackReason::ForcedSoftware),
+        "{label} forced-software reason"
+    );
+
+    let mut cases = 0;
+    let mut decode_expected = |target: i64, expected_index: usize, suffix: &str| {
+        let before = timings.snapshot().demux_packet.samples;
+        let mut request = first.clone();
+        request.request_id += cases;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        let frame = decode_scrub_frame(&mut monitor, &request, &timings);
+        assert_eq!(frame.target_tick, target, "{label} {suffix} target PTS");
+        assert!(
+            (frame.source_tick - reference.timestamps[expected_index]).abs()
+                <= SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS,
+            "{label} {suffix} expected PTS {}, got {}",
+            reference.timestamps[expected_index],
+            frame.source_tick
+        );
+        assert_eq!(
+            frame.rgba.as_ref(),
+            reference.rgba[expected_index].as_ref(),
+            "{label} {suffix} pixels"
+        );
+        let traversed = timings.snapshot().demux_packet.samples - before;
+        assert!(
+            traversed <= 24,
+            "{label} {suffix} traversed {traversed} demux packets"
+        );
+        cases += 1;
+    };
+    for (index, &target) in reference.timestamps.iter().enumerate() {
+        decode_expected(target, index, "forward");
+    }
+    for (index, &target) in reference.timestamps.iter().enumerate().rev() {
+        decode_expected(target, index, "reverse");
+    }
+    let last = reference.timestamps.len() - 1;
+    decode_expected(reference.timestamps[last], last, "final");
+    drop(monitor);
+
+    for (index, &target) in [reference.timestamps[3], reference.timestamps[6]]
+        .iter()
+        .enumerate()
+    {
+        let mut request = first.clone();
+        request.request_id += 1_000 + index as u64;
+        request.source_tick = target;
+        request.is_scrubbing = true;
+        let mut fresh = open_sticky_monitor(&request, &pool, 0, false)
+            .expect("open fresh forced-software libaom monitor")
+            .expect("fresh forced-software libaom foreground permit");
+        assert_eq!(
+            fresh.backend,
+            DecodeBackend::Software,
+            "{label} fresh backend"
+        );
+        let fresh_timings = DecoderStageTimingAccumulators::default();
+        let frame = decode_scrub_frame(&mut fresh, &request, &fresh_timings);
+        assert_real_codec_frame(&frame, &request, &reference, label);
+        assert!(
+            fresh_timings.snapshot().demux_packet.samples <= 24,
+            "{label} fresh seek exceeded bounded demux"
+        );
+        cases += 1;
+    }
+    assert_eq!(cases, 19, "{label} AV1 VFR parity case count");
 }
 
 #[cfg(target_os = "windows")]
@@ -1436,6 +1603,34 @@ fn supplied_windows_qsv_av1_vfr_scrub_matches_independent_cli_reference() {
         path,
         DecodeBackend::IntelQuickSync,
         9_100,
+    );
+}
+
+#[test]
+#[ignore = "requires MAELSTROM_AV1_VFR_TEST_MEDIA and an FFmpeg runtime with libaom-av1"]
+fn supplied_software_libaom_av1_mkv_vfr_scrub_matches_independent_cli_reference() {
+    let Some(path) = std::env::var_os("MAELSTROM_AV1_VFR_TEST_MEDIA") else {
+        eprintln!("SKIP: MAELSTROM_AV1_VFR_TEST_MEDIA is not set");
+        return;
+    };
+    assert_forced_software_libaom_av1_vfr_seek_matches_cli_reference(
+        "forced-software libaom AV1 Matroska VFR",
+        PathBuf::from(path),
+        9_200,
+    );
+}
+
+#[test]
+#[ignore = "requires MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA and an FFmpeg runtime with libaom-av1"]
+fn supplied_software_libaom_av1_webm_vfr_scrub_matches_independent_cli_reference() {
+    let Some(path) = std::env::var_os("MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA") else {
+        eprintln!("SKIP: MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA is not set");
+        return;
+    };
+    assert_forced_software_libaom_av1_vfr_seek_matches_cli_reference(
+        "forced-software libaom AV1 WebM VFR",
+        PathBuf::from(path),
+        9_300,
     );
 }
 

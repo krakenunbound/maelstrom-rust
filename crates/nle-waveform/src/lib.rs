@@ -55,7 +55,7 @@ const FRAME_TIMING_PROBE_ARGS: [&str; 11] = [
     "-of",
     "compact=p=0:nk=0",
 ];
-const AV1_FRAME_TIMING_DECODERS: [&str; 2] = ["av1_cuvid", "av1_qsv"];
+const AV1_FRAME_TIMING_DECODERS: [&str; 3] = ["av1_cuvid", "av1_qsv", "libaom-av1"];
 
 fn media_tool(name: &'static str) -> PathBuf {
     media_tool_from_executable(name, std::env::current_exe().ok().as_deref())
@@ -1677,7 +1677,10 @@ mod tests {
                 .any(|pair| pair == ["-show_entries", "frame=best_effort_timestamp_time"])
         );
         assert!(!FRAME_TIMING_PROBE_ARGS.contains(&"-show_packets"));
-        assert_eq!(AV1_FRAME_TIMING_DECODERS, ["av1_cuvid", "av1_qsv"]);
+        assert_eq!(
+            AV1_FRAME_TIMING_DECODERS,
+            ["av1_cuvid", "av1_qsv", "libaom-av1"]
+        );
     }
 
     #[test]

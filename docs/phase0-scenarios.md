@@ -13,7 +13,10 @@ the reordered TS, shifted/reordered MPEG-4, shifted 10-bit MOV, shifted FFV1/Mat
 shifted FFVHUFF/Matroska, and shifted AOM AV1 Matroska/WebM fixtures. The two AV1 containers use
 `MAELSTROM_AV1_VFR_TEST_MEDIA` and `MAELSTROM_AV1_WEBM_VFR_TEST_MEDIA`; both must preserve the
 same eight decoder-derived local presentation boundaries, source origin, save/reopen reconstruction,
-and export identities. FFV1 and FFVHUFF use
+and export identities. The runner also invokes both ignored forced-software tests explicitly; each
+must open the named `libaom-av1` decoder and pass 19 forward/reverse/final/fresh exact timestamp-and-pixel
+comparisons against an independent CLI decode with bounded packet traversal. A missing named decoder
+is a failure, never a skip or hardware success. FFV1 and FFVHUFF use
 `MAELSTROM_FFV1_VFR_TEST_MEDIA` and `MAELSTROM_FFVHUFF_VFR_TEST_MEDIA`; the runner restores them
 and both AV1 variables with every other altered variable. The JSON
 report is written atomically to the ignored `artifacts/phase0-scenarios/` directory.

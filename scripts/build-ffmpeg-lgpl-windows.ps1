@@ -32,11 +32,32 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $ffmpeg = Join-Path $outputPath 'bin\ffmpeg.exe'
+$manifest = Join-Path $outputPath 'BUILD-MANIFEST.txt'
+$aomLicense = Join-Path $outputPath 'libaom-LICENSE.txt'
+$aomPatents = Join-Path $outputPath 'libaom-PATENTS.txt'
 if (-not (Test-Path -LiteralPath $ffmpeg)) {
     throw 'The build did not produce bin\ffmpeg.exe.'
 }
+if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or -not (Test-Path -LiteralPath $aomLicense -PathType Leaf) -or -not (Test-Path -LiteralPath $aomPatents -PathType Leaf)) {
+    throw 'The build did not produce the required pinned libaom manifest and license artifacts.'
+}
+$manifestText = Get-Content -LiteralPath $manifest -Raw
+if ($manifestText -notmatch 'libaom commit: d9c115ce0951324dee243041ef810e27202de20f \(tag v3\.13\.0; decoder-only static\)') {
+    throw 'The FFmpeg build manifest does not identify the pinned decoder-only libaom source.'
+}
+if (Get-ChildItem -LiteralPath (Join-Path $outputPath 'bin') -Filter 'libaom*.dll' -ErrorAction SilentlyContinue) {
+    throw 'The static libaom build unexpectedly emitted a libaom DLL.'
+}
 $configuration = (& $ffmpeg -hide_banner -version 2>&1 | Out-String)
-if ($configuration -match '--enable-gpl' -or $configuration -match '--enable-nonfree') {
-    throw 'The project-owned FFmpeg build unexpectedly enabled GPL/nonfree components.'
+if ($configuration -match '--enable-gpl' -or $configuration -match '--enable-nonfree' -or $configuration -notmatch '--enable-libaom') {
+    throw 'The project-owned FFmpeg build is missing libaom or unexpectedly enabled GPL/nonfree components.'
+}
+$decoderInventory = (& $ffmpeg -hide_banner -decoders 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $decoderInventory -notmatch '\blibaom[-_]av1\b') {
+    throw 'The project-owned FFmpeg build does not expose the libaom AV1 decoder.'
+}
+$encoderInventory = (& $ffmpeg -hide_banner -encoders 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $encoderInventory -match '\blibaom[-_]av1\b') {
+    throw 'The project-owned FFmpeg build unexpectedly exposes the disabled libaom AV1 encoder.'
 }
 Get-Item -LiteralPath $outputPath

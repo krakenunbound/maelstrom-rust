@@ -139,6 +139,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Shifted FFV1 VFR decode regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-decode --release scrub_seek_tests::generated_shifted_ffvhuff_vfr_scrub_matches_independent_cli_reference -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted FFVHUFF VFR decode regression failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-decode --release scrub_seek_tests::supplied_software_libaom_av1_mkv_vfr_scrub_matches_independent_cli_reference -- --ignored --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Software libaom AV1 Matroska VFR decode regression failed with exit code $LASTEXITCODE." }
+    & $cargoExecutable test -p nle-decode --release scrub_seek_tests::supplied_software_libaom_av1_webm_vfr_scrub_matches_independent_cli_reference -- --ignored --exact --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Software libaom AV1 WebM VFR decode regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_vfr_fixtures_route_preview_to_local_boundaries -- --exact --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Shifted VFR app regression failed with exit code $LASTEXITCODE." }
     & $cargoExecutable test -p nle-app --release tests::supplied_shifted_vfr_fixture_reopen_rebuilds_exact_local_boundaries -- --exact --test-threads=1

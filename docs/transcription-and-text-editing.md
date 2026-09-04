@@ -27,6 +27,9 @@ transcription engine:
 That arrangement is valuable and should seed Maelstrom's first backend. It is optimized for lyric
 alignment, however, while a video editor also needs dialogue accuracy, speaker assignment,
 timeline-safe edits, caption formats, cache invalidation, and English/Japanese qualification.
+MiniMaxM3's current third-party notice does not enumerate WhisperX, faster-whisper, Silero, or the
+speech/alignment weights, so Maelstrom must derive and verify each runtime/model license and source
+independently rather than treating that project's notice as a complete redistribution record.
 
 ## Backend decision and candidates
 

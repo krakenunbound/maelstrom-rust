@@ -6,15 +6,19 @@ FFmpeg commit `9047fa1b084f76b1b4d065af2d743df1b40dfb56` (tag `n8.1`).
 The Windows build additionally uses nv-codec-headers commit
 `1889e62e2d35ff7aa9baca2bceb14f053785e6f1`
 (tag `n12.1.14.0`) and the Intel oneVPL dispatcher from commit
-`2274efcd3672b43297ef774f332e1fed6781381c` (tag `v2023.4.0`). FFmpeg is licensed under the GNU Lesser General Public
-License, version 2.1 or later. Maelstrom does not enable GPL or nonfree FFmpeg
-components and does not package x264, x265, or FDK AAC. oneVPL is distributed
-under the MIT License.
+`2274efcd3672b43297ef774f332e1fed6781381c` (tag `v2023.4.0`), plus a decoder-only,
+statically linked libaom build from commit
+`d9c115ce0951324dee243041ef810e27202de20f` (tag `v3.13.0`). FFmpeg is licensed under
+the GNU Lesser General Public License, version 2.1 or later. Maelstrom does not enable
+GPL or nonfree FFmpeg components and does not package x264, x265, FDK AAC, or a libaom
+DLL. oneVPL is distributed under the MIT License. The bundled `libaom-LICENSE.txt` and
+`libaom-PATENTS.txt` preserve libaom's upstream license and patent notice.
 
 - FFmpeg project and source: https://ffmpeg.org/
 - Exact FFmpeg source: https://github.com/FFmpeg/FFmpeg/tree/9047fa1b084f76b1b4d065af2d743df1b40dfb56
 - NVIDIA codec headers: https://github.com/FFmpeg/nv-codec-headers/tree/1889e62e2d35ff7aa9baca2bceb14f053785e6f1
 - Intel oneVPL: https://github.com/intel/libvpl/tree/2274efcd3672b43297ef774f332e1fed6781381c
+- AOMedia libaom: https://aomedia.googlesource.com/aom/+/d9c115ce0951324dee243041ef810e27202de20f
 - Reproducible Windows recipe: `scripts/build-ffmpeg-lgpl-windows.ps1`
 - Reproducible macOS arm64 recipe: `scripts/build-ffmpeg-lgpl-macos.sh`
 - LGPL 2.1 text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html

@@ -116,6 +116,18 @@ Build the evidence harness before adding engine complexity.
       decoder-derived waveform timing, app boundary routing/save-reopen reconstruction, and
       production export source identity cover each container. This is one local AV1 container seam,
       not general WebM/AV1 interoperability, hardware, display, or performance qualification.
+- [x] Restore a genuine software AV1 safety net without lowering preview resolution. The reproducible
+      Windows FFmpeg 8.1 build now pins decoder-only libaom v3.13.0 commit
+      `d9c115ce0951324dee243041ef810e27202de20f`, links it statically, preserves its license and patent
+      notices, and rejects a stray libaom DLL or encoder. Monitor decode explicitly selects
+      `libaom-av1` after hardware candidates; waveform analysis and export use the same named fallback.
+      Matroska and WebM each pass 19 forward/reverse/final/fresh exact CLI-reference scrub cases,
+      bounded packet traversal, preview/reopen timing, waveform timing, and export source identity.
+      The Phase 0 matrix and serial release workspace pass (914 passed, 38 ignored). Explicit native
+      AV1 lookup preserves the existing D3D11VA/DXVA2 paths after libaom registration; a fresh
+      non-authoritative local hardware rerun passed all 12 tests and 456 exact cases. This proves the two finite local fixtures,
+      not arbitrary AV1, 1080p software throughput, windowed playback, or cross-machine performance.
+      See `docs/software-av1-fallback.md`.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
 - [x] Keep the ordinary release workspace gate deterministic on Windows. The coordinated-decoder

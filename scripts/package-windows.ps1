@@ -156,16 +156,19 @@ $ffmpeg = Join-Path $bundleBin 'ffmpeg.exe'
 $ffprobe = Join-Path $bundleBin 'ffprobe.exe'
 $buildManifest = Join-Path $bundleRoot 'BUILD-MANIFEST.txt'
 $buildChecksums = Join-Path $bundleRoot 'BUILD-SHA256SUMS.txt'
+$aomLicense = Join-Path $bundleRoot 'libaom-LICENSE.txt'
+$aomPatents = Join-Path $bundleRoot 'libaom-PATENTS.txt'
 if (-not (Test-Path -LiteralPath $ffmpeg) -or -not (Test-Path -LiteralPath $ffprobe)) {
     throw 'The FFmpeg bundle must contain bin\ffmpeg.exe and bin\ffprobe.exe.'
 }
-if (-not (Test-Path -LiteralPath $buildManifest) -or -not (Test-Path -LiteralPath $buildChecksums)) {
-    throw 'Release packaging requires the project-built FFmpeg manifest and checksum inventory.'
+if (-not (Test-Path -LiteralPath $buildManifest) -or -not (Test-Path -LiteralPath $buildChecksums) -or -not (Test-Path -LiteralPath $aomLicense -PathType Leaf) -or -not (Test-Path -LiteralPath $aomPatents -PathType Leaf)) {
+    throw 'Release packaging requires the project-built FFmpeg manifest, checksum inventory, and libaom license artifacts.'
 }
 $manifestText = Get-Content -LiteralPath $buildManifest -Raw
 if ($manifestText -notmatch 'FFmpeg commit: 9047fa1b084f76b1b4d065af2d743df1b40dfb56' -or
     $manifestText -notmatch 'nv-codec-headers commit: 1889e62e2d35ff7aa9baca2bceb14f053785e6f1' -or
-    $manifestText -notmatch 'oneVPL commit: 2274efcd3672b43297ef774f332e1fed6781381c') {
+    $manifestText -notmatch 'oneVPL commit: 2274efcd3672b43297ef774f332e1fed6781381c' -or
+    $manifestText -notmatch 'libaom commit: d9c115ce0951324dee243041ef810e27202de20f \(tag v3\.13\.0; decoder-only static\)') {
     throw 'The FFmpeg build manifest does not match Maelstrom''s pinned source revisions.'
 }
 foreach ($line in Get-Content -LiteralPath $buildChecksums) {
@@ -186,13 +189,21 @@ foreach ($line in Get-Content -LiteralPath $buildChecksums) {
 }
 
 $configuration = (& $ffmpeg -hide_banner -version 2>&1 | Out-String)
-if ($configuration -notmatch 'ffmpeg version n?8\.1' -or $configuration -notmatch '--enable-shared') {
+if ($configuration -notmatch 'ffmpeg version n?8\.1' -or $configuration -notmatch '--enable-shared' -or $configuration -notmatch '--enable-libaom') {
     throw 'Packaging requires the frozen FFmpeg 8.1 shared-library line.'
 }
 if ($configuration -match '--enable-gpl' -or $configuration -match '--enable-nonfree') {
     throw 'Refusing to package GPL/nonfree FFmpeg. Supply the pinned LGPL shared bundle.'
 }
-$forbidden = @('libx264*.dll', 'libx265*.dll', '*fdk*aac*.dll')
+$decoderInventory = (& $ffmpeg -hide_banner -decoders 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $decoderInventory -notmatch '\blibaom[-_]av1\b') {
+    throw 'Packaging requires the pinned libaom AV1 decoder.'
+}
+$encoderInventory = (& $ffmpeg -hide_banner -encoders 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $encoderInventory -match '\blibaom[-_]av1\b') {
+    throw 'Packaging rejects the disabled libaom AV1 encoder.'
+}
+$forbidden = @('libx264*.dll', 'libx265*.dll', '*fdk*aac*.dll', 'libaom*.dll')
 foreach ($pattern in $forbidden) {
     if (Get-ChildItem -LiteralPath $bundleBin -Filter $pattern -ErrorAction SilentlyContinue) {
         throw "Refusing forbidden codec dependency: $pattern"
@@ -237,6 +248,8 @@ Copy-Item -LiteralPath $vcRuntimeSource -Destination (Join-Path $output 'vcrunti
 Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') -Destination $output
 Copy-Item -LiteralPath (Join-Path $bundleRoot 'LICENSE.txt') -Destination (Join-Path $output 'FFmpeg-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $bundleRoot 'oneVPL-LICENSE.txt') -Destination $output
+Copy-Item -LiteralPath $aomLicense -Destination $output
+Copy-Item -LiteralPath $aomPatents -Destination $output
 Copy-Item -LiteralPath $buildManifest -Destination $output
 Copy-Item -LiteralPath $buildChecksums -Destination $output
 $modelSource = Join-Path $repoRoot 'assets\models'

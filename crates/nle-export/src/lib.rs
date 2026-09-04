@@ -1317,6 +1317,7 @@ enum Av1InputDecoder {
     Dxva2,
     Cuvid,
     Qsv,
+    Libaom,
 }
 
 impl Av1InputDecoder {
@@ -1327,6 +1328,7 @@ impl Av1InputDecoder {
             Self::Dxva2 => "dxva2",
             Self::Cuvid => "av1_cuvid",
             Self::Qsv => "av1_qsv",
+            Self::Libaom => "libaom-av1",
         }
     }
 
@@ -1337,6 +1339,7 @@ impl Av1InputDecoder {
             Self::Dxva2 => &["-hwaccel", "dxva2", "-c:v", "av1"],
             Self::Cuvid => &["-c:v", "av1_cuvid"],
             Self::Qsv => &["-c:v", "av1_qsv"],
+            Self::Libaom => &["-c:v", "libaom-av1"],
         }
     }
 }
@@ -1352,6 +1355,7 @@ fn av1_input_decoder_candidates(plan: &ExportPlan) -> Vec<Av1InputDecoder> {
             Av1InputDecoder::Dxva2,
             Av1InputDecoder::Cuvid,
             Av1InputDecoder::Qsv,
+            Av1InputDecoder::Libaom,
             Av1InputDecoder::Default,
         ]
     }
@@ -1360,12 +1364,13 @@ fn av1_input_decoder_candidates(plan: &ExportPlan) -> Vec<Av1InputDecoder> {
         vec![
             Av1InputDecoder::Cuvid,
             Av1InputDecoder::Qsv,
+            Av1InputDecoder::Libaom,
             Av1InputDecoder::Default,
         ]
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        vec![Av1InputDecoder::Default]
+        vec![Av1InputDecoder::Libaom, Av1InputDecoder::Default]
     }
 }
 
@@ -2857,6 +2862,7 @@ mod tests {
                 Av1InputDecoder::Dxva2,
                 Av1InputDecoder::Cuvid,
                 Av1InputDecoder::Qsv,
+                Av1InputDecoder::Libaom,
                 Av1InputDecoder::Default,
             ]
         );
@@ -2866,13 +2872,14 @@ mod tests {
             vec![
                 Av1InputDecoder::Cuvid,
                 Av1InputDecoder::Qsv,
+                Av1InputDecoder::Libaom,
                 Av1InputDecoder::Default,
             ]
         );
         #[cfg(not(any(windows, target_os = "linux")))]
         assert_eq!(
             av1_input_decoder_candidates(&av1_plan),
-            vec![Av1InputDecoder::Default]
+            vec![Av1InputDecoder::Libaom, Av1InputDecoder::Default]
         );
 
         let (_, non_av1_plan) = single_video_plan(false);
@@ -2895,6 +2902,12 @@ mod tests {
         .unwrap();
         let input = args.iter().position(|arg| arg == "input.mov").unwrap();
         assert_eq!(&args[input - 3..input], ["-c:v", "av1_cuvid", "-i"]);
+    }
+
+    #[test]
+    fn libaom_av1_decoder_input_option_is_explicit() {
+        assert_eq!(Av1InputDecoder::Libaom.name(), "libaom-av1");
+        assert_eq!(Av1InputDecoder::Libaom.input_args(), ["-c:v", "libaom-av1"]);
     }
 
     #[test]

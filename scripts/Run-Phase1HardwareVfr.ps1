@@ -56,10 +56,12 @@ function Assert-PinnedFfmpegBundle([string]$BundleRoot) {
     $ffprobe = Join-Path $bundleBin 'ffprobe.exe'
     $buildManifest = Join-Path $BundleRoot 'BUILD-MANIFEST.txt'
     $buildChecksums = Join-Path $BundleRoot 'BUILD-SHA256SUMS.txt'
+    $aomLicense = Join-Path $BundleRoot 'libaom-LICENSE.txt'
+    $aomPatents = Join-Path $BundleRoot 'libaom-PATENTS.txt'
     if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) { throw 'The FFmpeg bundle must contain bin\ffmpeg.exe and bin\ffprobe.exe.' }
-    if (-not (Test-Path -LiteralPath $buildManifest -PathType Leaf) -or -not (Test-Path -LiteralPath $buildChecksums -PathType Leaf)) { throw 'Qualification requires the project-built FFmpeg manifest and checksum inventory.' }
+    if (-not (Test-Path -LiteralPath $buildManifest -PathType Leaf) -or -not (Test-Path -LiteralPath $buildChecksums -PathType Leaf) -or -not (Test-Path -LiteralPath $aomLicense -PathType Leaf) -or -not (Test-Path -LiteralPath $aomPatents -PathType Leaf)) { throw 'Qualification requires the project-built FFmpeg manifest, checksum inventory, and libaom license artifacts.' }
     $manifestText = Get-Content -LiteralPath $buildManifest -Raw
-    if ($manifestText -notmatch 'FFmpeg commit: 9047fa1b084f76b1b4d065af2d743df1b40dfb56' -or $manifestText -notmatch 'nv-codec-headers commit: 1889e62e2d35ff7aa9baca2bceb14f053785e6f1' -or $manifestText -notmatch 'oneVPL commit: 2274efcd3672b43297ef774f332e1fed6781381c') { throw "The FFmpeg build manifest does not match Maelstrom's pinned source revisions." }
+    if ($manifestText -notmatch 'FFmpeg commit: 9047fa1b084f76b1b4d065af2d743df1b40dfb56' -or $manifestText -notmatch 'nv-codec-headers commit: 1889e62e2d35ff7aa9baca2bceb14f053785e6f1' -or $manifestText -notmatch 'oneVPL commit: 2274efcd3672b43297ef774f332e1fed6781381c' -or $manifestText -notmatch 'libaom commit: d9c115ce0951324dee243041ef810e27202de20f \(tag v3\.13\.0; decoder-only static\)') { throw "The FFmpeg build manifest does not match Maelstrom's pinned source revisions." }
     $bundlePrefix = $BundleRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     $verifiedFiles = 0
     foreach ($line in Get-Content -LiteralPath $buildChecksums) {
@@ -72,8 +74,13 @@ function Assert-PinnedFfmpegBundle([string]$BundleRoot) {
         $verifiedFiles++
     }
     $configuration = (& $ffmpeg -hide_banner -version 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $configuration -notmatch 'ffmpeg version n?8\.1' -or $configuration -notmatch '--enable-shared') { throw 'Qualification requires the frozen FFmpeg 8.1 shared-library line.' }
+    if ($LASTEXITCODE -ne 0 -or $configuration -notmatch 'ffmpeg version n?8\.1' -or $configuration -notmatch '--enable-shared' -or $configuration -notmatch '--enable-libaom') { throw 'Qualification requires the frozen FFmpeg 8.1 shared-library line with static libaom support.' }
     if ($configuration -match '--enable-gpl' -or $configuration -match '--enable-nonfree') { throw 'Qualification refuses GPL/nonfree FFmpeg.' }
+    $decoderInventory = (& $ffmpeg -hide_banner -decoders 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $decoderInventory -notmatch '\blibaom[-_]av1\b') { throw 'Qualification requires the pinned libaom AV1 decoder.' }
+    $encoderInventory = (& $ffmpeg -hide_banner -encoders 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $encoderInventory -match '\blibaom[-_]av1\b') { throw 'Qualification rejects the disabled libaom AV1 encoder.' }
+    if (Get-ChildItem -LiteralPath $bundleBin -Filter 'libaom*.dll' -ErrorAction SilentlyContinue) { throw 'Qualification rejects a stray libaom DLL; libaom must be statically linked.' }
     return [ordered]@{ path = $ffmpeg; ffprobe_path = $ffprobe; version_line = ($configuration -split "`r?`n")[0]; sha256 = (Get-FileHash -LiteralPath $ffmpeg -Algorithm SHA256).Hash; manifest_path = $buildManifest; checksums_path = $buildChecksums; verified_checksum_file_count = $verifiedFiles; shared_bundle_verified = $true }
 }
 

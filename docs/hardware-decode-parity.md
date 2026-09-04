@@ -62,6 +62,25 @@ which physical adapter serviced a request on a multi-device system. VideoToolbox
 HDR, export parity, and broader source/reference-machine coverage remain open.
 No editor launch or physical presentation measurement occurred.
 
+## Software AV1 safety net
+
+Hardware preference remains unchanged, but AV1 no longer depends on a hardware-capable native decoder
+being available. The Windows FFmpeg 8.1 recipe pins libaom v3.13.0 commit
+`d9c115ce0951324dee243041ef810e27202de20f` and builds its decoder only. The static archive is linked
+into the existing LGPL FFmpeg shared runtime; the build, package, and hardware gates require the exact
+manifest entry and upstream license/patent notices, require `--enable-libaom`, and reject both the
+disabled libaom encoder and any `libaom*.dll`.
+
+When AV1 hardware candidates are unavailable or Software is explicitly requested, monitor decode opens
+the named `libaom-av1` decoder and reports Software truthfully. Waveform frame-timing analysis retries
+the same named decoder after hardware candidates, and export tries it after hardware input decoders but
+before the generic decoder. The Phase 0 runner forces this path for the shifted AOM Matroska and WebM
+fixtures. Each container passes 19 exact CLI-reference forward/reverse/final/fresh scrub cases with an
+eight-frame irregular local index and bounded demux traversal; waveform, app preview/reopen, and export
+identity checks pass as well. This is a fallback correctness gate. It is not sustained 1080p software
+performance, general AV1 conformance, GUI presentation, or cross-machine evidence. See
+`docs/software-av1-fallback.md`.
+
 ## Reproduction
 
 The bounded Phase 1 qualification wrapper reuses the three existing hardware VFR

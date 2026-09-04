@@ -53,6 +53,8 @@ const SOURCE_TIMESTAMP_ROUNDING_TOLERANCE_TICKS: i64 = 1;
 const SCRUB_PROGRESS_INTERVAL: Duration = Duration::from_millis(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const LOW_LATENCY_DECODE_THREADS: usize = 2;
+const AV1_NATIVE_DECODER: &str = "av1";
+const AV1_SOFTWARE_DECODER: &str = "libaom-av1";
 const MONITOR_WORKER_COUNT: usize = 4;
 const SPARSE_CACHE_INTERVAL_TICKS: i64 = 250_000;
 const SCRUB_CACHE_INTERVAL_TICKS: i64 = 50_000;
@@ -3572,6 +3574,14 @@ fn open_video_decoder(
         }
     }
 
+    // AV1's default decoder can be a hardware-backed implementation selected by the runtime.
+    // A forced software request, and the terminal fallback after hardware candidates, must use
+    // the explicitly software libaom decoder when the bundled runtime provides it.
+    if codec_id == Id::AV1 && ffmpeg::decoder::find_by_name(AV1_SOFTWARE_DECODER).is_some() {
+        return open_named_software_decoder(stream, AV1_SOFTWARE_DECODER)
+            .map(|video| (video, DecodeBackend::Software));
+    }
+
     let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
         .map_err(|error| format!("could not create video decoder: {error}"))?;
     context.set_threading(ffmpeg::threading::Config {
@@ -3585,6 +3595,28 @@ fn open_video_decoder(
         .video()
         .map(|video| (video, DecodeBackend::Software))
         .map_err(|error| format!("could not open video decoder: {error}"))
+}
+
+fn open_named_software_decoder(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+    name: &str,
+) -> Result<ffmpeg::decoder::Video, String> {
+    let codec = ffmpeg::decoder::find_by_name(name)
+        .ok_or_else(|| format!("named software decoder {name} is unavailable"))?;
+    let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|error| format!("could not create video decoder: {error}"))?;
+    let mut decoder = context.decoder();
+    decoder.set_packet_time_base(stream.time_base());
+    decoder.set_threading(ffmpeg::threading::Config {
+        kind: ffmpeg::threading::Type::Frame,
+        count: LOW_LATENCY_DECODE_THREADS,
+    });
+    let opened = decoder
+        .open_as(codec)
+        .map_err(|error| format!("could not open named software decoder {name}: {error}"))?;
+    opened
+        .video()
+        .map_err(|error| format!("named software decoder {name} is not a video decoder: {error}"))
 }
 
 /// Opens one explicit FFmpeg named hardware decoder.  Production still owns candidate order
@@ -3613,7 +3645,7 @@ fn open_windows_hardware_decoder(
     stream: &ffmpeg::format::stream::Stream<'_>,
 ) -> Result<(ffmpeg::decoder::Video, DecodeBackend), String> {
     let codec_id = stream.parameters().id();
-    let codec = ffmpeg::decoder::find(codec_id)
+    let codec = windows_hardware_codec(codec_id)
         .ok_or_else(|| format!("could not find video decoder for {codec_id:?}"))?;
     for candidate in windows_hardware_decoder_candidates() {
         if !codec_supports_hardware_config(&codec, candidate.device_type, candidate.pixel_format) {
@@ -3629,6 +3661,18 @@ fn open_windows_hardware_decoder(
         }
     }
     Err("video decoder has no usable Windows hardware configuration".to_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_hardware_codec(codec_id: Id) -> Option<ffmpeg::Codec> {
+    // Once libaom is registered, FFmpeg's decoder-by-ID lookup may return libaom-av1. That
+    // implementation deliberately has no D3D11VA/DXVA2 configuration. Hardware-context decode
+    // must inspect the native `av1` decoder; named CUVID/QSV and libaom remain later candidates.
+    if codec_id == Id::AV1 {
+        ffmpeg::decoder::find_by_name(AV1_NATIVE_DECODER)
+    } else {
+        ffmpeg::decoder::find(codec_id)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -5970,6 +6014,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn av1_forced_software_decoder_is_explicit_libaom() {
+        assert_eq!(AV1_NATIVE_DECODER, "av1");
+        assert_eq!(AV1_SOFTWARE_DECODER, "libaom-av1");
+        assert_ne!(AV1_NATIVE_DECODER, AV1_SOFTWARE_DECODER);
+        assert_ne!(AV1_SOFTWARE_DECODER, "av1_cuvid");
+        assert_ne!(AV1_SOFTWARE_DECODER, "av1_qsv");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_hardware_configuration_prefers_d3d11va_then_dxva2() {
@@ -6035,7 +6088,7 @@ mod tests {
                     .into_iter()
                     .find(|candidate| candidate.backend == requested_backend)
             {
-                let codec = ffmpeg::decoder::find(stream.parameters().id())
+                let codec = windows_hardware_codec(stream.parameters().id())
                     .ok_or_else(|| "could not find supplied-media video decoder".to_owned())?;
                 if !codec_supports_hardware_config(
                     &codec,

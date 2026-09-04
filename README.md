@@ -320,10 +320,13 @@ AMD64 directory supplied with
 `Microsoft.VC*.CRT` Redist directory. It never takes that DLL from `System32` or a download.
 
 The WSL build requires `mingw-w64 make cmake ninja-build nasm pkg-config git ca-certificates llvm-19`.
-It pins FFmpeg, nv-codec-headers, and Intel oneVPL by commit, emits MSVC import libraries,
-records hashes for every runtime and link artifact, and enables NVDEC/NVENC,
-D3D11VA/DXVA2, Quick Sync, and Media Foundation without GPL/nonfree components. The package
-step verifies that manifest and every hash before building Maelstrom. The separate
+It pins FFmpeg, nv-codec-headers, Intel oneVPL, and decoder-only static libaom v3.13.0 by
+commit, emits MSVC import libraries, records hashes for every runtime and link artifact, and
+enables NVDEC/NVENC, D3D11VA/DXVA2, Quick Sync, Media Foundation, and libaom without GPL/nonfree
+components. A successfully rebuilt bundle carries `libaom-LICENSE.txt` and `libaom-PATENTS.txt`; libaom is linked
+statically, so packaging and qualification reject a stray `libaom*.dll`. The package step verifies
+that exact manifest and every hash before building Maelstrom; an existing bundle must be rebuilt
+before those gates accept this updated provenance contract. The separate
 `fetch-ffmpeg-lgpl.ps1` helper remains a development-only convenience.
 
 Workspace tests that link FFmpeg need the project bundle and the directory containing
