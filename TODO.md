@@ -443,7 +443,8 @@ Last updated: 2026-09-04
 - [x] Add the opt-in packaged disruption harness for eight scrub/eight restore, offline/recovery,
       Full-quality cache-pressure, and cancelled-export paths. It uses only the exact launcher with
       `--cache-mb=512`; its dry-run contract proves no GUI, FFmpeg, environment, or artifact side
-      effect. Live/cross-hardware evidence remains open.
+      effect. Success publication is cleanup-gated for the captured launcher tree, restored
+      environment, and owned media/export artifacts; live/cross-hardware evidence remains open.
 - [ ] Complete broader cross-hardware ten-minute playback and seven-scenario soak evidence.
 - [ ] Complete UI-present/cross-hardware four-source latency evidence.
       Local one/four-source CPU and exact native-layer presentation cases pass on both adapters;

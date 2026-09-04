@@ -3408,6 +3408,7 @@ enum PlaybackDisruptionStep {
     ExportAwaitProgress,
     ExportAwaitTerminal,
     RecoveryPlayback,
+    TerminalCleanup,
     Complete,
     Failed,
 }
@@ -3424,7 +3425,9 @@ fn next_playback_disruption_step(step: PlaybackDisruptionStep) -> PlaybackDisrup
         PlaybackDisruptionStep::ExportAwaitProgress => PlaybackDisruptionStep::ExportAwaitTerminal,
         PlaybackDisruptionStep::ExportAwaitTerminal => PlaybackDisruptionStep::RecoveryPlayback,
         PlaybackDisruptionStep::RecoveryPlayback => PlaybackDisruptionStep::Complete,
-        PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed => step,
+        PlaybackDisruptionStep::TerminalCleanup
+        | PlaybackDisruptionStep::Complete
+        | PlaybackDisruptionStep::Failed => step,
     }
 }
 
@@ -3446,19 +3449,65 @@ const fn capture_playback_disruption_failure_step(
     }
 }
 
-const fn playback_disruption_export_cleanup_is_settled(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackDisruptionTerminalCleanup {
+    PendingActiveExport,
+    PendingResidue,
+    ExpiredResidue,
+    Settled,
+}
+
+const fn playback_disruption_terminal_cleanup_decision(
     owns_export: bool,
     export_job_active: bool,
     residue_present: bool,
-) -> bool {
-    !owns_export || (!export_job_active && !residue_present)
+    residue_deadline_expired: bool,
+) -> PlaybackDisruptionTerminalCleanup {
+    if owns_export && export_job_active {
+        PlaybackDisruptionTerminalCleanup::PendingActiveExport
+    } else if owns_export && residue_present && residue_deadline_expired {
+        PlaybackDisruptionTerminalCleanup::ExpiredResidue
+    } else if owns_export && residue_present {
+        PlaybackDisruptionTerminalCleanup::PendingResidue
+    } else {
+        PlaybackDisruptionTerminalCleanup::Settled
+    }
 }
 
-const fn playback_disruption_releases_foreground(step: PlaybackDisruptionStep) -> bool {
-    matches!(
-        step,
-        PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed
-    )
+const fn playback_disruption_should_start_residue_deadline(
+    export_job_active: bool,
+    residue_present: bool,
+    deadline_already_started: bool,
+) -> bool {
+    !export_job_active && residue_present && !deadline_already_started
+}
+
+const fn playback_disruption_cleanup_failure_step(
+    primary_failure: Option<PlaybackDisruptionStep>,
+    terminal_was_success: bool,
+) -> PlaybackDisruptionStep {
+    if terminal_was_success {
+        PlaybackDisruptionStep::TerminalCleanup
+    } else {
+        match primary_failure {
+            Some(step) => step,
+            None => PlaybackDisruptionStep::TerminalCleanup,
+        }
+    }
+}
+
+const fn playback_disruption_terminal_success(
+    terminal_success: bool,
+    cleanup_timeout: bool,
+    export_job_settled: bool,
+    export_residue_present: bool,
+    terminal_cleanup_failure_present: bool,
+) -> bool {
+    terminal_success
+        && !cleanup_timeout
+        && export_job_settled
+        && !export_residue_present
+        && !terminal_cleanup_failure_present
 }
 
 const fn snapshot_restore_is_live(
@@ -3491,6 +3540,10 @@ struct PlaybackDisruptionReport {
     export_progress_observed: bool,
     export_cancelled: bool,
     export_terminal_cleanup: bool,
+    cleanup_timeout: bool,
+    export_job_settled: bool,
+    export_residue_present: bool,
+    terminal_cleanup_failure: Option<String>,
     selected_preview_quality: String,
     resolved_preview_quality: String,
     runtime_diagnostics_delta: RuntimeDiagnosticsReport,
@@ -3533,6 +3586,12 @@ struct PlaybackDisruptionProbe {
     owns_runtime_scrub: bool,
     owns_export: bool,
     cleanup_restored: bool,
+    terminal_success: Option<bool>,
+    cleanup_started_at: Option<Instant>,
+    cleanup_timeout: bool,
+    export_job_settled: bool,
+    export_residue_present: bool,
+    terminal_cleanup_failure: Option<String>,
     measured_selected_preview_quality: Option<String>,
     measured_resolved_preview_quality: Option<String>,
 }
@@ -3609,6 +3668,12 @@ impl PlaybackDisruptionProbe {
             owns_runtime_scrub: false,
             owns_export: false,
             cleanup_restored: false,
+            terminal_success: None,
+            cleanup_started_at: None,
+            cleanup_timeout: false,
+            export_job_settled: false,
+            export_residue_present: false,
+            terminal_cleanup_failure: None,
             measured_selected_preview_quality: None,
             measured_resolved_preview_quality: None,
         })
@@ -3645,6 +3710,13 @@ impl PlaybackDisruptionProbe {
     }
     fn timed_out(&self, now: Instant) -> bool {
         self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+    fn enter_terminal_cleanup(&mut self) {
+        if self.step == PlaybackDisruptionStep::TerminalCleanup {
+            return;
+        }
+        self.terminal_success = Some(self.step == PlaybackDisruptionStep::Complete);
+        self.step = PlaybackDisruptionStep::TerminalCleanup;
     }
     fn note_decoder_error(&mut self) {
         if self.step == PlaybackDisruptionStep::OfflineAwaitError {
@@ -5952,38 +6024,76 @@ impl App {
             .all(|path| !path.exists() || fs::remove_file(path).is_ok())
     }
 
-    /// Restores state held by the synthetic schedule before emitting either terminal report.
-    /// Export cancellation is asynchronous, so this returns false until the owned job is gone
-    /// and its dedicated output path has no residue.
-    fn cleanup_playback_disruption(&mut self, probe: &mut PlaybackDisruptionProbe) -> bool {
+    /// Advances bounded terminal cleanup. An active owned export is only cancelled and retained;
+    /// the app must never drop its `ExportJob` while the worker is still running.
+    fn cleanup_playback_disruption(
+        &mut self,
+        probe: &mut PlaybackDisruptionProbe,
+        now: Instant,
+    ) -> bool {
+        const RESIDUE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
         if probe.owns_runtime_scrub {
             if self.editor.is_scrubbing() {
                 let _ = self.editor.end_runtime_scrub(false);
             }
             probe.owns_runtime_scrub = false;
         }
-        if probe.owns_export {
+        let export_job_active = probe.owns_export && self.export_job.is_some();
+        if export_job_active {
             if let Some(job) = &self.export_job {
                 job.cancel();
-                return false;
             }
-            // The supplied path is rejected before starting if it already exists, so these are
-            // probe-owned artifacts only. Remove an unexpected completed output as well.
-            if self.playback_disruption_export_residue(&probe.export_path)
-                && !self.clear_playback_disruption_export_artifacts(&probe.export_path)
-            {
-                return false;
+            probe.export_job_settled = false;
+            return false;
+        }
+        probe.export_job_settled = true;
+        let mut residue_present =
+            probe.owns_export && self.playback_disruption_export_residue(&probe.export_path);
+        if residue_present {
+            // The path was required to be empty before a probe-owned export started. Retry only
+            // those two exact artifacts after the worker has terminated.
+            let _ = self.clear_playback_disruption_export_artifacts(&probe.export_path);
+            residue_present = self.playback_disruption_export_residue(&probe.export_path);
+        }
+        probe.export_residue_present = residue_present;
+        if playback_disruption_should_start_residue_deadline(
+            export_job_active,
+            residue_present,
+            probe.cleanup_started_at.is_some(),
+        ) {
+            probe.cleanup_started_at = Some(now);
+        }
+        let deadline_expired = probe
+            .cleanup_started_at
+            .is_some_and(|started| now.duration_since(started) >= RESIDUE_CLEANUP_TIMEOUT);
+        match playback_disruption_terminal_cleanup_decision(
+            probe.owns_export,
+            export_job_active,
+            residue_present,
+            deadline_expired,
+        ) {
+            PlaybackDisruptionTerminalCleanup::PendingActiveExport => return false,
+            PlaybackDisruptionTerminalCleanup::PendingResidue => return false,
+            PlaybackDisruptionTerminalCleanup::ExpiredResidue => {
+                probe.cleanup_timeout = true;
+                let detail =
+                    "terminal cleanup timed out while removing the probe-owned export residue"
+                        .to_owned();
+                let terminal_was_success = probe.terminal_success.unwrap_or(false);
+                probe.terminal_success = Some(false);
+                probe.failed_step = Some(playback_disruption_cleanup_failure_step(
+                    probe.failed_step,
+                    terminal_was_success,
+                ));
+                if terminal_was_success {
+                    probe.failure = Some(detail.clone());
+                }
+                probe.terminal_cleanup_failure = Some(detail);
             }
-            if self.playback_disruption_export_residue(&probe.export_path) {
-                return false;
+            PlaybackDisruptionTerminalCleanup::Settled => {
+                probe.owns_export = false;
+                probe.export_terminal_cleanup = true;
             }
-            debug_assert!(playback_disruption_export_cleanup_is_settled(
-                probe.owns_export,
-                self.export_job.is_some(),
-                self.playback_disruption_export_residue(&probe.export_path),
-            ));
-            probe.owns_export = false;
-            probe.export_terminal_cleanup = true;
         }
         if probe.cleanup_restored {
             return true;
@@ -6016,7 +6126,13 @@ impl App {
         probe: &mut PlaybackDisruptionProbe,
         now: Instant,
     ) {
-        let success = probe.step == PlaybackDisruptionStep::Complete;
+        let success = playback_disruption_terminal_success(
+            probe.terminal_success.unwrap_or(false),
+            probe.cleanup_timeout,
+            probe.export_job_settled,
+            probe.export_residue_present,
+            probe.terminal_cleanup_failure.is_some(),
+        );
         let elapsed_ms = probe
             .started_at
             .map(|started| now.duration_since(started).as_millis())
@@ -6050,6 +6166,10 @@ impl App {
             export_progress_observed: probe.export_progress_observed,
             export_cancelled: probe.export_cancelled,
             export_terminal_cleanup: probe.export_terminal_cleanup,
+            cleanup_timeout: probe.cleanup_timeout,
+            export_job_settled: probe.export_job_settled,
+            export_residue_present: probe.export_residue_present,
+            terminal_cleanup_failure: probe.terminal_cleanup_failure.clone(),
             selected_preview_quality: probe
                 .measured_selected_preview_quality
                 .clone()
@@ -6061,9 +6181,7 @@ impl App {
             runtime_diagnostics_delta: RuntimeDiagnosticsReport::from(self.runtime_diagnostics())
                 .delta_since(probe.baseline_diagnostics),
         });
-        if playback_disruption_releases_foreground(probe.step)
-            && let Some(window) = &self.window
-        {
+        if let Some(window) = &self.window {
             window.set_window_level(WindowLevel::Normal);
         }
     }
@@ -6077,10 +6195,13 @@ impl App {
         };
         if matches!(
             probe.step,
-            PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed
+            PlaybackDisruptionStep::Complete
+                | PlaybackDisruptionStep::Failed
+                | PlaybackDisruptionStep::TerminalCleanup
         ) {
             probe.capture_measured_quality(&self.editor);
-            if self.cleanup_playback_disruption(&mut probe) {
+            probe.enter_terminal_cleanup();
+            if self.cleanup_playback_disruption(&mut probe, now) {
                 self.publish_playback_disruption_terminal(&mut probe, now);
             } else {
                 self.playback_disruption_probe = Some(probe);
@@ -6331,6 +6452,7 @@ impl App {
                 }
             }
             PlaybackDisruptionStep::WaitingForPlacement
+            | PlaybackDisruptionStep::TerminalCleanup
             | PlaybackDisruptionStep::Complete
             | PlaybackDisruptionStep::Failed => {}
         }
@@ -6339,7 +6461,8 @@ impl App {
             PlaybackDisruptionStep::Complete | PlaybackDisruptionStep::Failed
         ) {
             probe.capture_measured_quality(&self.editor);
-            if self.cleanup_playback_disruption(&mut probe) {
+            probe.enter_terminal_cleanup();
+            if self.cleanup_playback_disruption(&mut probe, now) {
                 self.publish_playback_disruption_terminal(&mut probe, now);
             } else {
                 self.playback_disruption_probe = Some(probe);
@@ -11021,33 +11144,62 @@ mod tests {
         assert!(!snapshot_restore_is_live(true, true, false));
         assert!(!snapshot_restore_is_live(true, false, true));
         assert!(snapshot_restore_is_live(true, true, true));
-        assert!(!playback_disruption_export_cleanup_is_settled(
+        assert_eq!(
+            playback_disruption_terminal_cleanup_decision(true, true, false, false),
+            PlaybackDisruptionTerminalCleanup::PendingActiveExport
+        );
+        assert_eq!(
+            playback_disruption_terminal_cleanup_decision(true, false, true, false),
+            PlaybackDisruptionTerminalCleanup::PendingResidue
+        );
+        assert_eq!(
+            playback_disruption_terminal_cleanup_decision(true, false, true, true),
+            PlaybackDisruptionTerminalCleanup::ExpiredResidue
+        );
+        assert_eq!(
+            playback_disruption_terminal_cleanup_decision(true, false, false, false),
+            PlaybackDisruptionTerminalCleanup::Settled
+        );
+        assert!(!playback_disruption_should_start_residue_deadline(
             true, true, false
         ));
-        assert!(!playback_disruption_export_cleanup_is_settled(
-            true, false, true
+        assert!(playback_disruption_should_start_residue_deadline(
+            false, true, false
         ));
-        assert!(playback_disruption_export_cleanup_is_settled(
-            true, false, false
-        ));
-        assert!(playback_disruption_export_cleanup_is_settled(
+        assert!(!playback_disruption_should_start_residue_deadline(
             false, true, true
         ));
+        assert_eq!(
+            playback_disruption_cleanup_failure_step(
+                Some(PlaybackDisruptionStep::OfflineAwaitError),
+                false,
+            ),
+            PlaybackDisruptionStep::OfflineAwaitError
+        );
+        assert_eq!(
+            playback_disruption_cleanup_failure_step(None, true),
+            PlaybackDisruptionStep::TerminalCleanup
+        );
+        assert!(playback_disruption_terminal_success(
+            true, false, true, false, false
+        ));
+        for rejected in [
+            (false, false, true, false, false),
+            (true, true, true, false, false),
+            (true, false, false, false, false),
+            (true, false, true, true, false),
+            (true, false, true, false, true),
+        ] {
+            assert!(!playback_disruption_terminal_success(
+                rejected.0, rejected.1, rejected.2, rejected.3, rejected.4
+            ));
+        }
     }
 
     #[test]
     fn playback_disruption_report_also_requests_foreground_cadence() {
         assert!(!playback_probe_requires_foreground(false, false, false));
         assert!(playback_probe_requires_foreground(false, false, true));
-        assert!(!playback_disruption_releases_foreground(
-            PlaybackDisruptionStep::CachePressure
-        ));
-        assert!(playback_disruption_releases_foreground(
-            PlaybackDisruptionStep::Complete
-        ));
-        assert!(playback_disruption_releases_foreground(
-            PlaybackDisruptionStep::Failed
-        ));
     }
 
     fn compiled_test_graph(node_id: u32, brightness: f32) -> nle_timeline::VideoEffectGraph {

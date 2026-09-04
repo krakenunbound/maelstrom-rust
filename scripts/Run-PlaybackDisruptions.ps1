@@ -72,6 +72,75 @@ function Find-OwnedPackagedEditorProcess {
     return $null
 }
 
+$ownedProcessIdentities = @{}
+
+function Add-OwnedProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if ($null -ne $process) {
+        $script:ownedProcessIdentities[[int]$process.ProcessId] = [string]$process.CreationDate
+    }
+}
+
+function Capture-OwnedProcessTree {
+    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+    $pending = [Collections.Generic.Queue[int]]::new()
+    $visited = [Collections.Generic.HashSet[int]]::new()
+    $pending.Enqueue($RootProcessId)
+    while ($pending.Count -gt 0) {
+        $processId = $pending.Dequeue()
+        if (-not $visited.Add($processId)) { continue }
+        Add-OwnedProcessIdentity -ProcessId $processId
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$processId" -ErrorAction SilentlyContinue)) {
+            $pending.Enqueue([int]$child.ProcessId)
+        }
+    }
+}
+
+function Test-OwnedProcessStillRunning {
+    param([Parameter(Mandatory = $true)][int]$ProcessId, [Parameter(Mandatory = $true)][string]$CreationDate)
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    return $null -ne $process -and [string]::Equals([string]$process.CreationDate, $CreationDate, [StringComparison]::Ordinal)
+}
+
+function Stop-OwnedProcessTree {
+    param([int]$LauncherProcessId)
+    $errors = [Collections.Generic.List[string]]::new()
+    if ($LauncherProcessId -gt 0) {
+        Capture-OwnedProcessTree -RootProcessId $LauncherProcessId
+        if ($script:ownedProcessIdentities.ContainsKey($LauncherProcessId) -and
+            (Test-OwnedProcessStillRunning -ProcessId $LauncherProcessId -CreationDate $script:ownedProcessIdentities[$LauncherProcessId])) {
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $LauncherProcessId /T /F *> $null
+            if ($LASTEXITCODE -ne 0 -and (Test-OwnedProcessStillRunning -ProcessId $LauncherProcessId -CreationDate $script:ownedProcessIdentities[$LauncherProcessId])) {
+                $errors.Add("taskkill could not terminate owned launcher root PID $LauncherProcessId (exit $LASTEXITCODE).")
+            }
+        }
+    }
+    foreach ($processId in @($script:ownedProcessIdentities.Keys | Sort-Object {[int]$_})) {
+        $creationDate = $script:ownedProcessIdentities[$processId]
+        if (Test-OwnedProcessStillRunning -ProcessId ([int]$processId) -CreationDate $creationDate) {
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $processId /T /F *> $null
+            if ($LASTEXITCODE -ne 0 -and (Test-OwnedProcessStillRunning -ProcessId ([int]$processId) -CreationDate $creationDate)) {
+                $errors.Add("taskkill could not terminate owned PID $processId (exit $LASTEXITCODE).")
+            }
+        }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $remaining = @($script:ownedProcessIdentities.GetEnumerator() | Where-Object { Test-OwnedProcessStillRunning -ProcessId ([int]$_.Key) -CreationDate $_.Value })
+        if ($remaining.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    foreach ($entry in $remaining) { $errors.Add("Owned process PID $($entry.Key) did not exit after cleanup.") }
+    return $errors.ToArray()
+}
+
+function Get-OwnedProcessEvidence {
+    return @($script:ownedProcessIdentities.GetEnumerator() | Sort-Object {[int]$_.Key} | ForEach-Object {
+        [ordered]@{ process_id = [int]$_.Key; creation_date = $_.Value }
+    })
+}
+
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $approvedLauncherPath = 'H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat'
 $artifactDirectory = [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts\phase0-playback-disruptions'))
@@ -100,10 +169,14 @@ $packageDirectory = $null
 $ffmpeg = $null
 $ffprobe = $null
 $launcherProcess = $null
+$editorProcess = $null
 $appReport = $null
+$primaryFailure = $null
+$cleanupFailures = [Collections.Generic.List[object]]::new()
+$successReadyForPublication = $false
 
 function Write-FailedPlaybackDisruptionReport {
-    param([Parameter(Mandatory = $true)]$Failure)
+    param($PrimaryFailure, [Parameter(Mandatory = $true)]$CleanupFailures)
     try {
         if ($null -eq $appReport -and (Test-Path -LiteralPath $appReportPath -PathType Leaf)) {
             try { $script:appReport = Get-Content -LiteralPath $appReportPath -Raw | ConvertFrom-Json } catch {}
@@ -111,12 +184,18 @@ function Write-FailedPlaybackDisruptionReport {
         $report = [ordered]@{
             schema_version = 1
             status = 'failed'
-            failure = [ordered]@{ stage = $stage; error_type = $Failure.Exception.GetType().FullName; message = $Failure.Exception.Message }
+            failure = [ordered]@{
+                stage = if ($null -ne $PrimaryFailure) { $PrimaryFailure.stage } else { 'cleanup' }
+                error_type = if ($null -ne $PrimaryFailure) { $PrimaryFailure.error_type } else { 'CleanupFailure' }
+                message = if ($null -ne $PrimaryFailure) { $PrimaryFailure.message } else { $CleanupFailures[0].message }
+                cleanup_errors = @($CleanupFailures)
+            }
             launcher_path = $resolvedLauncher
             launcher_sha256 = $launcherSha256
             executable_path = $resolvedExecutable
             executable_sha256 = $executableSha256
             cache_megabytes_requested = 512
+            owned_processes = Get-OwnedProcessEvidence
             app_report = $appReport
         }
         Write-AtomicUtf8File -Path $finalReportPath -Contents ($report | ConvertTo-Json -Depth 12)
@@ -169,11 +248,15 @@ try {
     $env:MAELSTROM_PLAYBACK_DISRUPTION_EXPORT_PATH = $exportPath
     $env:MAELSTROM_LAUNCHER_WAIT = '1'
     $launcherProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', ('call "{0}" --cache-mb=512' -f $resolvedLauncher)) -WorkingDirectory $repoRoot -WindowStyle Normal -PassThru
+    Add-OwnedProcessIdentity -ProcessId $launcherProcess.Id
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     $editorProcess = $null
     while ($null -eq $editorProcess) {
         $editorProcess = Find-OwnedPackagedEditorProcess -LauncherProcessId $launcherProcess.Id -PackagedExecutable $resolvedExecutable
-        if ($null -ne $editorProcess) { break }
+        if ($null -ne $editorProcess) {
+            Capture-OwnedProcessTree -RootProcessId $launcherProcess.Id
+            break
+        }
         $launcherProcess.Refresh()
         if ($launcherProcess.HasExited) { throw "Maelstrom launcher exited before its packaged editor child was observed (code $($launcherProcess.ExitCode))." }
         if ([DateTime]::UtcNow -ge $deadline) { throw 'Maelstrom launcher did not start the packaged editor within the bounded startup allowance.' }
@@ -189,11 +272,12 @@ try {
     $stage = 'app_report_schema'
     $appReport = Get-Content -LiteralPath $appReportPath -Raw | ConvertFrom-Json
     foreach ($property in @('schema_version', 'elapsed_ms', 'action_count', 'scrub_requests', 'snapshot_restores', 'snapshot_restore_frames', 'snapshot_restore_audio_restarts', 'cache_eviction_before', 'cache_eviction_after', 'cache_eviction_growth')) { Assert-JsonUnsignedIntegerProperty $appReport $property 'Playback disruption report' }
+    if ($null -eq $appReport.PSObject.Properties['terminal_cleanup_failure']) { throw 'Playback disruption report omitted terminal_cleanup_failure.' }
     if ($appReport.schema_version -ne 1 -or $appReport.success -ne $true -or $null -ne $appReport.failed_step -or $null -ne $appReport.failure -or
         $appReport.elapsed_ms -lt 1 -or $appReport.scrub_requests -ne 8 -or $appReport.snapshot_restores -ne 8 -or $appReport.snapshot_restore_frames -ne 8 -or $appReport.snapshot_restore_audio_restarts -ne 8 -or
         $appReport.decoder_error_observed -ne $true -or $appReport.offline_marked -ne $true -or $appReport.recovery_frame_presented -ne $true -or
         $appReport.cache_eviction_after -lt $appReport.cache_eviction_before -or $appReport.cache_eviction_growth -lt 1 -or
-        $appReport.export_started -ne $true -or $appReport.export_progress_observed -ne $true -or $appReport.export_cancelled -ne $true -or $appReport.export_terminal_cleanup -ne $true -or
+        $appReport.export_started -ne $true -or $appReport.export_progress_observed -ne $true -or $appReport.export_cancelled -ne $true -or $appReport.export_terminal_cleanup -ne $true -or $appReport.cleanup_timeout -ne $false -or $appReport.export_job_settled -ne $true -or $appReport.export_residue_present -ne $false -or $null -ne $appReport.terminal_cleanup_failure -or
         $appReport.selected_preview_quality -ne 'Full' -or $appReport.resolved_preview_quality -ne 'Full') { throw 'Playback disruption report omitted required successful scrub, restore, offline/recovery, cache, export, or Full-quality evidence.' }
 
     $stage = 'app_report_runtime_diagnostics'
@@ -204,29 +288,65 @@ try {
         $diagnostics.monitor_errors -ne 1 -or $diagnostics.fallback_viewer_uploads -ne 0 -or $diagnostics.audio_underrun_frames -ne 0 -or $diagnostics.audio_callback_lock_failures -ne 0 -or $diagnostics.audio_late_discarded_frames -ne 0 -or
         $diagnostics.monitor_late_frames -gt [Math]::Ceiling([double]$diagnostics.monitor_requests * 0.05)) { throw 'Playback disruption diagnostics exceeded bounds or did not record exactly the expected intentional offline-source monitor error.' }
 
-    $stage = 'report_publication'
-    $report = [ordered]@{
-        schema_version = 1; status = 'passed'; failure = $null
-        launcher_path = $resolvedLauncher; launcher_sha256 = $launcherSha256
-        executable_path = $resolvedExecutable; executable_sha256 = $executableSha256
-        cache_megabytes_requested = 512; app_report = $appReport
-    }
-    Write-AtomicUtf8File -Path $finalReportPath -Contents ($report | ConvertTo-Json -Depth 12)
-    Write-Host "Playback disruption schedule passed: $($appReport.elapsed_ms) ms, $($appReport.cache_eviction_growth) cache evictions."
-    Get-Item -LiteralPath $finalReportPath
+    # The outer cleanup path must prove that no owned process, environment override, or disposable
+    # artifact remains before it is even eligible to construct a passed wrapper.
+    $successReadyForPublication = $true
 } catch {
-    if (-not $ValidateOnly) { Write-FailedPlaybackDisruptionReport -Failure $_ }
-    throw
-} finally {
-    if ($launcherProcess) {
-        try { & "$env:SystemRoot\System32\taskkill.exe" /PID $launcherProcess.Id /T /F *> $null } catch {}
-        try { Wait-Process -Id $launcherProcess.Id -ErrorAction SilentlyContinue } catch {}
+    $primaryFailure = [pscustomobject]@{
+        stage = $stage
+        error_type = $_.Exception.GetType().FullName
+        message = $_.Exception.Message
     }
-    Restore-EnvironmentValue -Name 'PATH' -Value $savedPath
-    foreach ($name in $savedValues.Keys) { Restore-EnvironmentValue -Name $name -Value $savedValues[$name] }
+    if ($ValidateOnly) { throw }
+} finally {
     if (-not $ValidateOnly) {
-        foreach ($temporaryArtifact in @($mediaPath, "$mediaPath.tmp", $appReportTemporaryPath, $finalReportTemporaryPath, $exportTemporaryPath)) {
-            if (-not (Remove-FileWithRetries -Path $temporaryArtifact)) { Write-Warning "Could not remove playback-disruptions temporary artifact: $temporaryArtifact" }
+        $cleanupStage = 'cleanup_processes'
+        try {
+            $launcherId = if ($null -ne $launcherProcess) { [int]$launcherProcess.Id } else { 0 }
+            foreach ($cleanupError in Stop-OwnedProcessTree -LauncherProcessId $launcherId) {
+                $cleanupFailures.Add([pscustomobject]@{ stage = $cleanupStage; message = $cleanupError })
+            }
+        } catch {
+            $cleanupFailures.Add([pscustomobject]@{ stage = $cleanupStage; message = $_.Exception.Message })
+        }
+        $cleanupStage = 'cleanup_environment'
+        try {
+            Restore-EnvironmentValue -Name 'PATH' -Value $savedPath
+            foreach ($name in $savedValues.Keys) { Restore-EnvironmentValue -Name $name -Value $savedValues[$name] }
+        } catch {
+            $cleanupFailures.Add([pscustomobject]@{ stage = $cleanupStage; message = $_.Exception.Message })
+        }
+        $cleanupStage = 'cleanup_artifacts'
+        foreach ($temporaryArtifact in @($mediaPath, "$mediaPath.tmp", $exportPath, $exportTemporaryPath, $appReportTemporaryPath, $finalReportTemporaryPath)) {
+            if (-not (Remove-FileWithRetries -Path $temporaryArtifact)) {
+                $cleanupFailures.Add([pscustomobject]@{ stage = $cleanupStage; message = "Could not remove disposable playback-disruptions artifact: $temporaryArtifact" })
+            }
         }
     }
 }
+
+if ($ValidateOnly) { return }
+if ($null -ne $primaryFailure -or $cleanupFailures.Count -ne 0) {
+    Write-FailedPlaybackDisruptionReport -PrimaryFailure $primaryFailure -CleanupFailures $cleanupFailures
+    $details = @()
+    if ($null -ne $primaryFailure) { $details += "$($primaryFailure.stage): $($primaryFailure.message)" }
+    $details += @($cleanupFailures | ForEach-Object { "$($_.stage): $($_.message)" })
+    throw "Playback disruption runner failed: $($details -join ' | ')"
+}
+try {
+    $stage = 'report_publication'
+    if (-not $successReadyForPublication) { throw 'Playback disruption runner reached publication without successful app validation.' }
+    $passedReport = [ordered]@{
+        schema_version = 1; status = 'passed'; failure = $null
+        launcher_path = $resolvedLauncher; launcher_sha256 = $launcherSha256
+        executable_path = $resolvedExecutable; executable_sha256 = $executableSha256
+        cache_megabytes_requested = 512; owned_processes = Get-OwnedProcessEvidence; app_report = $appReport
+    }
+    Write-AtomicUtf8File -Path $finalReportPath -Contents ($passedReport | ConvertTo-Json -Depth 12)
+} catch {
+    $primaryFailure = [pscustomobject]@{ stage = $stage; error_type = $_.Exception.GetType().FullName; message = $_.Exception.Message }
+    Write-FailedPlaybackDisruptionReport -PrimaryFailure $primaryFailure -CleanupFailures $cleanupFailures
+    throw "Playback disruption runner failed: $($primaryFailure.stage): $($primaryFailure.message)"
+}
+Write-Host "Playback disruption schedule passed: $($appReport.elapsed_ms) ms, $($appReport.cache_eviction_growth) cache evictions."
+Get-Item -LiteralPath $finalReportPath

@@ -430,6 +430,12 @@ decoder/offline/recovery evidence; positive cache
 eviction growth; export start, progress, cancellation, and cleanup; `Full` selected/resolved quality;
 bounded diagnostics; and exactly one monitor error from the intentional missing source. The additive
 schema-1 wrapper records launcher/executable SHA-256 values and structured stage/type/message failures.
+It publishes `status: "passed"` only after the captured launcher/editor/descendant PID set is gone,
+the original environment is restored, and every disposable owned media/export/`.part`/temporary
+artifact has been removed. Cleanup failure makes the invocation fail and writes `status: "failed"`
+with the original operational failure (if any) plus every cleanup error; app and final reports are
+retained as evidence. Success additionally requires `cleanup_timeout: false`,
+`export_job_settled: true`, and `export_residue_present: false`.
 
 `-ValidateOnly` proves exact launcher/package/runtime identity without creating/deleting artifacts,
 changing environment variables, running FFmpeg, or launching the GUI. Its contract rejects direct

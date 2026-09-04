@@ -136,7 +136,8 @@ Build the evidence harness before adding engine complexity.
       restores with fresh frames, intentional offline/error/recovery, Full-quality decoded-frame
       cache eviction, and cancelled-export cleanup. Its non-launching contract proves exact
       launcher/package identity and no validation side effects; it is not live or cross-hardware
-      qualification evidence. See `docs/performance-reports.md`.
+      qualification evidence. Passed wrappers are withheld until owned-process, environment, and
+      disposable-artifact cleanup succeeds. See `docs/performance-reports.md`.
       It renewed headless Software decode/`h264_mf` evidence only; adapter inventory is not
       rendering proof, and live-audio, GUI, packaged-playback, scanout, and cross-hardware gates
       remain open.

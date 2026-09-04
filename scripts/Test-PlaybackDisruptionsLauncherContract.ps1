@@ -20,8 +20,22 @@ $tokens = $null; $parseErrors = $null
 if ($parseErrors.Count -ne 0) { throw "Playback disruptions runner has parser errors: $($parseErrors.Message -join '; ')" }
 $source = Get-Content -LiteralPath $runner -Raw
 if ($source -notmatch "\$env:MAELSTROM_LAUNCHER_WAIT = '1'" -or $source -notmatch '--cache-mb=512' -or
-    $source -notmatch 'snapshot_restore_audio_restarts' -or $source -notmatch 'Start-Process -FilePath \$env:ComSpec' -or $source -match 'Start-Process -FilePath \$resolvedExecutable') {
-    throw 'Playback disruptions runner must require frame-gated audio restarts and invoke the exact waiting batch launcher with --cache-mb=512, never Maelstrom.exe directly.'
+    $source -notmatch 'snapshot_restore_audio_restarts' -or $source -notmatch 'cleanup_timeout' -or
+    $source -notmatch 'export_job_settled' -or $source -notmatch 'export_residue_present' -or
+    $source -notmatch 'terminal_cleanup_failure' -or
+    $source -notmatch '\$appReport\.cleanup_timeout -ne \$false' -or
+    $source -notmatch '\$appReport\.export_job_settled -ne \$true' -or
+    $source -notmatch '\$appReport\.export_residue_present -ne \$false' -or
+    $source -notmatch '\$null -ne \$appReport\.terminal_cleanup_failure' -or
+    $source -notmatch 'Capture-OwnedProcessTree' -or $source -notmatch 'Test-OwnedProcessStillRunning' -or
+    $source -notmatch 'Stop-OwnedProcessTree' -or $source -notmatch '\$exportPath, \$exportTemporaryPath' -or
+    $source -notmatch 'Start-Process -FilePath \$env:ComSpec' -or $source -match 'Start-Process -FilePath \$resolvedExecutable') {
+    throw 'Playback disruptions runner must require settled export cleanup, verified owned-process/artifact cleanup, frame-gated audio restarts, and the exact waiting batch launcher with --cache-mb=512.'
+}
+$cleanupGate = $source.IndexOf('if ($null -ne $primaryFailure -or $cleanupFailures.Count -ne 0)')
+$passedWrite = $source.LastIndexOf('Write-AtomicUtf8File -Path $finalReportPath')
+if ($cleanupGate -lt 0 -or $passedWrite -lt $cleanupGate) {
+    throw 'Playback disruptions runner must publish a passed wrapper only after cleanup failures have been checked.'
 }
 
 $environmentNames = @('PATH', 'MAELSTROM_SMOKE_EDITOR', 'MAELSTROM_MEDIA_ACCEPTANCE_PATH', 'MAELSTROM_PLAYBACK_DISRUPTION_REPORT', 'MAELSTROM_PLAYBACK_DISRUPTION_EXPORT_PATH', 'MAELSTROM_LAUNCHER_WAIT')

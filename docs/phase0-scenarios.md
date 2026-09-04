@@ -62,7 +62,9 @@ playback/audio-transport restarts, offline/error and
 recovery behavior, real decoded-frame-cache eviction, and cancelled-export cleanup. Its
 `-ValidateOnly` mode proves launcher/package/runtime identity without GUI, FFmpeg, environment, or
 artifact side effects. The harness exists but has not yet produced live, scanout, or cross-hardware
-Phase 0 evidence; see `docs/performance-reports.md` for the full contract.
+Phase 0 evidence; it withholds a passed wrapper until owned-process, environment, and disposable
+artifact cleanup verifies, including a settled export with no residue. See `docs/performance-reports.md`
+for the full contract.
 
 ## Sustained scenario matrix
 
