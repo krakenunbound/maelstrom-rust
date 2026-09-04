@@ -90,6 +90,9 @@ Build the evidence harness before adding engine complexity.
       frames retain a two-frame GOP and pinned probe/timing evidence; manifest-only validation
       rejects loss of 4K-class video coverage. It is excluded from default long soaks and makes no
       playback-quality, packaging, decoder-performance, or hardware claim.
+- [x] Add a bounded deterministic 7680×4320 MPEG-4 source fixture. Its two-frame contract includes
+      explicit software/no-hwaccel null-sink acceptance and an 8K manifest-only coverage seam; it
+      is not playback, export, GPU, throughput, scanout, or long-soak evidence.
 - [x] Add deterministic mono, stereo, and multichannel audio coverage to the generated corpus.
       The six-channel PCM fixture uses distinct 5.1 tones and pins its FFprobe layout, size, and
       hash; manifest-only validation rejects loss of any audio layout class. Mixer and export

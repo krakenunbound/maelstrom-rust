@@ -71,6 +71,9 @@ Last updated: 2026-09-04
   MPEG-4 fixture pins yuv420p, two-frame GOP/keyframes, duration, size, and hash; ManifestOnly
   rejects removal of all 4K-class video in memory. It is not part of default long soaks and makes
   no playback-quality, package, decode-performance, or hardware claim.
+- [x] Add bounded deterministic 8K video source coverage. The generated two-frame 7680×4320/24
+  MPEG-4 fixture pins identity and accepts exactly two explicit software/no-hwaccel decoded frames
+  to a null sink; it establishes no playback, export, GPU, throughput, scanout, or long-soak claim.
 - [x] Pin the local-only H.264 High long-GOP scrub input beneath an explicit real-media corpus
   root. Its filename, hash, size, stream, duration, frame/keyframe, and I/P/B evidence are
   validated only when opted in; it is input to the separately run Software scrub test, not a scrub

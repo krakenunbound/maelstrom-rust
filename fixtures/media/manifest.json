@@ -51,6 +51,32 @@
       "expected": "success"
     },
     {
+      "id": "bars-8k-mpeg4-24-mp4",
+      "path": "bars-8k-mpeg4-24.mp4",
+      "source": "generated",
+      "provenance": "FFmpeg lavfi testsrc2 filter; recipe in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "testsrc2=size=7680x4320:rate=24; two frames; mpeg4 MP4, q:v 8, GOP 2, no B-frames, yuv420p, bitexact flags",
+      "sha256": "4D89B5BBF6C5B540E11908EA8A481CB9E2D679FDB05D4FDB7206F31E0E503F02",
+      "byte_size": 1564847,
+      "container": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": {
+        "codec": "mpeg4",
+        "profile": "Simple Profile",
+        "pixel_format": "yuv420p",
+        "rate": "24/1",
+        "width": 7680,
+        "height": 4320,
+        "gop": 2,
+        "has_b_frames": 0,
+        "keyframe_positions": [0],
+        "picture_types": ["I", "P"],
+        "software_decode_frames": 2,
+        "timing": { "vfr": false, "reordered": false }
+      },
+      "duration_seconds": 0.083333,
+      "expected": "success"
+    },
+    {
       "id": "vfr-irregular-mpeg4-mp4",
       "path": "vfr-irregular-mpeg4.mp4",
       "source": "generated",

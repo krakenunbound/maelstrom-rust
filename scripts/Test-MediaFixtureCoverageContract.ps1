@@ -77,6 +77,66 @@ if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).
 }
 Write-Output 'Manifest 4K coverage contract fixture: PASS (rejected in-memory 4K removal; manifest hash unchanged)'
 
+$eightKOutput = @()
+$eightKRejected = $false
+try {
+    $eightKOutput = @(& $validator -ManifestOnly -Manifest8kCoverageContractFixture 2>&1)
+}
+catch {
+    $eightKRejected = $true
+    $eightKOutput = @($_.Exception.Message)
+}
+if (-not $eightKRejected) {
+    throw 'Manifest 8K coverage contract fixture unexpectedly passed.'
+}
+if (($eightKOutput -join [Environment]::NewLine) -notmatch 'Manifest video coverage requires at least one 8K-class fixture') {
+    throw 'Manifest 8K coverage contract fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest 8K coverage contract fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest 8K coverage contract fixture: PASS (rejected in-memory 8K removal; manifest hash unchanged)'
+
+$softwareDecodeOutput = @()
+$softwareDecodeRejected = $false
+try {
+    $softwareDecodeOutput = @(& $validator -ManifestOnly -ManifestSoftwareDecodeContractFixture 2>&1)
+}
+catch {
+    $softwareDecodeRejected = $true
+    $softwareDecodeOutput = @($_.Exception.Message)
+}
+if (-not $softwareDecodeRejected) {
+    throw 'Manifest software-decode schema fixture unexpectedly passed.'
+}
+if (($softwareDecodeOutput -join [Environment]::NewLine) -notmatch 'Software decode frame contract is invalid') {
+    throw 'Manifest software-decode schema fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest software-decode schema fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest software-decode schema fixture: PASS (rejected non-integer frame count; manifest hash unchanged)'
+
+$fractionalDecodeOutput = @()
+$fractionalDecodeRejected = $false
+try {
+    $fractionalDecodeOutput = @(& $validator -ManifestOnly -ManifestSoftwareDecodeFractionalContractFixture 2>&1)
+}
+catch {
+    $fractionalDecodeRejected = $true
+    $fractionalDecodeOutput = @($_.Exception.Message)
+}
+if (-not $fractionalDecodeRejected) {
+    throw 'Manifest fractional software-decode schema fixture unexpectedly passed.'
+}
+if (($fractionalDecodeOutput -join [Environment]::NewLine) -notmatch 'Software decode frame contract is invalid') {
+    throw 'Manifest fractional software-decode schema fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest fractional software-decode schema fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest fractional software-decode schema fixture: PASS (rejected fractional frame count; manifest hash unchanged)'
+
 $localCorpusOutput = @()
 $localCorpusRejected = $false
 try {

@@ -8,6 +8,9 @@ param(
     [switch]$ManifestCoverageContractFixture,
     [switch]$ManifestImageContractFixture,
     [switch]$Manifest4kCoverageContractFixture,
+    [switch]$Manifest8kCoverageContractFixture,
+    [switch]$ManifestSoftwareDecodeContractFixture,
+    [switch]$ManifestSoftwareDecodeFractionalContractFixture,
     [switch]$ManifestLocalCorpusContractSchemaFixture,
     [switch]$ManifestLocalCorpusDurationSchemaFixture,
     [switch]$IncludeRealCorpus
@@ -24,7 +27,7 @@ if ($manifest.schema_version -ne 3 -or [string]::IsNullOrWhiteSpace($manifest.ar
     throw 'Unsupported or incomplete media fixture manifest.'
 }
 if ($manifest.artifact_root -ne 'artifacts/media-fixtures') { throw 'Unexpected fixture artifact root.' }
-if (($ManifestCoverageContractFixture -or $ManifestImageContractFixture -or $Manifest4kCoverageContractFixture -or $ManifestLocalCorpusContractSchemaFixture -or $ManifestLocalCorpusDurationSchemaFixture) -and -not $ManifestOnly) {
+if (($ManifestCoverageContractFixture -or $ManifestImageContractFixture -or $Manifest4kCoverageContractFixture -or $Manifest8kCoverageContractFixture -or $ManifestSoftwareDecodeContractFixture -or $ManifestSoftwareDecodeFractionalContractFixture -or $ManifestLocalCorpusContractSchemaFixture -or $ManifestLocalCorpusDurationSchemaFixture) -and -not $ManifestOnly) {
     throw 'Manifest contract fixtures are permitted only with -ManifestOnly.'
 }
 if ($ManifestImageContractFixture) {
@@ -37,6 +40,22 @@ if ($ManifestLocalCorpusContractSchemaFixture) {
 }
 if ($ManifestLocalCorpusDurationSchemaFixture) {
     $manifest.real_media_corpus.required_local_fixtures[0].duration_seconds = '5'
+}
+if ($ManifestSoftwareDecodeContractFixture) {
+    $decodeFixtures = @($manifest.fixtures | Where-Object {
+        $_.PSObject.Properties.Name -contains 'video' -and
+        $_.video.PSObject.Properties.Name -contains 'software_decode_frames'
+    })
+    if ($decodeFixtures.Count -lt 1) { throw 'Manifest software-decode contract fixture requires at least one declared decode contract.' }
+    $decodeFixtures[0].video.software_decode_frames = '2'
+}
+if ($ManifestSoftwareDecodeFractionalContractFixture) {
+    $decodeFixtures = @($manifest.fixtures | Where-Object {
+        $_.PSObject.Properties.Name -contains 'video' -and
+        $_.video.PSObject.Properties.Name -contains 'software_decode_frames'
+    })
+    if ($decodeFixtures.Count -lt 1) { throw 'Manifest software-decode contract fixture requires at least one declared decode contract.' }
+    $decodeFixtures[0].video.software_decode_frames = 2.4
 }
 
 function Test-LocalContractInteger([object]$Value, [int64]$Minimum, [int64]$Maximum) {
@@ -115,6 +134,12 @@ foreach ($fixture in $manifest.fixtures) {
             $pictureTypes = @($fixture.video.picture_types | ForEach-Object { [string]$_ })
             if ($pictureTypes.Count -lt 1 -or @($pictureTypes | Where-Object { $_ -notmatch '^[IPB]$' }).Count -ne 0) { throw "Video picture types are invalid: $($fixture.id)." }
         }
+        if ($fixture.video.PSObject.Properties.Name -contains 'software_decode_frames') {
+            if (-not (Test-LocalContractInteger $fixture.video.software_decode_frames 1 1000000)) { throw "Software decode frame contract is invalid: $($fixture.id)." }
+            $softwareDecodeFrames = [int]$fixture.video.software_decode_frames
+            $declaredFrameCount = if ($fixture.video.PSObject.Properties.Name -contains 'picture_types') { @($fixture.video.picture_types).Count } elseif ($fixture.video.timing.vfr) { [int]$fixture.video.timing.frame_count } else { 0 }
+            if ($softwareDecodeFrames -lt 1 -or $declaredFrameCount -lt 1 -or $softwareDecodeFrames -gt $declaredFrameCount) { throw "Software decode frame contract is invalid: $($fixture.id)." }
+        }
         if ($fixture.video.timing.vfr) {
             foreach ($field in 'frame_count', 'first_pts_us', 'last_pts_us', 'expected_gap_us', 'pts_sha256') {
                 if ($null -eq $fixture.video.timing.$field -or [string]::IsNullOrWhiteSpace([string]$fixture.video.timing.$field)) { throw "VFR video timing is missing ${field}: $($fixture.id)." }
@@ -148,6 +173,12 @@ if ($Manifest4kCoverageContractFixture) {
         [int]$_.video.width -lt 3840 -or [int]$_.video.height -lt 2160
     })
 }
+if ($Manifest8kCoverageContractFixture) {
+    $manifest.fixtures = @($manifest.fixtures | Where-Object {
+        -not ($_.PSObject.Properties.Name -contains 'video') -or
+        [int]$_.video.width -lt 7680 -or [int]$_.video.height -lt 4320
+    })
+}
 
 function Assert-ManifestAudioCoverage([object[]]$Fixtures) {
     $audioFixtures = @($Fixtures | Where-Object { $_.PSObject.Properties.Name -contains 'audio' })
@@ -177,15 +208,27 @@ function Assert-Manifest4kVideoCoverage([object[]]$Fixtures) {
     }
 }
 
+function Assert-Manifest8kVideoCoverage([object[]]$Fixtures) {
+    $has8kVideo = @($Fixtures | Where-Object {
+        $_.PSObject.Properties.Name -contains 'video' -and
+        [int]$_.video.width -ge 7680 -and [int]$_.video.height -ge 4320
+    }).Count -gt 0
+    if (-not $has8kVideo) {
+        throw 'Manifest video coverage requires at least one 8K-class fixture (minimum 7680x4320).'
+    }
+}
+
 Assert-ManifestAudioCoverage @($manifest.fixtures)
 Assert-Manifest4kVideoCoverage @($manifest.fixtures)
+Assert-Manifest8kVideoCoverage @($manifest.fixtures)
 if ($ManifestOnly) { Write-Output 'Media fixture manifest schema: PASS'; exit 0 }
 
 if ([string]::IsNullOrWhiteSpace($FfmpegRoot)) { throw 'Pass -FfmpegRoot with an absolute FFmpeg bundle root or set FFMPEG_DIR.' }
 if (-not [IO.Path]::IsPathFullyQualified($FfmpegRoot)) { throw 'FFmpeg root must be an absolute path.' }
 $ffmpegRootPath = (Resolve-Path -LiteralPath $FfmpegRoot).Path
 $ffprobe = Join-Path $ffmpegRootPath 'bin\ffprobe.exe'
-if (-not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) { throw "Expected ffprobe.exe below $ffmpegRootPath\\bin." }
+$ffmpeg = Join-Path $ffmpegRootPath 'bin\ffmpeg.exe'
+if (-not (Test-Path -LiteralPath $ffprobe -PathType Leaf) -or -not (Test-Path -LiteralPath $ffmpeg -PathType Leaf)) { throw "Expected ffmpeg.exe and ffprobe.exe below $ffmpegRootPath\\bin." }
 $ffprobeVersion = & $ffprobe -hide_banner -version 2>&1
 if ($LASTEXITCODE -ne 0 -or $ffprobeVersion[0] -notmatch '^ffprobe version n?8\.1(?:[.\s-]|$)') { throw "Media fixtures require the pinned FFmpeg 8.1 bundle: $ffmpegRootPath" }
 $artifactPath = [IO.Path]::GetFullPath($ArtifactRoot, $repoRoot)
@@ -375,6 +418,14 @@ foreach ($fixture in $manifest.fixtures) {
                 if (-not $nonMonotonic) { throw "Reordered packet PTS were monotonic: $($fixture.id)" }
                 if (@($packets | Where-Object { $null -ne $_.dts -and [int64]$_.pts -ne [int64]$_.dts }).Count -eq 0) { throw "Reordered packet PTS never differed from DTS: $($fixture.id)" }
                 Assert-Equal (Get-Sha256Hex ($packetPtsUs -join ',')) $fixture.video.timing.packet_pts_sha256 "Reordered packet PTS fingerprint for $($fixture.id)"
+            }
+        }
+        if ($fixture.video.PSObject.Properties.Name -contains 'software_decode_frames') {
+            $decodeOutput = @(& $ffmpeg -hide_banner -loglevel error -nostdin -hwaccel none -i $path -map 0:v:0 -frames:v $fixture.video.software_decode_frames -f null - -progress pipe:1 -nostats 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw "Software decode acceptance failed: $($fixture.id)" }
+            $reportedFrames = @($decodeOutput | Where-Object { $_ -match '^frame=(\d+)$' } | ForEach-Object { [int]$Matches[1] })
+            if ($reportedFrames.Count -lt 1 -or $reportedFrames[-1] -ne [int]$fixture.video.software_decode_frames -or $decodeOutput[-1] -ne 'progress=end') {
+                throw "Software decode frame-count acceptance failed: $($fixture.id)"
             }
         }
     }

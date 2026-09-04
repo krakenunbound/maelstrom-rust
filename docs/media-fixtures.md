@@ -35,6 +35,11 @@ B-frames. Its manifest and probe contract pin dimensions, yuv420p pixels, I/P ke
 duration, hash, and size. This is a short generated corpus fixture, excluded from default long
 soaks; it makes no playback-quality, decode-performance, packaging, or hardware claim.
 
+`bars-8k-mpeg4-24.mp4` adds two 7680×4320/24 fps MPEG-4 frames with the same bounded GOP shape.
+Its contract pins source identity and accepts exactly two explicit `-hwaccel none` software-decoded
+frames to a null sink. This is source and bounded software-decode acceptance only—not playback,
+export, GPU, throughput, scanout, or long-soak evidence.
+
 The generated audio set now covers mono, stereo, and multichannel layouts. The 5.1 PCM WAV carries
 six distinct one-second tones in standard order (FL 220 Hz, FR 330 Hz, FC 440 Hz, LFE 55 Hz,
 BL 550 Hz, BR 660 Hz), so future decode, mixer, routing, and export checks can distinguish channels

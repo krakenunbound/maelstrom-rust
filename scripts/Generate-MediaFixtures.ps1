@@ -119,6 +119,14 @@ Invoke-FixtureFfmpeg @(
     '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-movflags', '+faststart'
 ) $fourKPath
 
+# Two frames keep 8K source coverage and software-decode acceptance bounded.
+$eightKPath = Join-Path $outputPath 'bars-8k-mpeg4-24.mp4'
+Invoke-FixtureFfmpeg @(
+    '-f', 'lavfi', '-i', 'testsrc2=size=7680x4320:rate=24', '-frames:v', '2', '-an',
+    '-c:v', 'mpeg4', '-q:v', '8', '-g', '2', '-bf', '0', '-pix_fmt', 'yuv420p',
+    '-fflags', '+bitexact', '-flags:v', '+bitexact', '-map_metadata', '-1', '-movflags', '+faststart'
+) $eightKPath
+
 # Select source frames at deliberately uneven millisecond timestamps.  The select
 # filter preserves the 1/1000-second input PTS and -fps_mode vfr prevents the
 # muxer from filling those gaps with CFR duplicates.
