@@ -307,6 +307,15 @@ Exit gate:
       0.2672/0.7453 ms press/edit-release p95, 0.4578/0.2900/0.2787 ms
       wide/detail/playhead p95, and 0.4839 ms combined p95. This renews the current headless
       foundation evidence only; GUI-present, packaged, cross-hardware and soak gates remain open.
+      The 2026-09-04 clean-HEAD renewal at
+      `57277e6e25198dbd4c92c213908f9cf9d1d63aa8` passed all ten history trials' unchanged
+      2 ms press/edit-release checks with 0.3103/0.7599 ms p95. Wide/detail/playhead CPU p95 was
+      0.5626/0.3383/0.3822 ms, and real private 1920x1088 H.264 plus 20,002 bars was 0.4358 ms p95
+      through the observed Software decoder. The schema-1 report omits the media path, records a
+      clean tracked tree, and has SHA-256
+      `AE41C32043A3CDA34EA3B944EC292D461B5ECABF4F1A86A3E7B408E7E8C0A608`.
+      This remains headless CPU/decode evidence rather than GUI, package, GPU, physical
+      input/scanout, or cross-hardware completion.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope

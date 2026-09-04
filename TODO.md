@@ -141,6 +141,13 @@ Last updated: 2026-09-04
   0.4885/0.3386/0.4274 ms; real H.264 plus 20,002 bars was 0.5108 ms p95. The ignored report hash is
   `36675C22C160CD4A0B90EBAB89DA33F859B50046B0CFCF204BF7FD161DE49399`; GUI, package, scanout and
   cross-hardware evidence remain outside this gate. See `docs/performance-reports.md`.
+- [x] Renew the clean-HEAD Phase 0 timeline-foundation evidence at `57277e6`. All ten 50,000-clip
+  history trials passed the unchanged 2 ms press/edit-release checks with 0.3103/0.7599 ms p95;
+  wide/detail/playhead CPU p95 was 0.5626/0.3383/0.3822 ms, and real 1920x1088 H.264 plus 20,002
+  bars was 0.4358 ms p95 through Software decoding. The report omits the private path and has
+  SHA-256 `AE41C32043A3CDA34EA3B944EC292D461B5ECABF4F1A86A3E7B408E7E8C0A608`.
+  This is headless CPU/decode evidence only; GUI, package, GPU, physical input/scanout, and
+  cross-hardware proof remain open. See `docs/performance-reports.md`.
 - [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
   EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
   part of monitor request, cache, sticky scaler and hardware-transfer identity without changing

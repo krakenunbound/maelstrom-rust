@@ -134,6 +134,16 @@ with 0.2565/1.2552 ms press/edit-release p95; wide/detail/playhead CPU p95 was
 The media path is omitted. The renewed report SHA-256 is
 `36675C22C160CD4A0B90EBAB89DA33F859B50046B0CFCF204BF7FD161DE49399`.
 
+The gate was renewed again on 2026-09-04 at clean commit
+`57277e6e25198dbd4c92c213908f9cf9d1d63aa8`. All ten 50,000-clip history trials
+passed the unchanged 2 ms press/edit-release checks; p95 was 0.3103/0.7599 ms.
+Wide/detail/playhead CPU p95 was 0.5626/0.3383/0.3822 ms, and the real private
+1920x1088 H.264 plus 20,002-bar interaction p95 was 0.4358 ms through the observed
+Software decoder. The report contains no media path, records a clean tracked tree, and has SHA-256
+`AE41C32043A3CDA34EA3B944EC292D461B5ECABF4F1A86A3E7B408E7E8C0A608`.
+This renews only headless release CPU/decode evidence; GUI-present input, GPU completion,
+physical input/scanout, package, and cross-hardware qualification remain open.
+
 ## Phase 0 cross-adapter compositor qualification
 
 The headless DX12 qualification exercises the production `ViewerCompositorRenderer` offscreen,
