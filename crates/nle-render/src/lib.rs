@@ -282,6 +282,14 @@ impl HubRenderer {
         self.timeline_textures.clear();
     }
 
+    /// Releases egui textures after every native viewport using the shared texture namespace has
+    /// finished painting the current application frame.
+    pub fn free_egui_textures(&mut self, texture_ids: &[egui::TextureId]) {
+        for texture_id in texture_ids {
+            self.renderer.free_texture(texture_id);
+        }
+    }
+
     pub fn render(
         &mut self,
         device: &wgpu::Device,

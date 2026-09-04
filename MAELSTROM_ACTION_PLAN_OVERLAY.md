@@ -78,7 +78,7 @@ A lot of this is already **better than the generic crates** for an NLE. Those cr
 | `ff-decode` / `ff-encode` / `ff-pipeline` | `ffmpeg-next` 8.1 + `nle-decode` / `nle-export` | **Do not switch FFmpeg families.** A second wrapper is two ABIs and two build stories. |
 | `undo` / `undoredo` | inverse history in `nle-timeline` | **Superseded.** A second stack will desync from clip IDs. |
 | `glyphon` + `cosmic-text` for titles | `nle-title` + Noto Sans JP | **Superseded for current titles.** One raster so preview and export match. glyphon is GPU UI text; export would drift. |
-| `egui_dock` as the app shell | hub + editor chrome + painter timeline | **Not needed to ship.** Optional later for inspector panes only. |
+| `egui_dock` as the app shell | hub + editor chrome + painter timeline | **Do not replace the app shell.** Evaluate only for intra-window tab docking; native detachable frames and shared editor ownership stay in `nle-app`. |
 
 `rfd`, `cpal`, `egui` 0.35, `wgpu` 29, `serde` are the floor. Keep them. They are not superseded.
 
@@ -92,7 +92,7 @@ Agents: if a prompt says “add avio,” reject it.
 | Color management (Phase 4) | `ocio-rs` 0.2 bundled/real, not stub | Rec.709 matrices would suffice first |
 | Pitch-preserve stretch (Phase 6) | Rubber Band or `timestretch` | varispeed is not done — do that first. Rubber Band is GPL. |
 | CLAP host (end of Phase 5) | `clack-host` / study `maolan-engine` | built-in EQ/comp/limiter is not done |
-| Utility docking | `egui_dock` 0.20.x **for egui 0.35** | timeline starts living in dock tabs |
+| Utility docking | Native `winit` windows first; optionally `egui_dock` 0.20.x **for egui 0.35** inside a frame | duplicated editor state or timeline ownership per window |
 | Overview disk cache (Phase 8) | `moka` or a tiny owned file cache | a third cache crate per feature |
 
 **Never take:** avio, ff-preview, ff-render, ff-pipeline, reelforge, gstreamer-rs, Tauri, iced, a second FFmpeg wrapper.

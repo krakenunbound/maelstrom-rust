@@ -5,7 +5,7 @@ architecture, performance, and exit-gate specification. `MAELSTROM_ACTION_PLAN_O
 supplemental sequencing and constraints. If this list conflicts with either document, follow the
 roadmap and correct this file.
 
-Last updated: 2026-09-01
+Last updated: 2026-09-04
 
 ## Current stopping point
 
@@ -526,6 +526,15 @@ Last updated: 2026-09-01
   [Vulkan capability contract](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html).
 - [ ] Keep the compact EN/JA interface, default panel sizing, border padding, nested menus, and
   draggable/scrubbable numeric controls consistent as features land.
+- [ ] Add real detachable/re-dockable native frames for Media Pool, Viewer, Timeline, the complete
+  right sidebar, and Undertow. Support cross-monitor movement, saved workspace placement,
+  close-to-reattach, safe recovery when a monitor disappears, and one shared editor/undo/render
+  authority. Keep the current organized panel sizing as the single-window default and prove that
+  detaching does not duplicate decode work or break interaction budgets.
+  - [x] Ship the first native Edit slice for Media Pool, Viewer, Timeline, and the complete right
+    sidebar, including four dock regions, tab groups, cross-window transition drops, local monitor
+    geometry, mixed-DPI resize handling, and close-to-reattach behavior.
+  - [ ] Extend the same native host contract to Undertow and saved named workspace presets.
 
 ## Release and repository
 

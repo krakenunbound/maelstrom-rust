@@ -10,7 +10,7 @@ use std::{
 
 use egui::{
     Align, Color32, FontId, Frame, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
-    Vec2,
+    Vec2, ViewportBuilder, ViewportClass, ViewportId,
 };
 #[cfg(test)]
 use nle_compositor::video_fade_opacity;
@@ -436,6 +436,12 @@ pub struct EditorViewSnapshot {
     /// Retains automatic fit ownership while unresolved placeholder clips remain.
     #[serde(default)]
     pub auto_fit_provisional_view: Option<bool>,
+    /// Panels detached into native egui viewports. Missing in legacy documents means none.
+    #[serde(default)]
+    pub detached_panels: Vec<EditorPanel>,
+    /// Durable dock destinations; missing entries use each panel's default slot.
+    #[serde(default)]
+    pub panel_docks: Vec<EditorPanelDock>,
 }
 
 /// Decode resolution used by the live viewer. This never changes export resolution.
@@ -989,6 +995,85 @@ pub enum EditorWorkspace {
     Edit,
     Undertow,
     KrakenUpscale,
+}
+
+/// A stable editor surface that can be detached into its own native viewport.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum EditorPanel {
+    MediaPool,
+    Viewer,
+    Timeline,
+    Tools,
+}
+
+/// Logical destination used when a panel is docked in the Edit workspace.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum EditorDockSlot {
+    Left,
+    #[default]
+    Center,
+    Right,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EditorPanelDock {
+    pub panel: EditorPanel,
+    pub slot: EditorDockSlot,
+}
+
+impl EditorPanel {
+    pub const ALL: [Self; 4] = [Self::MediaPool, Self::Viewer, Self::Timeline, Self::Tools];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::MediaPool => "media-pool",
+            Self::Viewer => "viewer",
+            Self::Timeline => "timeline",
+            Self::Tools => "tools",
+        }
+    }
+
+    pub const fn title(self, language: Language) -> &'static str {
+        match (language, self) {
+            (Language::English, Self::MediaPool) => "Media Pool",
+            (Language::Japanese, Self::MediaPool) => "メディアプール",
+            (Language::English, Self::Viewer) => "Viewer",
+            (Language::Japanese, Self::Viewer) => "ビューア",
+            (Language::English, Self::Timeline) => "Timeline",
+            (Language::Japanese, Self::Timeline) => "タイムライン",
+            (Language::English, Self::Tools) => "Tools",
+            (Language::Japanese, Self::Tools) => "ツール",
+        }
+    }
+
+    pub const fn default_size(self) -> Vec2 {
+        match self {
+            Self::MediaPool => Vec2::new(420.0, 720.0),
+            Self::Viewer => Vec2::new(960.0, 720.0),
+            Self::Timeline => Vec2::new(1280.0, 440.0),
+            Self::Tools => Vec2::new(300.0, 720.0),
+        }
+    }
+
+    pub fn viewport_id(self) -> ViewportId {
+        ViewportId::from_hash_of(("maelstrom-editor-panel", self.id()))
+    }
+
+    pub fn from_viewport_id(viewport_id: ViewportId) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|panel| panel.viewport_id() == viewport_id)
+    }
+
+    pub const fn default_dock_slot(self) -> EditorDockSlot {
+        match self {
+            Self::MediaPool => EditorDockSlot::Left,
+            Self::Viewer => EditorDockSlot::Center,
+            Self::Timeline => EditorDockSlot::Bottom,
+            Self::Tools => EditorDockSlot::Right,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1636,6 +1721,9 @@ pub struct EditorState {
     /// the lifetime of this editor session without leaking into timeline data.
     pub media_pool_width: f32,
     pub analysis_width: f32,
+    detached_panels: HashSet<EditorPanel>,
+    panel_docks: HashMap<EditorPanel, EditorDockSlot>,
+    active_dock_tabs: HashMap<EditorDockSlot, EditorPanel>,
     /// Active right-sidebar view is session-only UI state. It is intentionally excluded from
     /// snapshots and durable generations so inspecting media never dirties a project.
     right_sidebar_tab: RightSidebarTab,
@@ -1795,6 +1883,12 @@ impl EditorState {
             zoom_right: 0.92,
             media_pool_width: DEFAULT_MEDIA_POOL_WIDTH,
             analysis_width: DEFAULT_RIGHT_SIDEBAR_WIDTH,
+            detached_panels: HashSet::new(),
+            panel_docks: EditorPanel::ALL
+                .into_iter()
+                .map(|panel| (panel, panel.default_dock_slot()))
+                .collect(),
+            active_dock_tabs: HashMap::new(),
             right_sidebar_tab: RightSidebarTab::Inspector,
             timeline_context_clip: None,
             undertow_tools_width: 190.0,
@@ -1917,6 +2011,94 @@ impl EditorState {
         if workspace == EditorWorkspace::Undertow {
             self.ensure_undertow_track();
         }
+    }
+
+    pub fn is_panel_detached(&self, panel: EditorPanel) -> bool {
+        self.detached_panels.contains(&panel)
+    }
+
+    pub fn detached_panels(&self) -> impl Iterator<Item = EditorPanel> + '_ {
+        EditorPanel::ALL
+            .into_iter()
+            .filter(|panel| self.detached_panels.contains(panel))
+    }
+
+    pub fn toggle_panel_detached(&mut self, panel: EditorPanel) {
+        if !self.detached_panels.insert(panel) {
+            self.detached_panels.remove(&panel);
+            let slot = self.panel_dock(panel);
+            self.active_dock_tabs.insert(slot, panel);
+        }
+        self.mark_durable_edit();
+    }
+
+    pub fn dock_panel(&mut self, panel: EditorPanel) {
+        if self.detached_panels.remove(&panel) {
+            let slot = self.panel_dock(panel);
+            self.active_dock_tabs.insert(slot, panel);
+            self.mark_durable_edit();
+        }
+    }
+
+    pub fn panel_dock(&self, panel: EditorPanel) -> EditorDockSlot {
+        self.panel_docks
+            .get(&panel)
+            .copied()
+            .unwrap_or_else(|| panel.default_dock_slot())
+    }
+
+    pub fn has_custom_panel_docks(&self) -> bool {
+        EditorPanel::ALL
+            .into_iter()
+            .any(|panel| self.panel_dock(panel) != panel.default_dock_slot())
+    }
+
+    pub fn dock_panel_to(&mut self, panel: EditorPanel, slot: EditorDockSlot) {
+        let destination_changed = self.panel_dock(panel) != slot;
+        let was_detached = self.detached_panels.remove(&panel);
+        let changed = destination_changed || was_detached;
+        self.panel_docks.insert(panel, slot);
+        self.active_dock_tabs.insert(slot, panel);
+        if changed {
+            self.mark_durable_edit();
+        }
+    }
+
+    pub fn dock_all_panels(&mut self) {
+        if !self.detached_panels.is_empty() {
+            self.detached_panels.clear();
+            self.mark_durable_edit();
+        }
+    }
+
+    pub fn active_dock_tab(&self, slot: EditorDockSlot) -> Option<EditorPanel> {
+        self.active_dock_tabs.get(&slot).copied()
+    }
+
+    pub fn select_dock_tab(&mut self, slot: EditorDockSlot, panel: EditorPanel) {
+        if self.panel_dock(panel) == slot && !self.is_panel_detached(panel) {
+            self.active_dock_tabs.insert(slot, panel);
+        }
+    }
+
+    pub fn panel_is_visible_in_edit_dock(&self, panel: EditorPanel) -> bool {
+        if self.workspace != EditorWorkspace::Edit || self.is_panel_detached(panel) {
+            return false;
+        }
+        if !self.has_custom_panel_docks() && self.detached_panels.is_empty() {
+            return true;
+        }
+        let slot = self.panel_dock(panel);
+        let candidates = EditorPanel::ALL
+            .into_iter()
+            .filter(|candidate| {
+                !self.is_panel_detached(*candidate) && self.panel_dock(*candidate) == slot
+            })
+            .collect::<Vec<_>>();
+        self.active_dock_tab(slot)
+            .filter(|active| candidates.contains(active))
+            .or_else(|| candidates.first().copied())
+            == Some(panel)
     }
 
     pub fn set_kraken_upscale_capability(&mut self, ready: bool, reason: impl Into<String>) {
@@ -2400,6 +2582,17 @@ impl EditorState {
                     ids
                 }),
                 auto_fit_provisional_view: Some(self.auto_fit_provisional_view),
+                detached_panels: EditorPanel::ALL
+                    .into_iter()
+                    .filter(|panel| self.detached_panels.contains(panel))
+                    .collect(),
+                panel_docks: EditorPanel::ALL
+                    .into_iter()
+                    .map(|panel| EditorPanelDock {
+                        panel,
+                        slot: self.panel_dock(panel),
+                    })
+                    .collect(),
             },
         }
     }
@@ -2477,6 +2670,19 @@ impl EditorState {
             .saturating_add(1)
             .max(1);
         state.selected_media = snapshot.view.selected_media.filter(|id| ids.contains(id));
+        state.detached_panels = snapshot.view.detached_panels.into_iter().collect();
+        state.panel_docks = snapshot
+            .view
+            .panel_docks
+            .into_iter()
+            .map(|dock| (dock.panel, dock.slot))
+            .collect();
+        for panel in EditorPanel::ALL {
+            state
+                .panel_docks
+                .entry(panel)
+                .or_insert_with(|| panel.default_dock_slot());
+        }
         state.selected_timeline_clip = snapshot.view.selected_timeline_clip.filter(|id| {
             state
                 .timeline
@@ -4095,6 +4301,10 @@ impl EditorState {
             || self.timeline_scroll_y != 0.0
             || self.track_density != TimelineTrackDensity::Normal
             || track_heights_changed;
+        let panels_detached = !self.detached_panels.is_empty();
+        let panel_docks_changed = EditorPanel::ALL
+            .into_iter()
+            .any(|panel| self.panel_dock(panel) != panel.default_dock_slot());
         self.media_pool_width = DEFAULT_MEDIA_POOL_WIDTH;
         self.analysis_width = DEFAULT_RIGHT_SIDEBAR_WIDTH;
         self.undertow_tools_width = 190.0;
@@ -4104,10 +4314,16 @@ impl EditorState {
         self.timeline_scroll_y = 0.0;
         self.track_density = TimelineTrackDensity::Normal;
         self.track_heights.clear();
+        self.detached_panels.clear();
+        self.panel_docks = EditorPanel::ALL
+            .into_iter()
+            .map(|panel| (panel, panel.default_dock_slot()))
+            .collect();
+        self.active_dock_tabs.clear();
         for track in &self.timeline.tracks {
             self.track_heights.insert(track.id, 64.0);
         }
-        if changed {
+        if changed || panels_detached || panel_docks_changed {
             self.mark_durable_edit();
         }
     }
@@ -5004,6 +5220,20 @@ pub fn show_editor_with_canvases(
             ui.allocate_ui_with_layout(available_body, Layout::top_down(Align::LEFT), |ui| {
                 match state.workspace {
                     EditorWorkspace::Edit => {
+                        if state.has_custom_panel_docks()
+                            || EditorPanel::ALL
+                                .into_iter()
+                                .any(|panel| state.is_panel_detached(panel))
+                        {
+                            custom_edit_workspace(
+                                ui,
+                                state,
+                                available_body,
+                                timeline_canvas,
+                                viewer_canvas,
+                            );
+                            return;
+                        }
                         let max_timeline_height = (available_body.y - 190.0).max(180.0);
                         let timeline_height = if state.timeline_height_is_default {
                             responsive_default_timeline_height(available_body.y)
@@ -5042,6 +5272,9 @@ pub fn show_editor_with_canvases(
             });
             workspace_navigation(ui, state);
         });
+    if state.workspace == EditorWorkspace::Edit {
+        show_detached_panels(ui.ctx(), state, timeline_canvas, viewer_canvas);
+    }
     if state.show_licenses {
         egui::Window::new(t(
             state.language,
@@ -6158,6 +6391,48 @@ fn view_menu(ui: &mut Ui, state: &mut EditorState) {
             },
         );
         ui.separator();
+        ui.menu_button(menu_text(state.language, "Panels", "パネル"), |ui| {
+            for panel in EditorPanel::ALL {
+                let mut detached = state.is_panel_detached(panel);
+                if ui
+                    .checkbox(&mut detached, panel.title(state.language))
+                    .changed()
+                {
+                    state.toggle_panel_detached(panel);
+                }
+                ui.menu_button(
+                    menu_text(state.language, "Dock destination", "ドック先"),
+                    |ui| {
+                        for (slot, en, ja) in [
+                            (EditorDockSlot::Left, "Left", "左"),
+                            (EditorDockSlot::Center, "Center", "中央"),
+                            (EditorDockSlot::Right, "Right", "右"),
+                            (EditorDockSlot::Bottom, "Bottom", "下"),
+                        ] {
+                            if ui
+                                .selectable_label(
+                                    state.panel_dock(panel) == slot,
+                                    menu_text(state.language, en, ja),
+                                )
+                                .clicked()
+                            {
+                                state.dock_panel_to(panel, slot);
+                                ui.close();
+                            }
+                        }
+                    },
+                );
+            }
+            ui.separator();
+            if ui
+                .button(menu_text(state.language, "Dock all panels", "すべてドック"))
+                .clicked()
+            {
+                state.dock_all_panels();
+                ui.close();
+            }
+        });
+        ui.separator();
         if ui
             .button(menu_text(
                 state.language,
@@ -6381,6 +6656,181 @@ fn help_menu(ui: &mut Ui, state: &mut EditorState) {
     });
 }
 
+fn custom_edit_workspace(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    size: Vec2,
+    timeline_canvas: &mut dyn TimelineCanvas,
+    viewer_canvas: &mut dyn ViewerCanvas,
+) {
+    let attached = EditorPanel::ALL
+        .into_iter()
+        .filter(|panel| !state.is_panel_detached(*panel))
+        .collect::<Vec<_>>();
+    let bottom = attached
+        .iter()
+        .copied()
+        .filter(|panel| state.panel_dock(*panel) == EditorDockSlot::Bottom)
+        .collect::<Vec<_>>();
+    let top = [
+        EditorDockSlot::Left,
+        EditorDockSlot::Center,
+        EditorDockSlot::Right,
+    ];
+    let top_slots = top
+        .into_iter()
+        .filter(|slot| {
+            attached
+                .iter()
+                .any(|panel| state.panel_dock(*panel) == *slot)
+        })
+        .collect::<Vec<_>>();
+    let has_top = !top_slots.is_empty();
+    let has_bottom = !bottom.is_empty();
+    if !has_top && !has_bottom {
+        ui.centered_and_justified(|ui| {
+            ui.label(t(
+                state.language,
+                "All Edit panels are open in separate windows",
+                "すべての編集パネルは別ウィンドウで開いています",
+            ));
+        });
+        return;
+    }
+    let max_bottom_height = (size.y - 190.0).max(180.0);
+    let bottom_height = if has_top && has_bottom {
+        if state.timeline_height_is_default {
+            responsive_default_timeline_height(size.y)
+        } else {
+            state.timeline_height.clamp(180.0, max_bottom_height)
+        }
+    } else {
+        size.y
+    };
+    let top_height = if has_top && has_bottom {
+        (size.y - bottom_height - SPLITTER_THICKNESS).max(180.0)
+    } else if has_top {
+        size.y
+    } else {
+        0.0
+    };
+    state.rendered_panel_heights = Some((top_height, if has_bottom { bottom_height } else { 0.0 }));
+    let top_splitter_total = SPLITTER_THICKNESS * top_slots.len().saturating_sub(1) as f32;
+    let top_content_width = (size.x - top_splitter_total).max(1.0);
+    let top_weight = top_slots
+        .iter()
+        .map(|slot| match slot {
+            EditorDockSlot::Left => 1.0,
+            EditorDockSlot::Center => 3.0,
+            EditorDockSlot::Right => 1.1,
+            EditorDockSlot::Bottom => 0.0,
+        })
+        .sum::<f32>()
+        .max(1.0);
+    if has_top {
+        ui.allocate_ui_with_layout(
+            Vec2::new(size.x, top_height),
+            Layout::left_to_right(Align::TOP),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, slot) in top_slots.into_iter().enumerate() {
+                    if index > 0 {
+                        vertical_splitter(ui, top_height);
+                    }
+                    let panels = attached
+                        .iter()
+                        .copied()
+                        .filter(|panel| state.panel_dock(*panel) == slot)
+                        .collect::<Vec<_>>();
+                    let slot_weight = match slot {
+                        EditorDockSlot::Left => 1.0,
+                        EditorDockSlot::Center => 3.0,
+                        EditorDockSlot::Right => 1.1,
+                        EditorDockSlot::Bottom => 0.0,
+                    };
+                    dock_region(
+                        ui,
+                        state,
+                        slot,
+                        panels,
+                        Vec2::new(top_content_width * slot_weight / top_weight, top_height),
+                        timeline_canvas,
+                        viewer_canvas,
+                    );
+                }
+            },
+        );
+    }
+    if has_bottom {
+        if has_top {
+            let splitter = horizontal_splitter(ui, size.x);
+            if splitter.dragged() {
+                let delta = ui.input(|input| input.pointer.delta().y);
+                let height = (bottom_height - delta).clamp(180.0, max_bottom_height);
+                if state.timeline_height != height || state.timeline_height_is_default {
+                    state.timeline_height = height;
+                    state.timeline_height_is_default = false;
+                    state.mark_durable_edit();
+                }
+            }
+        }
+        dock_region(
+            ui,
+            state,
+            EditorDockSlot::Bottom,
+            bottom,
+            Vec2::new(size.x, bottom_height),
+            timeline_canvas,
+            viewer_canvas,
+        );
+    }
+}
+
+fn dock_region(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    slot: EditorDockSlot,
+    panels: Vec<EditorPanel>,
+    size: Vec2,
+    timeline_canvas: &mut dyn TimelineCanvas,
+    viewer_canvas: &mut dyn ViewerCanvas,
+) {
+    ui.allocate_ui_with_layout(size, Layout::top_down(Align::LEFT), |ui| {
+        panel_frame(ui);
+        if panels.len() > 1 {
+            ui.horizontal(|ui| {
+                for panel in &panels {
+                    if ui
+                        .selectable_label(
+                            state.active_dock_tab(slot) == Some(*panel),
+                            panel.title(state.language),
+                        )
+                        .clicked()
+                    {
+                        state.select_dock_tab(slot, *panel);
+                    }
+                }
+            });
+            ui.separator();
+        }
+        let selected = state
+            .active_dock_tab(slot)
+            .filter(|panel| panels.contains(panel))
+            .or_else(|| panels.first().copied());
+        if let Some(panel) = selected {
+            state.select_dock_tab(slot, panel);
+            match panel {
+                EditorPanel::MediaPool => media_pool(ui, state),
+                EditorPanel::Viewer => viewer_with_canvas(ui, state, viewer_canvas),
+                EditorPanel::Timeline => {
+                    timeline_with_canvas(ui, state, ui.available_height(), timeline_canvas)
+                }
+                EditorPanel::Tools => details(ui, state),
+            }
+        }
+    });
+}
+
 fn main_workspace(ui: &mut Ui, state: &mut EditorState, viewer_canvas: &mut dyn ViewerCanvas) {
     let width = ui.available_width();
     let height = ui.available_height();
@@ -6455,6 +6905,84 @@ fn main_workspace(ui: &mut Ui, state: &mut EditorState, viewer_canvas: &mut dyn 
             },
         );
     });
+}
+
+fn show_detached_panels(
+    ctx: &egui::Context,
+    state: &mut EditorState,
+    timeline_canvas: &mut dyn TimelineCanvas,
+    viewer_canvas: &mut dyn ViewerCanvas,
+) {
+    for panel in EditorPanel::ALL {
+        if !state.is_panel_detached(panel) {
+            continue;
+        }
+        let title = panel.title(state.language).to_owned();
+        let builder = ViewportBuilder::default()
+            .with_title(title.clone())
+            .with_inner_size(panel.default_size())
+            .with_min_inner_size(Vec2::new(220.0, 160.0))
+            .with_clamp_size_to_monitor_size(true);
+        let docked = ctx.show_viewport_immediate(
+            panel.viewport_id(),
+            builder,
+            |ui, _class: ViewportClass| {
+                let close_requested = ui.input(|input| input.viewport().close_requested());
+                let mut dock = false;
+                Frame::new()
+                    .fill(Color32::from_rgb(11, 14, 19))
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if panel == EditorPanel::Tools {
+                                ui.label(RichText::new(&title).strong());
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.menu_button(
+                                    t(state.language, "⇲  Dock", "⇲  ドック"),
+                                    |ui| {
+                                        for (slot, en, ja) in [
+                                            (EditorDockSlot::Left, "Left", "左"),
+                                            (EditorDockSlot::Center, "Center", "中央"),
+                                            (EditorDockSlot::Right, "Right", "右"),
+                                            (EditorDockSlot::Bottom, "Bottom", "下"),
+                                        ] {
+                                            if ui
+                                                .selectable_label(
+                                                    state.panel_dock(panel) == slot,
+                                                    menu_text(state.language, en, ja),
+                                                )
+                                                .clicked()
+                                            {
+                                                state.dock_panel_to(panel, slot);
+                                                dock = true;
+                                                ui.close();
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                        panel_frame(ui);
+                        match panel {
+                            EditorPanel::MediaPool => media_pool(ui, state),
+                            EditorPanel::Viewer => viewer_with_canvas(ui, state, viewer_canvas),
+                            EditorPanel::Timeline => timeline_with_canvas(
+                                ui,
+                                state,
+                                ui.available_height(),
+                                timeline_canvas,
+                            ),
+                            EditorPanel::Tools => details(ui, state),
+                        }
+                    });
+                close_requested || dock
+            },
+        );
+        if docked {
+            state.dock_panel(panel);
+        }
+    }
 }
 
 fn undertow_workspace(
@@ -9670,7 +10198,7 @@ fn transition_catalog_item(
     kind: VideoTransitionKind,
     english_description: &'static str,
     japanese_description: &'static str,
-) {
+) -> egui::Response {
     let label = video_transition_kind_label(state.language, kind);
     let response = ui
         .add(
@@ -9727,6 +10255,7 @@ fn transition_catalog_item(
             }
         });
     });
+    response
 }
 
 fn transition_details(ui: &mut Ui, state: &mut EditorState) {
@@ -16150,11 +16679,13 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingViewerCanvas {
+        begins: usize,
         events: Vec<ViewerEvent>,
     }
 
     impl ViewerCanvas for RecordingViewerCanvas {
         fn begin(&mut self, _: &mut Ui, _: Rect, _: PixelSize) {
+            self.begins += 1;
             self.events.clear();
         }
 
@@ -21880,6 +22411,142 @@ mod tests {
     }
 
     #[test]
+    fn transition_drag_crosses_detached_tools_and_timeline_contexts() {
+        let mut editor = EditorState::new(Language::English, "Cross-window transition drag");
+        editor.add_media_paths([PathBuf::from("left.mp4"), PathBuf::from("right.mp4")]);
+        editor.media[0].duration = Some(Tick(6_000_000));
+        editor.media[1].duration = Some(Tick(6_000_000));
+        let track = editor
+            .timeline
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        let left = editor
+            .timeline
+            .insert_clip(
+                track,
+                TimelineMediaId(1),
+                Tick(0),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+        let right = editor
+            .timeline
+            .insert_clip(
+                track,
+                TimelineMediaId(2),
+                Tick(2_000_000),
+                Tick(2_000_000),
+                Tick(1_000_000),
+            )
+            .unwrap();
+
+        let timeline_context = egui::Context::default();
+        let timeline_screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_200.0, 700.0));
+        let mut timeline_canvas = RecordingTimelineCanvas::default();
+        let _ = timeline_context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(timeline_screen),
+                ..Default::default()
+            },
+            |ui| timeline_with_canvas(ui, &mut editor, 660.0, &mut timeline_canvas),
+        );
+        let geometry = editor.timeline_drop_geometry.unwrap();
+        let row = editor
+            .timeline_track_rows
+            .iter()
+            .find(|row| row.track_id == track)
+            .unwrap();
+        let cut_x = geometry.content.left()
+            + (editor.timeline.clip(left).unwrap().end().0 - geometry.view_start.0) as f32
+                / geometry.visible_ticks.max(1.0)
+                * geometry.content.width();
+        let cut_point = Pos2::new(cut_x, row.rect.center().y);
+        assert_eq!(
+            editor.transition_drop_target_at(cut_point, VideoTransitionKind::CrossDissolve),
+            Some((track, left, right))
+        );
+
+        let tools_context = egui::Context::default();
+        let tools_screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 180.0));
+        let mut catalog_rect = Rect::NOTHING;
+        let _ = tools_context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(tools_screen),
+                ..Default::default()
+            },
+            |ui| {
+                catalog_rect = transition_catalog_item(
+                    ui,
+                    &mut editor,
+                    VideoTransitionKind::CrossDissolve,
+                    "Blend adjacent clips",
+                    "隣接クリップをブレンド",
+                )
+                .rect;
+            },
+        );
+        let source = catalog_rect.center();
+        let _ = tools_context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(tools_screen),
+                events: vec![
+                    egui::Event::PointerMoved(source),
+                    egui::Event::PointerButton {
+                        pos: source,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                transition_catalog_item(
+                    ui,
+                    &mut editor,
+                    VideoTransitionKind::CrossDissolve,
+                    "Blend adjacent clips",
+                    "隣接クリップをブレンド",
+                );
+            },
+        );
+        assert_eq!(
+            editor.active_transition_drag,
+            Some(VideoTransitionKind::CrossDissolve)
+        );
+
+        let _ = timeline_context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(timeline_screen),
+                events: vec![
+                    egui::Event::PointerMoved(cut_point),
+                    egui::Event::PointerButton {
+                        pos: cut_point,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| timeline_with_canvas(ui, &mut editor, 660.0, &mut timeline_canvas),
+        );
+
+        assert_eq!(editor.timeline.transitions().len(), 1);
+        assert_eq!(
+            editor.timeline.transitions()[0].kind,
+            VideoTransitionKind::CrossDissolve
+        );
+        assert!(editor.active_transition_drag.is_none());
+        assert!(editor.undo_timeline());
+        assert!(editor.timeline.transitions().is_empty());
+    }
+
+    #[test]
     fn transition_geometry_reveals_and_slides_the_incoming_quad() {
         let original = CompositeQuad {
             clip_id: ClipId(1),
@@ -24483,5 +25150,177 @@ mod tests {
         )
         .unwrap();
         assert!(restored.active_preview_diagnostic_for_layer(1).is_none());
+    }
+
+    #[test]
+    fn detached_panels_default_restore_and_round_trip() {
+        let editor = EditorState::new(Language::English, "Detached panels");
+        assert_eq!(editor.detached_panels().count(), 0);
+        let restored =
+            EditorState::restore(Language::Japanese, "Detached panels", editor.snapshot()).unwrap();
+        assert_eq!(restored.detached_panels().count(), 0);
+
+        let mut editor = EditorState::new(Language::English, "Detached panels");
+        editor.toggle_panel_detached(EditorPanel::Viewer);
+        let restored =
+            EditorState::restore(Language::English, "Detached panels", editor.snapshot()).unwrap();
+        assert!(restored.is_panel_detached(EditorPanel::Viewer));
+        assert!(!restored.is_panel_detached(EditorPanel::MediaPool));
+    }
+
+    #[test]
+    fn detached_panels_toggle_dock_reset_and_ids_are_stable() {
+        let mut editor = EditorState::new(Language::English, "Detached panels");
+        let generation = editor.durable_generation();
+        editor.toggle_panel_detached(EditorPanel::MediaPool);
+        assert!(editor.is_panel_detached(EditorPanel::MediaPool));
+        assert!(editor.durable_generation() > generation);
+        editor.dock_panel(EditorPanel::MediaPool);
+        assert!(!editor.is_panel_detached(EditorPanel::MediaPool));
+        editor.toggle_panel_detached(EditorPanel::Timeline);
+        editor.toggle_panel_detached(EditorPanel::Tools);
+        editor.reset_workspace_layout();
+        assert_eq!(editor.detached_panels().count(), 0);
+        assert_ne!(
+            EditorPanel::MediaPool.viewport_id(),
+            EditorPanel::Viewer.viewport_id()
+        );
+        assert_eq!(
+            EditorPanel::Timeline.title(Language::Japanese),
+            "タイムライン"
+        );
+        assert_eq!(EditorPanel::Tools.default_size(), Vec2::new(300.0, 720.0));
+    }
+
+    #[test]
+    fn panel_dock_destinations_round_trip_and_dock_detaches() {
+        let mut editor = EditorState::new(Language::English, "Dock destinations");
+        assert_eq!(
+            editor.panel_dock(EditorPanel::MediaPool),
+            EditorDockSlot::Left
+        );
+        editor.toggle_panel_detached(EditorPanel::MediaPool);
+        editor.dock_panel_to(EditorPanel::MediaPool, EditorDockSlot::Right);
+        assert!(!editor.is_panel_detached(EditorPanel::MediaPool));
+        assert_eq!(
+            editor.panel_dock(EditorPanel::MediaPool),
+            EditorDockSlot::Right
+        );
+        let restored =
+            EditorState::restore(Language::Japanese, "Dock destinations", editor.snapshot())
+                .unwrap();
+        assert_eq!(
+            restored.panel_dock(EditorPanel::MediaPool),
+            EditorDockSlot::Right
+        );
+        assert_eq!(
+            restored.panel_dock(EditorPanel::Timeline),
+            EditorDockSlot::Bottom
+        );
+    }
+
+    #[test]
+    fn occupied_dock_slot_selects_tabs_and_bottom_is_a_real_destination() {
+        let mut editor = EditorState::new(Language::English, "Dock regions");
+        editor.dock_panel_to(EditorPanel::Viewer, EditorDockSlot::Bottom);
+        editor.dock_panel_to(EditorPanel::Timeline, EditorDockSlot::Bottom);
+        assert_eq!(
+            editor.panel_dock(EditorPanel::Viewer),
+            EditorDockSlot::Bottom
+        );
+        assert_eq!(
+            editor.panel_dock(EditorPanel::Timeline),
+            EditorDockSlot::Bottom
+        );
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Bottom),
+            Some(EditorPanel::Timeline)
+        );
+        editor.select_dock_tab(EditorDockSlot::Bottom, EditorPanel::Viewer);
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Bottom),
+            Some(EditorPanel::Viewer)
+        );
+        editor.dock_panel_to(EditorPanel::MediaPool, EditorDockSlot::Bottom);
+        assert_eq!(
+            editor.active_dock_tab(EditorDockSlot::Bottom),
+            Some(EditorPanel::MediaPool)
+        );
+    }
+
+    #[test]
+    fn occupied_bottom_region_renders_only_its_selected_tab() {
+        let context = egui::Context::default();
+        let mut editor = EditorState::new(Language::English, "Bottom dock tabs");
+        editor.dock_panel_to(EditorPanel::Viewer, EditorDockSlot::Bottom);
+        editor.dock_panel_to(EditorPanel::Timeline, EditorDockSlot::Bottom);
+        let mut timeline = RecordingTimelineCanvas::default();
+        let mut viewer = RecordingViewerCanvas::default();
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_600.0, 1_000.0))),
+                ..Default::default()
+            },
+            |ui| show_editor_with_canvases(ui, &mut editor, &mut timeline, &mut viewer),
+        );
+        assert_eq!(timeline.begins, 1);
+        assert_eq!(viewer.begins, 0);
+
+        editor.select_dock_tab(EditorDockSlot::Bottom, EditorPanel::Viewer);
+        timeline.begins = 0;
+        viewer.begins = 0;
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_600.0, 1_000.0))),
+                ..Default::default()
+            },
+            |ui| show_editor_with_canvases(ui, &mut editor, &mut timeline, &mut viewer),
+        );
+        assert_eq!(timeline.begins, 0);
+        assert_eq!(viewer.begins, 1);
+    }
+
+    #[test]
+    fn detached_viewer_and_timeline_render_once_through_shared_canvases() {
+        let context = egui::Context::default();
+        let mut editor = EditorState::new(Language::English, "Detached render ownership");
+        editor.toggle_panel_detached(EditorPanel::Viewer);
+        editor.toggle_panel_detached(EditorPanel::Timeline);
+        let mut timeline = RecordingTimelineCanvas::default();
+        let mut viewer = RecordingViewerCanvas::default();
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_600.0, 1_000.0))),
+                ..Default::default()
+            },
+            |ui| show_editor_with_canvases(ui, &mut editor, &mut timeline, &mut viewer),
+        );
+
+        assert_eq!(timeline.begins, 1);
+        assert_eq!(viewer.begins, 1);
+    }
+
+    #[test]
+    fn undertow_does_not_render_detached_edit_panels() {
+        let context = egui::Context::default();
+        let mut editor = EditorState::new(Language::English, "Undertow render ownership");
+        editor.toggle_panel_detached(EditorPanel::Timeline);
+        editor.toggle_panel_detached(EditorPanel::Viewer);
+        editor.set_workspace(EditorWorkspace::Undertow);
+        let mut timeline = RecordingTimelineCanvas::default();
+        let mut viewer = RecordingViewerCanvas::default();
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_600.0, 1_000.0))),
+                ..Default::default()
+            },
+            |ui| show_editor_with_canvases(ui, &mut editor, &mut timeline, &mut viewer),
+        );
+
+        assert_eq!(timeline.begins, 1);
+        assert_eq!(viewer.begins, 0);
     }
 }

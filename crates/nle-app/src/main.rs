@@ -6,11 +6,13 @@ mod model_preload;
 mod phase1_ui;
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -31,8 +33,8 @@ use nle_render::{
 };
 use nle_ui_core::{
     ActivePreviewDecoderBackend, ActivePreviewDiagnostic, ActivePreviewFallbackReason,
-    ActivePreviewSourceKind, EditorAction, EditorProjectSnapshot, EditorState, HubAction,
-    HubBackdrops, Language, LivePipelineTiming, LivePipelineTimingRepresentative,
+    ActivePreviewSourceKind, EditorAction, EditorPanel, EditorProjectSnapshot, EditorState,
+    HubAction, HubBackdrops, Language, LivePipelineTiming, LivePipelineTimingRepresentative,
     LivePipelineTimingSample, LivePipelineTimingStage, MediaKind, MonitorFrame, PreviewQuality,
     PreviewSampling, ProjectFrameRate, ProjectHubState, ProxyMediaStatus, RuntimeDiagnostics,
     TimelineCanvas, ViewerCanvas, classify_path, configure_fonts, show_editor_with_canvases,
@@ -46,6 +48,189 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Icon, Window, WindowAttributes, WindowId, WindowLevel},
 };
+
+struct NativeViewport {
+    ids: egui::ViewportIdPair,
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    egui_state: egui_winit::State,
+    info: egui::ViewportInfo,
+    builder: egui::ViewportBuilder,
+    output: Option<egui::FullOutput>,
+    seen_generation: u64,
+}
+
+struct PendingNativeViewport {
+    ids: egui::ViewportIdPair,
+    builder: egui::ViewportBuilder,
+    textures_delta: egui::TexturesDelta,
+    seen_generation: u64,
+}
+
+struct NativeViewportHost {
+    by_viewport: HashMap<egui::ViewportId, NativeViewport>,
+    by_window: HashMap<WindowId, egui::ViewportId>,
+    pending: HashMap<egui::ViewportId, PendingNativeViewport>,
+    frame_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct DetachedPanelGeometry {
+    /// Desktop-space physical coordinates. Physical placement remains unambiguous across
+    /// monitors with different scale factors; size stays logical so controls retain their size.
+    position: Option<[f64; 2]>,
+    size: [f32; 2],
+    #[serde(default = "default_scale_factor")]
+    scale_factor: f32,
+    #[serde(default)]
+    monitor_name: Option<String>,
+}
+
+const fn default_scale_factor() -> f32 {
+    1.0
+}
+
+fn detached_geometry_path() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Maelstrom")
+        .join("detached-panels.json")
+}
+
+fn load_detached_geometry() -> HashMap<String, DetachedPanelGeometry> {
+    fs::read(detached_geometry_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+impl NativeViewportHost {
+    fn new() -> Self {
+        Self {
+            by_viewport: HashMap::new(),
+            by_window: HashMap::new(),
+            pending: HashMap::new(),
+            frame_generation: 0,
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        self.frame_generation = self.frame_generation.wrapping_add(1).max(1);
+    }
+
+    fn viewport_for_window(&self, id: WindowId) -> Option<egui::ViewportId> {
+        self.by_window.get(&id).copied()
+    }
+
+    fn finish_frame(&mut self) {
+        let generation = self.frame_generation;
+        self.pending
+            .retain(|_, pending| pending.seen_generation == generation);
+        let stale = self
+            .by_viewport
+            .iter()
+            .filter_map(|(id, viewport)| (viewport.seen_generation != generation).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            if let Some(viewport) = self.by_viewport.remove(&id) {
+                self.by_window.remove(&viewport.window.id());
+            }
+        }
+    }
+
+    fn append_texture_deltas(&self, textures: &mut egui::TexturesDelta) {
+        for viewport in self.by_viewport.values() {
+            if let Some(output) = viewport.output.as_ref() {
+                textures.append(output.textures_delta.clone());
+            }
+        }
+        for pending in self.pending.values() {
+            textures.append(pending.textures_delta.clone());
+        }
+    }
+}
+
+fn window_has_usable_monitor_intersection(
+    window_position: PhysicalPosition<i32>,
+    window_size: winit::dpi::PhysicalSize<u32>,
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: winit::dpi::PhysicalSize<u32>,
+) -> bool {
+    let left = i64::from(window_position.x).max(i64::from(monitor_position.x));
+    let top = i64::from(window_position.y).max(i64::from(monitor_position.y));
+    let right = (i64::from(window_position.x) + i64::from(window_size.width))
+        .min(i64::from(monitor_position.x) + i64::from(monitor_size.width));
+    let bottom = (i64::from(window_position.y) + i64::from(window_size.height))
+        .min(i64::from(monitor_position.y) + i64::from(monitor_size.height));
+    right.saturating_sub(left) >= 64 && bottom.saturating_sub(top) >= 64
+}
+
+#[cfg(test)]
+mod native_viewport_host_tests {
+    use super::*;
+
+    #[test]
+    fn pending_viewport_lives_only_while_declared_by_current_root_frame() {
+        let mut host = NativeViewportHost::new();
+        let id = egui::ViewportId::from_hash_of("detached-viewer-test");
+        host.begin_frame();
+        host.pending.insert(
+            id,
+            PendingNativeViewport {
+                ids: egui::ViewportIdPair::from_self_and_parent(id, egui::ViewportId::ROOT),
+                builder: egui::ViewportBuilder::default(),
+                textures_delta: egui::TexturesDelta::default(),
+                seen_generation: host.frame_generation,
+            },
+        );
+        host.finish_frame();
+        assert!(host.pending.contains_key(&id));
+
+        host.begin_frame();
+        host.finish_frame();
+        assert!(!host.pending.contains_key(&id));
+    }
+
+    #[test]
+    fn monitor_intersection_requires_a_recoverable_window_area() {
+        let monitor_position = PhysicalPosition::new(0, 0);
+        let monitor_size = winit::dpi::PhysicalSize::new(1_920, 1_080);
+        assert!(window_has_usable_monitor_intersection(
+            PhysicalPosition::new(1_000, 400),
+            winit::dpi::PhysicalSize::new(800, 600),
+            monitor_position,
+            monitor_size,
+        ));
+        assert!(!window_has_usable_monitor_intersection(
+            PhysicalPosition::new(1_900, 1_060),
+            winit::dpi::PhysicalSize::new(800, 600),
+            monitor_position,
+            monitor_size,
+        ));
+    }
+
+    #[test]
+    fn detached_geometry_round_trips_without_project_state() {
+        let mut geometry = HashMap::new();
+        geometry.insert(
+            "viewer".to_owned(),
+            DetachedPanelGeometry {
+                position: Some([1920.0, 40.0]),
+                size: [960.0, 720.0],
+                scale_factor: 1.5,
+                monitor_name: Some("Secondary".to_owned()),
+            },
+        );
+        let encoded = serde_json::to_vec(&geometry).unwrap();
+        let decoded: HashMap<String, DetachedPanelGeometry> =
+            serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded["viewer"].size, [960.0, 720.0]);
+        assert_eq!(decoded["viewer"].scale_factor, 1.5);
+        assert_eq!(decoded["viewer"].monitor_name.as_deref(), Some("Secondary"));
+    }
+}
 
 mod hardware;
 use hardware::{HardwareProfile, MachineProfile};
@@ -714,6 +899,34 @@ fn current_cursor_in_window(window: &Window) -> Option<egui::Pos2> {
 #[cfg(not(windows))]
 fn current_cursor_in_window(_window: &Window) -> Option<egui::Pos2> {
     None
+}
+
+#[cfg(windows)]
+fn cursor_is_over_window(window: &Window) -> bool {
+    use windows_sys::Win32::{
+        Foundation::POINT,
+        UI::WindowsAndMessaging::{GetCursorPos, WindowFromPoint},
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(window_handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
+        return false;
+    };
+    let mut cursor = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos writes to a valid POINT and WindowFromPoint only inspects desktop state.
+    unsafe { GetCursorPos(&mut cursor) != 0 && WindowFromPoint(cursor) == handle.hwnd.get() as _ }
+}
+
+#[cfg(not(windows))]
+fn cursor_is_over_window(window: &Window) -> bool {
+    current_cursor_in_window(window).is_some_and(|point| {
+        let size = window.inner_size().to_logical::<f32>(window.scale_factor());
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.width, size.height))
+            .contains(point)
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3936,6 +4149,8 @@ impl EffectGraphCompiler {
 }
 
 struct App {
+    gpu_instance: Option<Arc<wgpu::Instance>>,
+    gpu_adapter: Option<wgpu::Adapter>,
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     surface_config: Option<wgpu::SurfaceConfiguration>,
@@ -3964,8 +4179,11 @@ struct App {
     external_drop_batch_next: Option<nle_timeline::Tick>,
     media_drag_pointer: MediaDragPointer,
     editor_modifiers: ModifiersState,
+    editor_focus_loss_pending: bool,
     egui_state: Option<egui_winit::State>,
     egui_context: egui::Context,
+    native_viewports: Rc<RefCell<NativeViewportHost>>,
+    detached_geometry: HashMap<String, DetachedPanelGeometry>,
     pending_hub_backdrops: Option<[ThumbnailRgba; 2]>,
     hub_backdrop_textures: Option<[egui::TextureHandle; 2]>,
     project_thumbnail_textures: HashMap<u32, egui::TextureHandle>,
@@ -4222,6 +4440,436 @@ fn refresh_project_file_sizes(
 }
 
 impl App {
+    fn forward_primary_release_to_hovered_timeline_window(
+        &mut self,
+        source_window: WindowId,
+    ) -> bool {
+        let points_per_pixel = self.egui_context.pixels_per_point().max(f32::EPSILON);
+        // Detached windows are checked first because they may overlap the root window while being
+        // visually on top of it. Windows can retain mouse capture for a drag that began there.
+        {
+            let mut host = self.native_viewports.borrow_mut();
+            for (viewport_id, child) in &mut host.by_viewport {
+                if child.window.id() == source_window {
+                    continue;
+                }
+                if EditorPanel::from_viewport_id(*viewport_id) != Some(EditorPanel::Timeline) {
+                    continue;
+                }
+                if !cursor_is_over_window(&child.window) {
+                    continue;
+                }
+                let Some(point) = current_cursor_in_egui_points(&child.window, &self.egui_context)
+                else {
+                    continue;
+                };
+                let physical = child.window.inner_size();
+                let bounds = egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(
+                        physical.width as f32 / points_per_pixel,
+                        physical.height as f32 / points_per_pixel,
+                    ),
+                );
+                if bounds.contains(point) {
+                    let modifiers = child.egui_state.egui_input().modifiers;
+                    child.egui_state.egui_input_mut().events.extend([
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers,
+                        },
+                    ]);
+                    return true;
+                }
+            }
+        }
+
+        if self
+            .editor
+            .panel_is_visible_in_edit_dock(EditorPanel::Timeline)
+            && let Some(window) = self
+                .window
+                .as_ref()
+                .filter(|window| window.id() != source_window)
+            && cursor_is_over_window(window)
+            && let Some(point) = current_cursor_in_egui_points(window, &self.egui_context)
+        {
+            let physical = window.inner_size();
+            let bounds = egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(
+                    physical.width as f32 / points_per_pixel,
+                    physical.height as f32 / points_per_pixel,
+                ),
+            );
+            if bounds.contains(point)
+                && let Some(state) = self.egui_state.as_mut()
+            {
+                let modifiers = state.egui_input().modifiers;
+                state.egui_input_mut().events.extend([
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers,
+                    },
+                ]);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn record_native_viewport_placement(&mut self, viewport_id: egui::ViewportId) {
+        let Some(panel) = EditorPanel::from_viewport_id(viewport_id) else {
+            return;
+        };
+        let geometry = {
+            let host = self.native_viewports.borrow();
+            let Some(viewport) = host.by_viewport.get(&viewport_id) else {
+                return;
+            };
+            let scale = viewport.window.scale_factor();
+            let position = viewport
+                .window
+                .outer_position()
+                .ok()
+                .map(|position| [f64::from(position.x), f64::from(position.y)]);
+            let size = viewport.window.inner_size().to_logical::<f32>(scale);
+            let monitor_name = viewport
+                .window
+                .current_monitor()
+                .and_then(|monitor| monitor.name());
+            (
+                position,
+                [size.width, size.height],
+                scale as f32,
+                monitor_name,
+            )
+        };
+        self.detached_geometry.insert(
+            panel.id().to_owned(),
+            DetachedPanelGeometry {
+                position: geometry.0,
+                size: geometry.1,
+                scale_factor: geometry.2,
+                monitor_name: geometry.3,
+            },
+        );
+    }
+
+    fn persist_detached_geometry(&self) {
+        let path = detached_geometry_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&self.detached_geometry) {
+            let _ = atomic_write(&path, &bytes);
+        }
+    }
+
+    fn settle_editor_focus_loss(&mut self) {
+        if !self.editor_focus_loss_pending || self.screen != Screen::Editor {
+            return;
+        }
+        let root_focused = self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.has_focus());
+        let child_focused = self
+            .native_viewports
+            .borrow()
+            .by_viewport
+            .values()
+            .any(|viewport| viewport.window.has_focus());
+        if root_focused || child_focused {
+            self.editor_focus_loss_pending = false;
+            return;
+        }
+        self.editor_focus_loss_pending = false;
+        self.media_drag_pointer.reset();
+        self.editor_modifiers = ModifiersState::default();
+        self.editor.cancel_media_drag();
+        self.editor.cancel_transition_drag();
+        egui::DragAndDrop::clear_payload(&self.egui_context);
+    }
+
+    fn handle_native_editor_key(&mut self, key_event: &winit::event::KeyEvent) -> bool {
+        if self.screen != Screen::Editor
+            || !key_event.state.is_pressed()
+            || key_event.repeat
+            || self.egui_context.egui_wants_keyboard_input()
+        {
+            return false;
+        }
+        if matches!(key_event.logical_key, Key::Named(NamedKey::Space)) {
+            self.editor.toggle_playback();
+            self.sync_audio_transport();
+            self.sync_monitor_decode();
+            return true;
+        }
+        let Some(shortcut) = native_editor_shortcut(&key_event.logical_key, self.editor_modifiers)
+        else {
+            return false;
+        };
+        match shortcut {
+            NativeEditorShortcut::Undo => {
+                self.editor.undo_timeline();
+            }
+            NativeEditorShortcut::Redo => {
+                self.editor.redo_timeline();
+            }
+            NativeEditorShortcut::Razor => {
+                self.editor.razor_at_playhead();
+            }
+            NativeEditorShortcut::Delete => {
+                self.editor.delete_selected_timeline_clip();
+            }
+            NativeEditorShortcut::CommandPalette => {
+                self.editor.open_command_palette();
+            }
+        }
+        true
+    }
+
+    fn create_pending_viewports(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(root_config) = self.surface_config.clone() else {
+            return;
+        };
+        let Some(device) = self.device.as_ref() else {
+            return;
+        };
+        let Some(adapter) = self.gpu_adapter.as_ref() else {
+            return;
+        };
+        let Some(instance) = self.gpu_instance.as_ref() else {
+            return;
+        };
+        let pending = std::mem::take(&mut self.native_viewports.borrow_mut().pending);
+        let mut created_viewports = Vec::new();
+        for (id, mut pending) in pending {
+            if self.native_viewports.borrow().by_viewport.contains_key(&id) {
+                continue;
+            }
+            let saved_geometry = EditorPanel::from_viewport_id(id)
+                .and_then(|panel| self.detached_geometry.get(panel.id()))
+                .cloned();
+            if let Some(saved) = saved_geometry.as_ref() {
+                pending.builder = pending
+                    .builder
+                    .clone()
+                    .with_inner_size(egui::vec2(saved.size[0], saved.size[1]));
+            }
+            let Ok(window) =
+                egui_winit::create_window(&self.egui_context, event_loop, &pending.builder)
+            else {
+                tracing::warn!(?id, "could not create detached panel window");
+                continue;
+            };
+            let window = Arc::new(window);
+            if let Some(position) = saved_geometry.as_ref().and_then(|saved| saved.position) {
+                window.set_outer_position(PhysicalPosition::new(
+                    position[0].round() as i32,
+                    position[1].round() as i32,
+                ));
+            }
+            if let Ok(position) = window.outer_position() {
+                let size = window.outer_size();
+                let intersects_monitor = event_loop.available_monitors().any(|monitor| {
+                    window_has_usable_monitor_intersection(
+                        position,
+                        size,
+                        monitor.position(),
+                        monitor.size(),
+                    )
+                });
+                if !intersects_monitor
+                    && let Some(monitor) = saved_geometry
+                        .as_ref()
+                        .and_then(|saved| saved.monitor_name.as_deref())
+                        .and_then(|saved_name| {
+                            event_loop
+                                .available_monitors()
+                                .find(|monitor| monitor.name().as_deref() == Some(saved_name))
+                        })
+                        .or_else(|| event_loop.primary_monitor())
+                        .or_else(|| event_loop.available_monitors().next())
+                {
+                    let monitor_position = monitor.position();
+                    let monitor_size = monitor.size();
+                    window.set_outer_position(PhysicalPosition::new(
+                        monitor_position.x
+                            + (monitor_size.width as i32 - size.width as i32).max(0) / 2,
+                        monitor_position.y
+                            + (monitor_size.height as i32 - size.height as i32).max(0) / 2,
+                    ));
+                }
+            }
+            let Ok(surface) = instance.create_surface(window.clone()) else {
+                tracing::warn!(?id, "could not create detached panel surface");
+                continue;
+            };
+            let capabilities = surface.get_capabilities(adapter);
+            if !capabilities.formats.contains(&root_config.format) {
+                tracing::warn!(
+                    ?id,
+                    ?root_config.format,
+                    "detached panel surface does not support the shared renderer format"
+                );
+                continue;
+            }
+            let size = window.inner_size();
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: root_config.format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: if capabilities
+                    .present_modes
+                    .contains(&root_config.present_mode)
+                {
+                    root_config.present_mode
+                } else {
+                    capabilities.present_modes[0]
+                },
+                desired_maximum_frame_latency: 2,
+                alpha_mode: if capabilities.alpha_modes.contains(&root_config.alpha_mode) {
+                    root_config.alpha_mode
+                } else {
+                    capabilities.alpha_modes[0]
+                },
+                view_formats: vec![],
+            };
+            surface.configure(device, &config);
+            let state = egui_winit::State::new(
+                self.egui_context.clone(),
+                id,
+                window.as_ref(),
+                Some(window.scale_factor() as f32),
+                None,
+                None,
+            );
+            let window_id = window.id();
+            let mut info = egui::ViewportInfo {
+                parent: Some(pending.ids.parent),
+                ..Default::default()
+            };
+            egui_winit::update_viewport_info(&mut info, &self.egui_context, window.as_ref(), false);
+            let mut host = self.native_viewports.borrow_mut();
+            host.by_window.insert(window_id, id);
+            host.by_viewport.insert(
+                id,
+                NativeViewport {
+                    ids: pending.ids,
+                    window,
+                    surface,
+                    config,
+                    egui_state: state,
+                    info,
+                    builder: pending.builder,
+                    output: None,
+                    seen_generation: pending.seen_generation,
+                },
+            );
+            drop(host);
+            created_viewports.push(id);
+        }
+        for id in created_viewports.iter().copied() {
+            self.record_native_viewport_placement(id);
+        }
+        if !created_viewports.is_empty() {
+            self.persist_detached_geometry();
+        }
+        if !created_viewports.is_empty()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
+
+    fn render_pending_viewports(&mut self, free_texture_ids: &[egui::TextureId]) {
+        let Some(device) = self.device.clone() else {
+            return;
+        };
+        let Some(queue) = self.queue.clone() else {
+            return;
+        };
+        let mut host = self.native_viewports.borrow_mut();
+        let Some(renderer) = self.hub_renderer.as_mut() else {
+            return;
+        };
+        let empty_textures = egui::TexturesDelta::default();
+        for (viewport_id, child) in &mut host.by_viewport {
+            let Some(mut output) = child.output.take() else {
+                continue;
+            };
+            child
+                .egui_state
+                .handle_platform_output(&child.window, output.platform_output);
+            if let Some(viewport_output) = output.viewport_output.get_mut(viewport_id) {
+                let cancel_close = viewport_output
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::CancelClose));
+                if cancel_close {
+                    child
+                        .info
+                        .events
+                        .retain(|event| !matches!(event, egui::ViewportEvent::Close));
+                }
+                let mut requested_actions = Vec::new();
+                egui_winit::process_viewport_commands(
+                    &self.egui_context,
+                    &mut child.info,
+                    std::mem::take(&mut viewport_output.commands),
+                    &child.window,
+                    &mut requested_actions,
+                );
+            }
+            let frame = match child.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    child.surface.configure(&device, &child.config);
+                    child.window.request_redraw();
+                    continue;
+                }
+                wgpu::CurrentSurfaceTexture::Timeout
+                | wgpu::CurrentSurfaceTexture::Occluded
+                | wgpu::CurrentSurfaceTexture::Validation => continue,
+            };
+            let view = frame.texture.create_view(&Default::default());
+            let primitives = self
+                .egui_context
+                .tessellate(output.shapes, output.pixels_per_point);
+            renderer.render(
+                &device,
+                &queue,
+                &view,
+                &primitives,
+                &empty_textures,
+                egui_wgpu::ScreenDescriptor {
+                    size_in_pixels: [child.config.width, child.config.height],
+                    pixels_per_point: output.pixels_per_point,
+                },
+            );
+            frame.present();
+            if output
+                .viewport_output
+                .values()
+                .any(|viewport| viewport.repaint_delay.is_zero())
+                && let Some(window) = &self.window
+            {
+                window.request_redraw();
+            }
+        }
+        renderer.free_egui_textures(free_texture_ids);
+    }
+
     fn new(notify: impl Fn(AppEvent) + Send + Sync + 'static) -> Self {
         let demo_hub = std::env::var("MAELSTROM_DEMO_HUB").as_deref() == Ok("1");
         let notify = Arc::new(notify);
@@ -4356,6 +5004,8 @@ impl App {
         });
         Self {
             window: None,
+            gpu_instance: None,
+            gpu_adapter: None,
             surface: None,
             surface_config: None,
             device: None,
@@ -4385,8 +5035,11 @@ impl App {
             external_drop_batch_next: None,
             media_drag_pointer: MediaDragPointer::default(),
             editor_modifiers: ModifiersState::default(),
+            editor_focus_loss_pending: false,
             egui_state: None,
             egui_context: egui::Context::default(),
+            native_viewports: Rc::new(RefCell::new(NativeViewportHost::new())),
+            detached_geometry: load_detached_geometry(),
             pending_hub_backdrops: None,
             hub_backdrop_textures: None,
             project_thumbnail_textures: HashMap::new(),
@@ -4478,13 +5131,75 @@ impl App {
     }
 
     fn create_gpu(&mut self, window: Arc<Window>) {
+        let host = Rc::clone(&self.native_viewports);
+        self.egui_context.set_embed_viewports(false);
+        egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+            let id = viewport.ids.this;
+            let input = {
+                let mut host = host.borrow_mut();
+                let mut viewport_infos = host
+                    .by_viewport
+                    .iter()
+                    .map(|(viewport_id, child)| (*viewport_id, child.info.clone()))
+                    .collect::<egui::ViewportIdMap<_>>();
+                viewport_infos.entry(egui::ViewportId::ROOT).or_default();
+                if let Some(child) = host.by_viewport.get_mut(&id) {
+                    egui_winit::update_viewport_info(&mut child.info, ctx, &child.window, false);
+                    viewport_infos.insert(id, child.info.clone());
+                    let mut input = child.egui_state.take_egui_input(&child.window);
+                    input.viewports = viewport_infos;
+                    input
+                } else {
+                    let mut info = egui::ViewportInfo {
+                        parent: Some(viewport.ids.parent),
+                        ..Default::default()
+                    };
+                    if let Some(size) = viewport.builder.inner_size {
+                        info.inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+                    }
+                    viewport_infos.insert(id, info);
+                    egui::RawInput {
+                        viewport_id: id,
+                        viewports: viewport_infos,
+                        ..Default::default()
+                    }
+                }
+            };
+            let mut output = ctx.run_ui(input, |ui| (viewport.viewport_ui_cb)(ui));
+            let mut host = host.borrow_mut();
+            let generation = host.frame_generation;
+            if let Some(child) = host.by_viewport.get_mut(&id) {
+                let (mut builder_commands, recreate) = child.builder.patch(viewport.builder);
+                if recreate {
+                    tracing::warn!(?id, "detached panel requested a native-window recreation");
+                }
+                if let Some(viewport_output) = output.viewport_output.get_mut(&id) {
+                    builder_commands.append(&mut viewport_output.commands);
+                    viewport_output.commands = builder_commands;
+                }
+                child.ids = viewport.ids;
+                child.info.events.clear();
+                child.output = Some(output);
+                child.seen_generation = generation;
+            } else {
+                host.pending.insert(
+                    id,
+                    PendingNativeViewport {
+                        ids: viewport.ids,
+                        builder: viewport.builder,
+                        textures_delta: output.textures_delta,
+                        seen_generation: generation,
+                    },
+                );
+            }
+        });
         let phase0_adapter_class = phase0_surface_adapter_class_from_environment()
             .unwrap_or_else(|error| panic!("invalid Phase 0 surface adapter selection: {error}"));
         let mut instance_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         if phase0_adapter_class.is_some() {
             instance_descriptor.backends = wgpu::Backends::DX12;
         }
-        let instance = wgpu::Instance::new(instance_descriptor);
+        let instance = Arc::new(wgpu::Instance::new(instance_descriptor));
         let surface = instance
             .create_surface(window.clone())
             .expect("create splash surface");
@@ -4579,6 +5294,8 @@ impl App {
             },
         );
         self.window = Some(window);
+        self.gpu_instance = Some(instance);
+        self.gpu_adapter = Some(adapter);
         self.surface = Some(surface);
         self.surface_config = Some(config);
         self.device = Some(device);
@@ -4917,6 +5634,7 @@ impl App {
         let view = frame.texture.create_view(&Default::default());
         let mut hub_action = None;
         let mut editor_action = None;
+        let mut free_texture_ids = Vec::new();
         if self.screen == Screen::Splash {
             if let Some(splash) = self.renderer.as_ref() {
                 splash.render(
@@ -4933,6 +5651,19 @@ impl App {
             let window = self.window.as_ref().expect("window lives while rendering");
             let state = self.egui_state.as_mut().expect("application event state");
             let mut raw_input = state.take_egui_input(window);
+            {
+                let mut host = self.native_viewports.borrow_mut();
+                host.begin_frame();
+                for (viewport_id, child) in &mut host.by_viewport {
+                    egui_winit::update_viewport_info(
+                        &mut child.info,
+                        &self.egui_context,
+                        &child.window,
+                        false,
+                    );
+                    raw_input.viewports.insert(*viewport_id, child.info.clone());
+                }
+            }
             let measured_input = self
                 .phase1_ui_probe
                 .as_mut()
@@ -4966,7 +5697,7 @@ impl App {
                 texture_scratch: &mut self.timeline_texture_scratch,
             };
             let mut viewer_canvas = NativeViewerCanvas::new(viewer_compositor_callback);
-            let output = context.run_ui(raw_input, |ui| match screen {
+            let mut output = context.run_ui(raw_input, |ui| match screen {
                 Screen::ProjectHub => {
                     show_with_backdrops(ui, hub, hub_backdrops);
                     hub_action = hub.take_action();
@@ -4977,6 +5708,7 @@ impl App {
                 }
                 Screen::Splash => {}
             });
+            self.native_viewports.borrow_mut().finish_frame();
             if let Some(probe) = &mut self.phase1_ui_probe {
                 probe.after_ui(editor, measured_input);
             }
@@ -4988,6 +5720,11 @@ impl App {
             viewer_canvas.submit();
             state.handle_platform_output(window, output.platform_output);
             let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+            let mut textures_delta = std::mem::take(&mut output.textures_delta);
+            self.native_viewports
+                .borrow()
+                .append_texture_deltas(&mut textures_delta);
+            free_texture_ids = std::mem::take(&mut textures_delta.free);
             let measure_gpu_completion = self.screen == Screen::Editor
                 && (self.surface_submission_probe.is_some() || self.phase1_ui_probe.is_some());
             let viewer_sampling = viewer_sampling_quality(self.editor.preview_sampling());
@@ -5005,7 +5742,7 @@ impl App {
                     &queue,
                     &view,
                     &primitives,
-                    &output.textures_delta,
+                    &textures_delta,
                     screen_descriptor,
                 );
             } else {
@@ -5014,7 +5751,7 @@ impl App {
                     &queue,
                     &view,
                     &primitives,
-                    &output.textures_delta,
+                    &textures_delta,
                     screen_descriptor,
                 );
             }
@@ -5042,6 +5779,9 @@ impl App {
         );
         let present_call_started = Instant::now();
         frame.present();
+        if self.screen != Screen::Splash {
+            self.render_pending_viewports(&free_texture_ids);
+        }
         let present_call_duration = present_call_started.elapsed();
         self.surface_present_timings.record(present_call_duration);
         let presented_at = Instant::now();
@@ -8704,11 +9444,167 @@ impl ApplicationHandler<AppEvent> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.screen == Screen::Editor {
+            match &event {
+                WindowEvent::Focused(false) => self.editor_focus_loss_pending = true,
+                WindowEvent::Focused(true) => self.editor_focus_loss_pending = false,
+                _ => {}
+            }
+        }
+        let native_viewport_id = self
+            .native_viewports
+            .borrow()
+            .viewport_for_window(window_id);
+        let primary_released = self.screen == Screen::Editor
+            && matches!(
+                &event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                }
+            );
+        let source_has_timeline = native_viewport_id
+            .and_then(EditorPanel::from_viewport_id)
+            .map_or_else(
+                || {
+                    self.editor
+                        .panel_is_visible_in_edit_dock(EditorPanel::Timeline)
+                },
+                |panel| panel == EditorPanel::Timeline,
+            );
+        let forwarded_primary_release = primary_released
+            && !source_has_timeline
+            && self.forward_primary_release_to_hovered_timeline_window(window_id);
+        if primary_released && !source_has_timeline && !forwarded_primary_release {
+            self.media_drag_pointer.primary_released();
+            self.editor.cancel_media_drag();
+            self.editor.cancel_transition_drag();
+            egui::DragAndDrop::clear_payload(&self.egui_context);
+        }
+        if forwarded_primary_release && let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        if let Some(viewport_id) = native_viewport_id {
+            if let WindowEvent::ModifiersChanged(modifiers) = &event {
+                self.editor_modifiers = modifiers.state();
+            }
+            if let WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } = &event
+                && self.handle_native_editor_key(key_event)
+            {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+            match &event {
+                WindowEvent::CloseRequested => {
+                    self.record_native_viewport_placement(viewport_id);
+                    self.persist_detached_geometry();
+                    let mut host = self.native_viewports.borrow_mut();
+                    if let Some(child) = host.by_viewport.get_mut(&viewport_id) {
+                        child.info.events.push(egui::ViewportEvent::Close);
+                    }
+                    self.egui_context.request_repaint_of(viewport_id);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                WindowEvent::Moved(_) => {
+                    {
+                        let mut host = self.native_viewports.borrow_mut();
+                        if let Some(child) = host.by_viewport.get_mut(&viewport_id) {
+                            let _ = child.egui_state.on_window_event(&child.window, &event);
+                        }
+                    }
+                    self.record_native_viewport_placement(viewport_id);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                WindowEvent::Resized(size) => {
+                    if size.width > 0 && size.height > 0 {
+                        let mut host = self.native_viewports.borrow_mut();
+                        if let Some(child) = host.by_viewport.get_mut(&viewport_id) {
+                            child.config.width = size.width;
+                            child.config.height = size.height;
+                            if let Some(device) = &self.device {
+                                child.surface.configure(device, &child.config);
+                            }
+                            let _ = child.egui_state.on_window_event(&child.window, &event);
+                        }
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    self.record_native_viewport_placement(viewport_id);
+                }
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    let mut host = self.native_viewports.borrow_mut();
+                    if let Some(child) = host.by_viewport.get_mut(&viewport_id) {
+                        let _ = child.egui_state.on_window_event(&child.window, &event);
+                        let size = child.window.inner_size();
+                        if size.width > 0 && size.height > 0 {
+                            child.config.width = size.width;
+                            child.config.height = size.height;
+                            if let Some(device) = &self.device {
+                                child.surface.configure(device, &child.config);
+                            }
+                        }
+                    }
+                    drop(host);
+                    self.record_native_viewport_placement(viewport_id);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                WindowEvent::Focused(false) => {
+                    {
+                        let mut host = self.native_viewports.borrow_mut();
+                        if let Some(child) = host.by_viewport.get_mut(&viewport_id) {
+                            let _ = child.egui_state.on_window_event(&child.window, &event);
+                        }
+                    }
+                    self.record_native_viewport_placement(viewport_id);
+                    self.persist_detached_geometry();
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                _ => {
+                    let mut host = self.native_viewports.borrow_mut();
+                    if let Some(child) = host.by_viewport.get_mut(&viewport_id) {
+                        let response = child.egui_state.on_window_event(&child.window, &event);
+                        if response.repaint
+                            && let Some(window) = &self.window
+                        {
+                            window.request_redraw();
+                        }
+                    }
+                }
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
+                let viewport_ids = self
+                    .native_viewports
+                    .borrow()
+                    .by_viewport
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+                for viewport_id in viewport_ids {
+                    self.record_native_viewport_placement(viewport_id);
+                }
+                self.persist_detached_geometry();
                 self.flush_project_autosave();
                 event_loop.exit()
             }
@@ -8756,6 +9652,18 @@ impl ApplicationHandler<AppEvent> for App {
                 button: MouseButton::Left,
                 ..
             } if self.screen == Screen::Editor => {
+                if forwarded_primary_release {
+                    self.media_drag_pointer.primary_released();
+                    if let Some((state, window)) =
+                        self.egui_state.as_mut().zip(self.window.as_ref())
+                    {
+                        let response = state.on_window_event(window, &event);
+                        if response.repaint {
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 let cached_cursor = self.media_drag_pointer.primary_released();
                 let current_cursor = self
                     .window
@@ -8790,11 +9698,6 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             event @ WindowEvent::Focused(false) if self.screen == Screen::Editor => {
-                self.media_drag_pointer.reset();
-                self.editor_modifiers = ModifiersState::default();
-                self.editor.cancel_media_drag();
-                self.editor.cancel_transition_drag();
-                egui::DragAndDrop::clear_payload(&self.egui_context);
                 if let Some((state, window)) = self.egui_state.as_mut().zip(self.window.as_ref()) {
                     let response = state.on_window_event(window, &event);
                     if response.repaint {
@@ -8847,39 +9750,7 @@ impl ApplicationHandler<AppEvent> for App {
                 else {
                     unreachable!()
                 };
-                let mut handled = false;
-                if key_event.state.is_pressed()
-                    && !key_event.repeat
-                    && !self.egui_context.egui_wants_keyboard_input()
-                {
-                    if matches!(key_event.logical_key, Key::Named(NamedKey::Space)) {
-                        self.editor.toggle_playback();
-                        self.sync_audio_transport();
-                        self.sync_monitor_decode();
-                        handled = true;
-                    } else if let Some(shortcut) =
-                        native_editor_shortcut(&key_event.logical_key, self.editor_modifiers)
-                    {
-                        match shortcut {
-                            NativeEditorShortcut::Undo => {
-                                self.editor.undo_timeline();
-                            }
-                            NativeEditorShortcut::Redo => {
-                                self.editor.redo_timeline();
-                            }
-                            NativeEditorShortcut::Razor => {
-                                self.editor.razor_at_playhead();
-                            }
-                            NativeEditorShortcut::Delete => {
-                                self.editor.delete_selected_timeline_clip();
-                            }
-                            NativeEditorShortcut::CommandPalette => {
-                                self.editor.open_command_palette();
-                            }
-                        }
-                        handled = true;
-                    }
-                }
+                let handled = self.handle_native_editor_key(key_event);
                 if handled {
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -8992,6 +9863,8 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.create_pending_viewports(event_loop);
+        self.settle_editor_focus_loss();
         if self
             .phase1_ui_probe
             .as_ref()

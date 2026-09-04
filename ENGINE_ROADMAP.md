@@ -976,6 +976,12 @@ Improve information density without coupling it to live decode.
 - [ ] Add relink, replace, reveal-in-folder, consolidate/gather, and unused-media cleanup workflows.
 - [ ] Make Project Hub collections persistent and allow projects to be moved/copied between them.
 - [ ] Add workspace presets and persist every explicit panel choice without overriding defaults.
+- [ ] Add detachable, re-dockable native frames for every major editor section: Media Pool,
+      Viewer, Timeline, the Inspector/Audio/Color/Effects/Media sidebar, and Undertow. Detached
+      frames must move independently across monitors, share one authoritative editor state, and
+      restore their saved workspace placement without replacing the organized single-window
+      default. Closing a detached frame reattaches its section; monitor removal clamps it safely
+      onto an available display instead of losing the panel off-screen.
 - [ ] Complete English/Japanese coverage for all new commands, errors, tooltips, metadata, and
       accessibility labels.
 - [ ] Add keyboard remapping and searchable command discovery.
@@ -985,6 +991,9 @@ Exit gate:
 - [ ] Importing a large folder still queues no heavy analysis until media is used.
 - [ ] Overview data appears progressively and never blocks editing or first play.
 - [ ] Derived cache deletion causes only regeneration, never project loss or changed output.
+- [ ] Detach, cross-monitor move, close-to-reattach, save/reopen, and monitor-disconnect recovery do
+      not duplicate editor state, decoder work, undo history, or render ownership, and remain inside
+      the established UI-frame and timeline-input budgets.
 - [ ] Every new workflow has keyboard, tooltip, bilingual, persistence, and undo expectations
       documented and tested.
 
@@ -1119,6 +1128,8 @@ Maelstrom may claim a Blick-class engine experience only when all of the followi
 - [ ] Picture quality can degrade adaptively under load, but the playhead and timeline never wait.
 - [ ] Audio stays continuous and synchronized or reports a precise device/media failure.
 - [ ] Save/reopen, autosave recovery, undo/redo, and export preserve every supported feature.
+- [ ] A saved workspace can distribute major editor sections across multiple monitors and restores
+      safely to the default display when a monitor is missing.
 - [ ] Long-session, codec-diversity, hardware-fallback, memory-bound, and cancellation tests pass.
 - [ ] Hands-on testers describe zoom, pan, trim, move, scrub, and playback as immediate and
       predictable without knowing which backend was active.

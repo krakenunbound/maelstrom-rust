@@ -51,6 +51,13 @@ stale frame or black monitor, but interaction continues.
 Dependency direction is inward toward data. In particular, `nle-timeline` must remain independent
 of FFmpeg, `wgpu`, and `egui`.
 
+Detachable multi-monitor panels do not change that ownership. Every native viewport has its own
+window, surface, and input adapter, while all of them share the same `EditorState`, egui texture
+namespace, wgpu device/queue, and retained `HubRenderer`. Closing a child reattaches its panel;
+closing the root owns application shutdown. Dock membership is durable view state, while native
+window geometry is machine-local workspace preference data and never dirties the project. Missing
+monitor placement is recovered onto an available display. See `docs/detachable-workspaces.md`.
+
 ## Timeline and editing
 
 Tracks own contiguous clips sorted by start time. Clips hold numeric media IDs rather than paths or
