@@ -270,7 +270,9 @@ ordinary smoke run. Hardware-transfer timing is validated against the exact seri
 backend identities: Apple VideoToolbox, Windows D3D11VA, and Windows DXVA2 require transfer samples;
 Software, Intel Quick Sync, and NVIDIA CUVID may correctly report zero. Unknown or blank identities
 and malformed timing aggregates are rejected. This is validator-only contract coverage, not new
-runtime or hardware evidence. The preceding retained cross-adapter evidence is schema 7; schema 8 was never
+runtime or hardware evidence. `Test-Phase0SurfaceTimingReport.ps1` exercises the shared schema-9
+validator with supported and unsupported timestamp-query reports plus malformed stage cases; caller
+sample and threshold gates remain in the package and cross-adapter runners. The preceding retained cross-adapter evidence is schema 7; schema 8 was never
 requalified before schema 9 superseded it. A fresh explicitly authorized editor run is therefore
 required before the current surface contract can be qualified. A pass has `failure: null`. Once the
 report destination has been validated and the exclusive run lock acquired, the runner attempts to

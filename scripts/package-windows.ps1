@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-HardwareTransferTiming.ps1')
+. (Join-Path $PSScriptRoot 'Assert-Phase0SurfaceTimingReport.ps1')
 
 function Test-JsonIntegerValue {
     param($Value)
@@ -17,15 +18,6 @@ function Test-JsonIntegerValue {
         $Value -is [int16] -or $Value -is [uint16] -or
         $Value -is [int32] -or $Value -is [uint32] -or
         $Value -is [int64] -or $Value -is [uint64]
-}
-
-function Test-JsonFiniteNumber {
-    param($Value)
-    $numeric = (Test-JsonIntegerValue $Value) -or $Value -is [single] -or
-        $Value -is [double] -or $Value -is [decimal]
-    if (-not $numeric) { return $false }
-    $doubleValue = [double]$Value
-    return -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue)
 }
 
 function Find-OwnedPackagedEditorProcess {
@@ -434,19 +426,16 @@ try {
             throw "Surface submission probe omitted $property."
         }
     }
+    Assert-Phase0SurfaceTimingReport -Report $surfaceSubmission -Context 'Surface submission probe'
     if ($surfaceSubmission.samples -lt 120) {
         throw "Surface submission probe returned only $($surfaceSubmission.samples) samples."
-    }
-    if ($surfaceSubmission.schema_version -ne 9) {
-        throw "Surface submission probe returned unsupported schema $($surfaceSubmission.schema_version)."
     }
     $observationScope = $surfaceSubmission.observation_scope
     if ($null -eq $observationScope -or
         $observationScope.surface_submission_observed -ne $true -or
         $observationScope.surface_present_call_cpu_observed -ne $true -or
-        $observationScope.gpu_submission_completion_observed -ne $true -or
-        $observationScope.physical_scanout_observed -ne $false) {
-        throw 'Surface submission probe returned an invalid or overstated observation scope.'
+        $observationScope.gpu_submission_completion_observed -ne $true) {
+        throw 'Surface submission probe returned an invalid observation scope.'
     }
     foreach ($property in @(
         'monitor_requests', 'monitor_completed_frames', 'monitor_presented_frames',
@@ -495,150 +484,23 @@ try {
             $surfaceSubmission.display_refresh_millihertz -lt 1)) {
         throw 'Surface submission probe returned incomplete performance environment metadata.'
     }
-    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request', 'named_decoder_reopen')) {
-        $stage = $surfaceSubmission.decoder_stage_timings.$stageName
-        if ($null -eq $stage) { throw "Surface submission probe omitted decoder stage $stageName." }
-        foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {
-            if ($stage.PSObject.Properties.Name -notcontains $property) {
-                throw "Decoder timing stage $stageName omitted $property."
-            }
-            $value = [double]$stage.$property
-            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
-                throw "Decoder timing stage $stageName returned invalid ${property}: $value."
-            }
-        }
-        if ($stage.max_ms -lt $stage.mean_ms) {
-            throw "Decoder timing stage $stageName has max below mean."
-        }
-        if ($stage.samples -eq 0 -and ($stage.total_ms -ne 0 -or $stage.mean_ms -ne 0 -or $stage.max_ms -ne 0)) {
-            throw "Decoder timing stage $stageName reported durations without samples."
-        }
-        if ($stage.samples -gt 0) {
-            if ($stage.total_ms -lt $stage.max_ms) {
-                throw "Decoder timing stage $stageName has total below max."
-            }
-            $expectedMean = [double]$stage.total_ms / [double]$stage.samples
-            $meanTolerance = [Math]::Max(0.000001, [Math]::Abs($expectedMean) * 0.000000001)
-            if ([Math]::Abs([double]$stage.mean_ms - $expectedMean) -gt $meanTolerance) {
-                throw "Decoder timing stage $stageName has an inconsistent mean."
-            }
-        }
-    }
-    Assert-HardwareTransferTiming -Stage $surfaceSubmission.decoder_stage_timings.hardware_transfer `
-        -DecoderBackends @($surfaceSubmission.decoder_backends) `
-        -Context 'Decoder timing stage hardware_transfer'
+    # The shared validator owns schema-9 stage shape and aggregate invariants. This full-media
+    # smoke retains its own evidence requirement that each operational timing stage was exercised.
     foreach ($stageName in @('output_callback_cpu', 'mix_render_cpu')) {
-        $stage = $surfaceSubmission.audio_stage_timings.$stageName
-        if ($null -eq $stage) { throw "Surface submission probe omitted audio stage $stageName." }
-        foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {
-            if ($stage.PSObject.Properties.Name -notcontains $property) {
-                throw "Audio timing stage $stageName omitted $property."
-            }
-            if ($property -eq 'samples') {
-                if (-not (Test-JsonIntegerValue $stage.$property) -or $stage.$property -lt 0) {
-                    throw "Audio timing stage $stageName returned invalid unsigned integer ${property}: $($stage.$property)."
-                }
-            } elseif (-not (Test-JsonFiniteNumber $stage.$property)) {
-                throw "Audio timing stage $stageName returned invalid numeric ${property}: $($stage.$property)."
-            }
-            $value = [double]$stage.$property
-            if ($value -lt 0) {
-                throw "Audio timing stage $stageName returned invalid ${property}: $value."
-            }
-        }
-        if ($stage.max_ms -lt $stage.mean_ms) {
-            throw "Audio timing stage $stageName has max below mean."
-        }
-        if ($stage.samples -eq 0 -and ($stage.total_ms -ne 0 -or $stage.mean_ms -ne 0 -or $stage.max_ms -ne 0)) {
-            throw "Audio timing stage $stageName reported durations without samples."
-        }
-        if ($stage.samples -gt 0) {
-            if ($stage.total_ms -lt $stage.max_ms) {
-                throw "Audio timing stage $stageName has total below max."
-            }
-            $expectedMean = [double]$stage.total_ms / [double]$stage.samples
-            $meanTolerance = [Math]::Max(0.000001, [Math]::Abs($expectedMean) * 0.000000001)
-            if ([Math]::Abs([double]$stage.mean_ms - $expectedMean) -gt $meanTolerance) {
-                throw "Audio timing stage $stageName has an inconsistent mean."
-            }
-        }
-        if ($stage.samples -lt 1) {
+        if ($surfaceSubmission.audio_stage_timings.$stageName.samples -lt 1) {
             throw "Full media smoke did not exercise audio timing stage $stageName."
         }
     }
     foreach ($stageName in @('upload_cpu', 'compositor_encode_cpu')) {
-        $stage = $surfaceSubmission.viewer_stage_timings.$stageName
-        if ($null -eq $stage) { throw "Surface submission probe omitted viewer timing stage $stageName." }
-        foreach ($property in @('samples', 'p95_ms', 'max_ms')) {
-            if ($stage.PSObject.Properties.Name -notcontains $property) {
-                throw "Viewer timing stage $stageName omitted $property."
-            }
-            $value = [double]$stage.$property
-            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
-                throw "Viewer timing stage $stageName returned invalid ${property}: $value."
-            }
-        }
-        if ($stage.max_ms -lt $stage.p95_ms) {
-            throw "Viewer timing stage $stageName has max below p95."
-        }
-        if ($stage.samples -lt 1) {
+        if ($surfaceSubmission.viewer_stage_timings.$stageName.samples -lt 1) {
             throw "Full media smoke did not exercise viewer timing stage $stageName."
         }
     }
-    $gpuStages = $surfaceSubmission.gpu_stage_timings
-    foreach ($property in @('timestamp_query_supported', 'composite_pass_gpu', 'submission_to_completion_elapsed')) {
-        if ($gpuStages.PSObject.Properties.Name -notcontains $property) {
-            throw "Surface submission probe omitted GPU timing field $property."
-        }
+    if ($surfaceSubmission.gpu_stage_timings.timestamp_query_supported -and
+        $surfaceSubmission.gpu_stage_timings.composite_pass_gpu.samples -lt 1) {
+        throw 'Full media smoke did not observe an isolated compositor GPU pass.'
     }
-    if (-not ($gpuStages.timestamp_query_supported -is [bool])) {
-        throw 'GPU timestamp-query support must be a boolean.'
-    }
-    $gpuComposite = $gpuStages.composite_pass_gpu
-    if ($gpuStages.timestamp_query_supported) {
-        if ($null -eq $gpuComposite) {
-            throw 'Timestamp-query hardware omitted isolated compositor-pass timing.'
-        }
-        foreach ($property in @('samples', 'p95_ms', 'max_ms')) {
-            if ($gpuComposite.PSObject.Properties.Name -notcontains $property) {
-                throw "GPU compositor-pass timing omitted $property."
-            }
-            if ($property -eq 'samples') {
-                if (-not (Test-JsonIntegerValue $gpuComposite.$property) -or $gpuComposite.$property -lt 1) {
-                    throw "GPU compositor-pass timing returned invalid sample count $($gpuComposite.$property)."
-                }
-            } elseif (-not (Test-JsonFiniteNumber $gpuComposite.$property) -or $gpuComposite.$property -lt 0) {
-                throw "GPU compositor-pass timing returned invalid numeric ${property}: $($gpuComposite.$property)."
-            }
-        }
-        if ($gpuComposite.max_ms -lt $gpuComposite.p95_ms) {
-            throw 'GPU compositor-pass timing has max below p95.'
-        }
-    } elseif ($null -ne $gpuComposite) {
-        throw 'GPU compositor-pass timing must be null when timestamp queries are unsupported.'
-    }
-    $gpuCompletion = $gpuStages.submission_to_completion_elapsed
-    if ($null -eq $gpuCompletion) {
-        throw 'Surface submission probe omitted GPU submission-to-completion timing.'
-    }
-    foreach ($property in @('samples', 'p95_ms', 'max_ms')) {
-        if ($gpuCompletion.PSObject.Properties.Name -notcontains $property) {
-            throw "GPU submission-to-completion timing omitted $property."
-        }
-        if ($property -eq 'samples') {
-            if (-not (Test-JsonIntegerValue $gpuCompletion.$property) -or
-                $gpuCompletion.$property -lt 0) {
-                throw "GPU submission-to-completion timing returned invalid unsigned integer ${property}: $($gpuCompletion.$property)."
-            }
-        } elseif (-not (Test-JsonFiniteNumber $gpuCompletion.$property) -or
-            $gpuCompletion.$property -lt 0) {
-            throw "GPU submission-to-completion timing returned invalid numeric ${property}: $($gpuCompletion.$property)."
-        }
-    }
-    if ($gpuCompletion.max_ms -lt $gpuCompletion.p95_ms) {
-        throw 'GPU submission-to-completion timing has max below p95.'
-    }
-    if ($gpuCompletion.samples -lt 1) {
+    if ($surfaceSubmission.gpu_stage_timings.submission_to_completion_elapsed.samples -lt 1) {
         throw 'Full media smoke did not observe a completed GPU submission.'
     }
     foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {

@@ -104,6 +104,10 @@ Last updated: 2026-09-04
   cross-adapter validation now accepts zero samples only for observed CPU-readable serialized
   backends and rejects unknown identities or contradictory/malformed aggregates. The synthetic
   PowerShell contract adds no runtime or hardware evidence.
+- [x] Share the schema-9 surface-timing validator between package and cross-adapter runners.
+  Its headless contract covers supported/unsupported GPU timestamp-query reports, required timing
+  groups, aggregate math, and the explicit no-scanout boundary; runtime sample and threshold gates
+  remain caller-owned. This adds validator coverage only, not Phase 0 qualification evidence.
 - [x] Close the Phase 2 integrated Auto-preview gate without lowering the user's selected quality.
   A schema-1 headless app test uses two independent real 1920x1080 sources, observes Auto Full
   640x360, applies four disclosed controller-pressure samples through the production completion

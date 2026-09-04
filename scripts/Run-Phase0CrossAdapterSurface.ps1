@@ -13,6 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-HardwareTransferTiming.ps1')
+. (Join-Path $PSScriptRoot 'Assert-Phase0SurfaceTimingReport.ps1')
 
 function Restore-EnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name, $Value)
@@ -57,33 +58,6 @@ function Test-JsonUnsignedInteger($Value) {
         -not [double]::IsInfinity($number) -and
         $number -ge 0 -and
         $number -eq [double]$integer
-}
-
-function Assert-TimingStage {
-    param(
-        [Parameter(Mandatory = $true)]$Stage,
-        [Parameter(Mandatory = $true)][string]$Context,
-        [Parameter(Mandatory = $true)][string[]]$Properties,
-        [switch]$AllowZeroSamples
-    )
-    if ($null -eq $Stage) { throw "$Context is missing." }
-    foreach ($property in $Properties) {
-        if ($Stage.PSObject.Properties.Name -notcontains $property -or
-            -not (Test-FiniteNonnegativeNumber $Stage.$property)) {
-            throw "$Context has an invalid $property value."
-        }
-    }
-    if (-not (Test-JsonUnsignedInteger $Stage.samples)) {
-        throw "$Context has an invalid samples value."
-    }
-    if ([uint64]$Stage.samples -eq 0) {
-        if (-not $AllowZeroSamples) { throw "$Context was not exercised." }
-        foreach ($property in $Properties | Where-Object { $_ -ne 'samples' }) {
-            if ([double]$Stage.$property -ne 0) {
-                throw "$Context reported $property without samples."
-            }
-        }
-    }
 }
 
 function Stop-TrackedProcessTree {
@@ -378,13 +352,14 @@ try {
             $surface = Get-Content -LiteralPath $surfacePath -Raw | ConvertFrom-Json
             $latestSurface = $surface
             $media = Get-Content -LiteralPath $mediaReportPath -Raw | ConvertFrom-Json
+            Assert-Phase0SurfaceTimingReport -Report $surface -Context "$adapterClass surface report"
             if (-not (Test-FiniteNonnegativeNumber $startup.first_surface_present_ms) -or
                 [double]$startup.first_surface_present_ms -ge 1000.0) {
                 throw "$adapterClass first surface presentation regressed to $($startup.first_surface_present_ms) ms."
             }
             $reportedDecoderBackends = @($surface.decoder_backends | ForEach-Object { [string]$_ } |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            if ($surface.schema_version -ne 9 -or $surface.samples -lt 120 -or
+            if ($surface.samples -lt 120 -or
                 $surface.renderer_device_type -ne $adapterClass -or $surface.renderer_backend -ne 'Dx12' -or
                 [string]::IsNullOrWhiteSpace([string]$surface.renderer_gpu_name) -or
                 $reportedDecoderBackends.Count -lt 1 -or
@@ -393,12 +368,10 @@ try {
                 throw "$adapterClass surface report omitted required schema-9 renderer/media evidence."
             }
             $observationScope = $surface.observation_scope
-            if ($null -eq $observationScope -or
-                $observationScope.surface_submission_observed -ne $true -or
+            if ($observationScope.surface_submission_observed -ne $true -or
                 $observationScope.surface_present_call_cpu_observed -ne $true -or
-                $observationScope.gpu_submission_completion_observed -ne $true -or
-                $observationScope.physical_scanout_observed -ne $false) {
-                throw "$adapterClass surface report returned an invalid or overstated observation scope."
+                $observationScope.gpu_submission_completion_observed -ne $true) {
+                throw "$adapterClass surface report returned an invalid observation scope."
             }
             if (-not (Test-FiniteNonnegativeNumber $surface.cpu_p95_ms) -or $surface.cpu_p95_ms -gt 8.0 -or
                 -not (Test-FiniteNonnegativeNumber $surface.surface_submission_interval_p95_ms) -or
@@ -411,35 +384,27 @@ try {
             $currentAffectedCodecs = @('mpeg4')
             foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request')) {
                 $failureStage = "decoder.$stageName"
-                Assert-TimingStage -Stage $surface.decoder_stage_timings.$stageName -Context "$adapterClass decoder stage $stageName" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms')
+                if ($surface.decoder_stage_timings.$stageName.samples -lt 1) { throw "$adapterClass decoder stage $stageName was not exercised." }
             }
-            $failureStage = 'decoder.hardware_transfer'
-            Assert-HardwareTransferTiming -Stage $surface.decoder_stage_timings.hardware_transfer `
-                -DecoderBackends @($surface.decoder_backends) `
-                -Context "$adapterClass decoder stage hardware_transfer"
-            $failureStage = 'decoder.named_decoder_reopen'
-            Assert-TimingStage -Stage $surface.decoder_stage_timings.named_decoder_reopen -Context "$adapterClass decoder stage named_decoder_reopen" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms') -AllowZeroSamples
             $failureComponent = 'viewer'
             $currentAffectedCodecs = @('mpeg4')
             foreach ($stageName in @('upload_cpu', 'compositor_encode_cpu')) {
                 $failureStage = "viewer.$stageName"
-                Assert-TimingStage -Stage $surface.viewer_stage_timings.$stageName -Context "$adapterClass viewer stage $stageName" -Properties @('samples', 'p95_ms', 'max_ms')
+                if ($surface.viewer_stage_timings.$stageName.samples -lt 1) { throw "$adapterClass viewer stage $stageName was not exercised." }
             }
             $failureComponent = 'audio'
             $currentAffectedCodecs = @('aac')
             foreach ($stageName in @('output_callback_cpu', 'mix_render_cpu')) {
                 $failureStage = "audio.$stageName"
-                Assert-TimingStage -Stage $surface.audio_stage_timings.$stageName -Context "$adapterClass audio stage $stageName" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms')
+                if ($surface.audio_stage_timings.$stageName.samples -lt 1) { throw "$adapterClass audio stage $stageName was not exercised." }
             }
             $failureComponent = 'gpu'
             $failureStage = 'gpu.submission_to_completion'
             $currentAffectedCodecs = $null
-            Assert-TimingStage -Stage $surface.gpu_stage_timings.submission_to_completion_elapsed -Context "$adapterClass GPU submission completion" -Properties @('samples', 'p95_ms', 'max_ms')
+            if ($surface.gpu_stage_timings.submission_to_completion_elapsed.samples -lt 1) { throw "$adapterClass GPU submission completion was not observed." }
             if ($surface.gpu_stage_timings.timestamp_query_supported) {
                 $failureStage = 'gpu.composite_pass'
-                Assert-TimingStage -Stage $surface.gpu_stage_timings.composite_pass_gpu -Context "$adapterClass compositor GPU pass" -Properties @('samples', 'p95_ms', 'max_ms')
-            } elseif ($null -ne $surface.gpu_stage_timings.composite_pass_gpu) {
-                throw "$adapterClass serialized compositor GPU timing despite unavailable timestamp queries."
+                if ($surface.gpu_stage_timings.composite_pass_gpu.samples -lt 1) { throw "$adapterClass compositor GPU pass was not observed." }
             }
             $failureComponent = 'runtime'
             $failureStage = 'runtime_diagnostics'

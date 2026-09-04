@@ -238,7 +238,8 @@ Build the evidence harness before adding engine complexity.
 Exit gate:
 
 - [ ] Produce and qualify the full schema-9 surface report on integrated and discrete Windows
-      hardware without overstating scanout. The contract and validators are implemented.
+      hardware without overstating scanout. Shared validator contracts are implemented and tested;
+      this does not qualify runtime hardware evidence.
       The retained 2026-08-30 hybrid-host qualification selected Intel UHD 770 `IntegratedGpu` and
       NVIDIA RTX 3090 `DiscreteGpu` explicitly, rejected adapter-class fallback, and passed all
       schema, CPU, cadence, media, audio, GPU, runtime-counter, and cancelled-export checks. It does
