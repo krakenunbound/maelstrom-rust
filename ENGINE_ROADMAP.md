@@ -1005,6 +1005,55 @@ Exit gate:
 - [ ] Muting/soloing/routing changes already queued audio on the next safe audio block without
       decoder restart.
 
+### Phase 5B — Transcription, captions, and text-based editing
+
+Add an offline-first, dockable Text workspace without coupling model inference to playback or
+making model weights part of the public source. See `docs/transcription-and-text-editing.md`.
+
+- [ ] Define a versioned, bounded `TranscriptionBackend` sidecar protocol, sidecar-owned metadata
+      registry for large ASR assets, and derived transcript schema with media fingerprint,
+      engine/model/runtime provenance, language, word/segment timing, confidence, optional speaker
+      IDs, cancellation, and generation rejection. Do not route multi-gigabyte ASR weights through
+      the existing eager in-process model preloader.
+- [ ] Establish English/Japanese fixtures and recorded WER/CER, timestamp-error, diarization,
+      memory, throughput, and playback-interference gates before selecting a release default.
+- [ ] Integrate the proven local `large-v3-turbo`/faster-whisper/Silero path as the first baseline;
+      evaluate Qwen3-ASR plus its Japanese-capable forced aligner against the same corpus. Keep
+      WhisperX alignment/diarization and language-limited accelerated engines optional.
+- [ ] Keep every model/runtime separately installed, explicitly consented, license- and
+      checksum-documented, ignored by public Git unless redistribution is proven, and nonessential
+      to normal checkout/build/test/package/editor operation. Only the explicit setup workflow may
+      access the network; normal inference must resolve local paths in enforced offline mode and
+      must never trigger a library's implicit model download.
+- [ ] Add selected-clip and active-sequence transcription with language/engine/channel controls,
+      progressive results, cancel/retry, CPU/GPU capability reasons, cache reuse, and affected-span
+      invalidation after timeline or source changes.
+- [ ] Add a compact Transcript/Captions/Graphics workspace that detaches and re-docks like every
+      other major section, virtualizes long transcripts, and supports search, speaker/confidence
+      filters, follow-active-monitor, jump-to-word, correction, speaker rename, and undo.
+- [ ] Add editable caption tracks generated from approved transcript ranges, starting with SRT and
+      WebVTT import/export plus matching safe-area preview, burn-in, sidecar export timing, reading
+      speed/duration/line constraints, and language-aware Japanese/CJK segmentation.
+- [ ] Add text-based range selection and a review-first filler/repetition/pause workflow. Approved
+      removals become one validated, undoable ripple transaction with linked-A/V preservation and
+      short adjustable audio crossfades; never auto-remove low-confidence or contextual language.
+- [ ] Preserve user corrections and reviewed suggestions across regeneration while keeping raw
+      analysis deletable derived data and retaining reproducible engine/model metadata.
+
+Exit gate:
+
+- [ ] English and Japanese accuracy/timing meet recorded thresholds across clean dialogue, noise,
+      music-under-speech, multiple speakers, long recordings, and variable-rate sources.
+- [ ] Generation, alignment, and diarization never run on UI/playback/audio/render critical paths,
+      never lower preview quality, and remain inside established interaction/underrun budgets.
+- [ ] Missing weights, declined terms, unsupported language/device, CPU fallback, cancellation,
+      project switch, relink, device loss, and stale completion are explicit and project-safe.
+- [ ] With the network unavailable and model root empty, editor, tests, and inference make no
+      outbound attempt or implicit download; checksum-pinned acquisition exists only in setup.
+- [ ] Transcript edits, filler removal, captions, undo/redo, save/reopen, and preview/export preserve
+      exact timeline timing, links, locks, transitions, sync, and caption output.
+- [ ] Public builds and packages remain fully functional with an empty model registry.
+
 ### Phase 6 — Sequences, nested timelines, and time remapping
 
 Extend the data model without putting recursive work on the timeline draw path.

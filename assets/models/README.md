@@ -15,6 +15,13 @@ registry and copies it beside `Maelstrom.exe`.
 No inference engine currently consumes a model ID. The checked-in empty registry is therefore the
 only accurate default; preloading is infrastructure for a future, explicitly licensed integration.
 
+This v1 registry eagerly reads every listed artifact into editor memory and is therefore not the
+registry for multi-gigabyte speech-recognition weights. The planned transcription sidecar uses a
+separate metadata-only, no-preload ASR asset registry and setup-only acquisition boundary; see
+`../../docs/transcription-and-text-editing.md`. Do not add Whisper, Qwen, Parakeet, diarization, or
+alignment weights here unless this registry is first versioned to support externally managed
+artifacts without changing current small-model behavior.
+
 ## Manifest version 1
 
 ```json

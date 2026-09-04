@@ -612,6 +612,23 @@ Last updated: 2026-09-04
   scopes.
 - [ ] Continue the professional audio engine: buses, routing, automation, meters, callback-safe DSP,
   channel layouts, shuttle audio, and loudness analysis.
+- [ ] Add the Phase 5B offline transcription, captions, and text-based editing workstream described
+  in `docs/transcription-and-text-editing.md`.
+  - Start with a versioned bounded sidecar/schema, a sidecar-owned metadata registry for large ASR
+    assets, an empty-model fake backend, and English/Japanese accuracy/timing fixtures so public
+    checkout/build/test stays model-free and fully functional. Do not use the eager in-process
+    preloader for multi-gigabyte speech weights.
+  - Use the locally proven `large-v3-turbo`/faster-whisper/Silero stack as the baseline, then
+    benchmark Qwen3-ASR plus its Japanese-capable aligner on identical PCM before selecting the
+    default. Keep WhisperX, diarization, and language-limited fast engines optional and disclosed.
+  - Add a detachable Text workspace with Transcript/Captions/Graphics, search, speaker/confidence
+    filters, follow/jump, corrections, caption-track generation, and SRT/WebVTT interchange.
+  - Make filler/repetition/pause removal a reviewed, non-destructive, single-undo ripple edit with
+    linked-A/V validation and short adjustable audio crossfades; reject locked, transition-occupied,
+    or handle-starved candidates explicitly and never silently delete words.
+  - Gate release on EN WER, JA CER, timestamp/diarization accuracy, long-form drift, cancellation,
+    stale-result rejection, derived-cache invalidation, caption readability/CJK segmentation,
+    enforced offline inference with no implicit downloads, and zero playback-quality or UI regression.
 - [ ] Add multiple sequences, nesting, speed/remap, relink/consolidate, and project interchange in
   roadmap order.
 - [ ] Evaluate optional GPU Optical Flow interpolation (`fruc_vulkan`) for slow motion and
