@@ -113,6 +113,11 @@ Build the evidence harness before adding engine complexity.
       playback, or performance claim follows.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.
+- [x] Keep the ordinary release workspace gate deterministic on Windows. The coordinated-decoder
+      diagnostic test now waits for its asynchronous source reaper and sticky FFmpeg session to
+      reach zero before deleting the temporary media fixture. Twenty focused repetitions and the
+      full serial release workspace passed on 2026-09-04: 900 tests passed, 36 opt-in tests were
+      ignored, strict all-target Clippy and formatting were clean, and no editor was launched.
 - [ ] Add ten-minute playback soak, repeated reverse scrub, rapid project switching, media-offline,
       memory-pressure, and export-cancellation scenarios.
       A finite prerequisite matrix covers the listed behavioral scenarios and includes a bounded

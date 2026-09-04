@@ -148,6 +148,11 @@ Last updated: 2026-09-04
   SHA-256 `AE41C32043A3CDA34EA3B944EC292D461B5ECABF4F1A86A3E7B408E7E8C0A608`.
   This is headless CPU/decode evidence only; GUI, package, GPU, physical input/scanout, and
   cross-hardware proof remain open. See `docs/performance-reports.md`.
+- [x] Remove the remaining Windows fixture-deletion race from the coordinated-decoder diagnostic
+  test. Teardown now waits for the asynchronous source reaper, live source ownership, and sticky
+  FFmpeg session count to reach zero before deleting the temporary file. Twenty focused release
+  repetitions passed, followed by the full serial release workspace (900 passed, 36 opt-in
+  ignored), strict all-target Clippy, and formatting. No editor was launched.
 - [x] Add independent Nearest/Bilinear/Bicubic preview sampling with a Bicubic default and nested
   EN/JA Playback menu. The persisted preference migrates the former high-quality boolean and is
   part of monitor request, cache, sticky scaler and hardware-transfer identity without changing
