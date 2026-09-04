@@ -183,6 +183,14 @@ Last updated: 2026-09-04
   unique; start/end commits match; no tracked changes or invocation/report-read failures occurred.
   This renews headless Software decode/`h264_mf` evidence only; live audio, GUI, packaged playback,
   physical scanout, and cross-hardware gates remain open. See `docs/phase0-scenarios.md`.
+- [x] Renew the full 600-second Phase 0 seven-scenario soak after adding true in-flight project
+  switching. At clean commit `2b89378`, 41 complete matrices passed over 602.640 measured seconds:
+  287 scenario executions and 1,681 declared work iterations with 41 unique child-report hashes,
+  stable clean source provenance, and no invocation/report-read failures. Every switch run proved
+  eight real in-flight cancellation suppressions, eight stale prior-generation rejections, eight
+  fresh presentations, and zero final ownership/errors. This is headless Software/`h264_mf`
+  evidence only; GUI, live audio, packaged playback, renderer GPU, scanout, and cross-hardware
+  gates remain open. See `docs/phase0-scenarios.md`.
 - [x] Prefer completed monitor sessions during demand-driven capacity reclamation. Source groups
   remain whole and priority-protected; within equal visual priority the least-recently-requested
   completed group is reclaimed before the established active-work fallback. A real two-permit,

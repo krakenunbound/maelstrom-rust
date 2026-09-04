@@ -132,7 +132,7 @@ separate nullable role fields. The report recorded `authoritative: true` with
 SHA-256 `bef925939b118aaf7d9c1339cbd6e0cfca1c084b0e7b57a46d24971f0ba1e5d6`.
 Integrated/discrete cross-hardware proof remains open.
 
-The current 2026-09-01 requalification embeds identical clean start/end source commit
+The 2026-09-01 requalification embeds identical clean start/end source commit
 `b668543b15d0eb2e2bb53d1540fe9dae206dbd2b`. It passed for 617.912 measured matrix seconds,
 excluding 1.210 seconds of setup, with 32 complete matrix runs, 224 scenario executions, and
 1,312 declared work iterations. All seven scenarios passed all 32 runs, every child report had a
@@ -143,3 +143,16 @@ owned, and zero final session/source/actor ownership.
 It observed only the headless Software decoder and `h264_mf` encoder in their explicit role fields;
 the listed Intel/NVIDIA adapters were machine inventory, not exercised rendering. Live audio,
 GUI-present, packaged playback, physical scanout, and cross-hardware soak evidence remain open.
+
+The 2026-09-04 requalification embeds identical clean start/end source commit
+`2b89378d53181689bd76930e67994de61fbc7f02`. It passed for 602.640 measured matrix seconds,
+excluding 1.377 seconds of setup, with 41 complete matrix runs, 287 scenario executions, and
+1,681 declared work iterations. All seven scenarios passed all 41 runs, all 41 child-report hashes
+were unique, and no invocation or report-read failure occurred. Every rapid-switch run recorded
+exactly eight in-flight cancellation suppressions, eight stale prior-generation rejections, eight
+fresh post-switch presentations, eight monitor-generation advances, eight media-analysis epoch
+advances, zero monitor errors, and zero final session/source/actor ownership. The authoritative
+schema-2 report SHA-256 is
+`285E2523B8CF07F37256EFC13481DA5B5A4C31C708ECF246A03DFF57B701B895`.
+It renews headless Software decoder and `h264_mf` encoder evidence only; GUI, live audio,
+packaged playback, renderer GPU, physical scanout, and cross-hardware qualification remain open.
