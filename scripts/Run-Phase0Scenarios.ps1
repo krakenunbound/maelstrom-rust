@@ -158,12 +158,12 @@ try {
     }
     $rapidEvidence = [string]$rapidSwitching[0].evidence
     # Keep this anchored and ordered so duplicate, contradictory, or unknown evidence is rejected.
-    $rapidPattern = '^switch_count=(?<switch_count>\d+)\s+stale_real_event_rejections=(?<stale_real_event_rejections>\d+)\s+generation_advances=(?<generation_advances>\d+)\s+media_epoch_advances=(?<media_epoch_advances>\d+)\s+monitor_errors=(?<monitor_errors>\d+)\s+post_release_sessions=(?<post_release_sessions>\d+)\s+post_release_groups=(?<post_release_groups>\d+)\s+post_release_live_actors=(?<post_release_live_actors>\d+)\s+post_release_retiring_actors=(?<post_release_retiring_actors>\d+)$'
+    $rapidPattern = '\Aswitch_count=(?<switch_count>\d+) in_flight_cancellation_suppressions=(?<in_flight_cancellation_suppressions>\d+) stale_prior_generation_rejections=(?<stale_prior_generation_rejections>\d+) fresh_post_switch_presentations=(?<fresh_post_switch_presentations>\d+) generation_advances=(?<generation_advances>\d+) media_epoch_advances=(?<media_epoch_advances>\d+) monitor_errors=(?<monitor_errors>\d+) post_release_sessions=(?<post_release_sessions>\d+) post_release_groups=(?<post_release_groups>\d+) post_release_live_actors=(?<post_release_live_actors>\d+) post_release_retiring_actors=(?<post_release_retiring_actors>\d+)\z'
     $rapidMatch = [regex]::Match($rapidEvidence, $rapidPattern)
     if (-not $rapidMatch.Success) {
         throw "Phase 0 rapid editor-state switching evidence is missing required fields: $rapidEvidence"
     }
-    foreach ($field in @('switch_count', 'stale_real_event_rejections', 'generation_advances', 'media_epoch_advances')) {
+    foreach ($field in @('switch_count', 'in_flight_cancellation_suppressions', 'stale_prior_generation_rejections', 'fresh_post_switch_presentations', 'generation_advances', 'media_epoch_advances')) {
         if ([int64]$rapidMatch.Groups[$field].Value -ne 8) {
             throw "Phase 0 rapid editor-state switching evidence has an unexpected ${field}: $rapidEvidence"
         }

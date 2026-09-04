@@ -32,14 +32,18 @@ strips 3–5 (210 MiB retained). Its evidence records `cumulative_bytes`,
 RGBA payload, not an operating-system RSS/commit measurement. Allow roughly
 280 MiB plus test-process overhead; this opt-in matrix is intentionally serial.
 
-`rapid_editor_state_switching` initializes one project, then performs exactly eight alternating
-snapshot restores. Before each restore it captures (without applying) one real 160x90 Software
-monitor frame, proves the monitor generation and media-analysis epoch advanced, and proves that
-the captured prior-generation event cannot update the new project's pixels or error state. It then
-waits for zero session, source-group, live-actor, and retiring-actor ownership. This is headless
-Software delayed-event/session-lifecycle evidence: because the event is captured before the switch,
-it does not claim active decode during switching, GUI/audio/hardware/scanout behavior, playback
-quality, or broader cross-hardware qualification.
+`rapid_editor_state_switching` initializes two project snapshots, then performs exactly eight alternating
+snapshot restores. It retains one completed real 160x90 Software event, then holds a distinct real
+request in flight at a test-only worker boundary and switches projects before consuming it. After
+release, normal production cancellation must suppress that in-flight request; zero session,
+source-group, live-actor, and retiring-actor ownership is required before continuing. The retained
+real event names the prior monitor generation and is
+rejected without changing pixels, offline state, or error state. A fresh request is then consumed
+and must present with the new project's media/path/playhead identity. The report requires exactly
+eight cancellation suppressions, eight stale prior-generation rejections, and eight fresh post-switch
+presentations, followed by zero session, source-group, live-actor, and retiring-actor ownership.
+This is headless Software decoder/session-lifecycle evidence: it does not claim GUI/audio/hardware/
+scanout behavior, playback quality, or broader cross-hardware qualification.
 
 The `four_source_decoded_frame_cache_pressure` scenario runs one bounded pass using four distinct
 fixture paths; its `iterations: 4` field counts the four exercised sources. It sizes the decoded-frame cache for exactly three 160x90 RGBA frames (57,600 bytes

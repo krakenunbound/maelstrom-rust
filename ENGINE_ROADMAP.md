@@ -128,11 +128,16 @@ Build the evidence harness before adding engine complexity.
       equal visual priority. A real two-permit/three-source scenario proves exact deferred-request
       identity, preservation of the newer resident, and zero final ownership. This is demand-driven,
       not a general time-based idle reaper; broader cross-hardware pressure remains open. The exact
-      rapid editor-state-switch scenario now initializes one snapshot and executes eight alternating
-      restores after capturing (but not applying) a real 160x90 Software frame each time. It proves
-      generation/media-analysis epoch advancement, stale-frame rejection, and zero post-release
-      sessions/source groups/live and retiring actors. This is headless Software delayed-event and
-      session-lifecycle evidence, not active decode during switching, GUI/audio/hardware/scanout,
+      rapid editor-state-switch scenario now initializes two project snapshots and executes eight alternating
+      restores while a distinct real 160x90 Software request is held in flight at a test-only worker
+      boundary. It switches before consumption, proves production cancellation suppresses that request
+      and quiesces ownership, then rejects a separately retained completed real event with an explicit
+      prior generation without changing pixels/offline/errors. It then presents a fresh active-project
+      event with the expected media/path/playhead identity. It requires eight cancellation suppressions,
+      eight stale prior-generation rejections, eight fresh presentations, generation/media-analysis epoch
+      advancement, and zero post-release sessions/source groups/live and retiring actors. This is
+      headless Software delayed-event and session-lifecycle evidence,
+      not GUI/audio/hardware/scanout,
       playback-quality, or broader cross-hardware proof.
       packaged executable passed the 600-second Full/Full real A/V loop soak on 2026-08-30 with 10 loops, 18,023 native
       uploads, zero held/late frames, zero monitor errors/fallback uploads, zero audio

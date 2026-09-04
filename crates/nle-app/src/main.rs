@@ -21271,9 +21271,11 @@ mod tests {
             second.set_playhead(nle_timeline::Tick(500_000));
             let second_snapshot = second.snapshot();
 
-            // This headless contract deliberately owns neither startup nor audio resources. It
-            // captures a real completed Software frame before each project reset, then proves
-            // that the production generation gate cannot present that delayed event afterward.
+            // This headless contract deliberately owns neither startup nor audio resources. Each
+            // cycle retains one completed real Software event for the generation gate, then holds
+            // a distinct real request at the test-only worker boundary while the project resets.
+            // Production cancellation must suppress that in-flight request; no DecodeEvent is
+            // fabricated to defeat its cancellation semantics.
             let mut app = App::new_without_startup_or_audio_for_monitor_contract();
             app.show_editor_screen(
                 "Phase 0 A".to_owned(),
@@ -21283,39 +21285,75 @@ mod tests {
                 false,
             );
             app.editor.force_software_decode = true;
-            let mut stale_real_event_rejections = 0_u32;
+            let mut in_flight_cancellation_suppressions = 0_u32;
+            let mut stale_prior_generation_rejections = 0_u32;
+            let mut fresh_post_switch_presentations = 0_u32;
             let mut generation_advances = 0_u32;
             let mut media_epoch_advances = 0_u32;
             for index in 0..8 {
+                // Keep both pre-switch requests far from the new project's restored frame. This
+                // avoids the deliberately backend-less monitor frame-cache reply: this gate
+                // specifically needs a real Software decoder completion, not a cache hit.
+                let (retained_tick, in_flight_tick) = if index % 2 == 0 {
+                    (250_000, 500_000)
+                } else {
+                    (750_000, 900_000)
+                };
+                app.editor.set_playhead(nle_timeline::Tick(retained_tick));
                 let mut preview = preview_request(&app.editor);
                 preview.output_size = [160, 90];
                 app.submit_monitor_decode_request(preview);
-                let request_id = app.monitor_latest_request_ids[0];
-                let captured_event = phase0_wait_for_monitor_event(&app.monitor_decoders[0], request_id)?;
-                match &captured_event {
-                    nle_decode::DecodeEvent::Frame(frame) => {
-                        if (frame.width, frame.height) != (160, 90) {
-                            return Err(format!(
-                                "editor state switch {index} captured {}x{} instead of 160x90",
-                                frame.width, frame.height
-                            ));
-                        }
-                        if frame.backend.map(|backend| backend.display_name()) != Some("Software") {
-                            return Err(format!(
-                                "editor state switch {index} did not capture a Software decoder frame"
-                            ));
-                        }
-                    }
+                let retained_request_id = app.monitor_latest_request_ids[0];
+                let retained_event = phase0_wait_for_monitor_event(
+                    &app.monitor_decoders[0],
+                    retained_request_id,
+                )?;
+                let retained_frame = match &retained_event {
+                    nle_decode::DecodeEvent::Frame(frame) => frame,
                     nle_decode::DecodeEvent::Error(error) => {
                         return Err(format!(
-                            "editor state switch {index} monitor decode failed before reset: {}",
+                            "editor state switch {index} retained monitor decode failed: {}",
                             error.message
                         ));
                     }
+                };
+                let retained_backend = retained_frame.backend.map(|backend| backend.display_name());
+                if (retained_frame.width, retained_frame.height) != (160, 90)
+                    || retained_backend != Some("Software")
+                {
+                    return Err(format!(
+                        "editor state switch {index} retained request {retained_request_id} returned {}x{} backend={retained_backend:?} media={} source_tick={} (expected 160x90 Software)",
+                        retained_frame.width,
+                        retained_frame.height,
+                        retained_frame.media_id,
+                        retained_frame.source_tick,
+                    ));
                 }
-
                 let prior_generation = app.monitor_generations[0];
                 let prior_media_epoch = app.media_analysis_epoch;
+                app.editor.set_playhead(nle_timeline::Tick(in_flight_tick));
+                let mut in_flight_preview = preview_request(&app.editor);
+                in_flight_preview.output_size = [160, 90];
+                let prior_request_id = app.monitor_next_request_id;
+                let prior_path = app
+                    .editor
+                    .playback_targets()
+                    .next()
+                    .ok_or_else(|| format!("editor state switch {index} has no active monitor source"))?
+                    .path
+                    .to_path_buf();
+                let barrier = nle_decode::install_test_decode_barrier(prior_request_id, prior_path);
+                app.submit_monitor_decode_request(in_flight_preview);
+                barrier.wait_until_blocked();
+                if !barrier.is_blocked()
+                    || !app.monitor_requests_in_flight[0]
+                    || app.monitor_latest_request_ids[0] != prior_request_id
+                {
+                    return Err(format!(
+                        "editor state switch {index} did not retain its real request in flight"
+                    ));
+                }
+
                 let (name, snapshot, expected_tick) = if index % 2 == 0 {
                     ("Phase 0 B", second_snapshot.clone(), 500_000)
                 } else {
@@ -21337,18 +21375,121 @@ mod tests {
                 if app.editor.monitor_frame_for_layer(0).is_some() || app.editor.media_is_offline(1) {
                     return Err(format!("editor state switch {index} did not reset active project monitor pixels/error"));
                 }
+                barrier.release();
+                let cancellation_deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    while let Some(event) = app.monitor_decoders[0]
+                        .try_recv()
+                        .map_err(|error| error.to_string())?
+                    {
+                        let event_request_id = match &event {
+                            nle_decode::DecodeEvent::Frame(frame) => frame.request_id,
+                            nle_decode::DecodeEvent::Error(error) => error.request_id,
+                        };
+                        if event_request_id == prior_request_id {
+                            return Err(format!(
+                                "editor state switch {index} cancellation emitted old in-flight request {prior_request_id}"
+                            ));
+                        }
+                    }
+                    let sessions = app.monitor_session_pool.diagnostics();
+                    let sources = app.monitor_source_coordinator.diagnostics();
+                    if sessions.active_sticky_sessions == 0
+                        && sources.live_source_groups == 0
+                        && sources.live_lane_actors == 0
+                        && sources.retiring_lane_actors == 0
+                    {
+                        break;
+                    }
+                    if Instant::now() >= cancellation_deadline {
+                        return Err(format!(
+                            "editor state switch {index} in-flight cancellation did not quiesce: sessions={sessions:?} sources={sources:?}"
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                in_flight_cancellation_suppressions += 1;
                 let errors_before_stale_apply = app.runtime_diagnostics().monitor_errors;
                 let mut adaptive_quality_changed = false;
-                if app.apply_monitor_decode_event(0, captured_event, &mut adaptive_quality_changed) {
-                    return Err(format!("editor state switch {index} accepted a stale real monitor frame"));
+                if retained_frame.project_epoch != prior_generation
+                    || retained_frame.project_epoch == app.monitor_generations[0]
+                    || retained_frame.media_id != 1
+                    || app
+                        .editor
+                        .playback_targets()
+                        .next()
+                        .map(|target| target.media_id)
+                        != Some(retained_frame.media_id)
+                    || app.monitor_last_proxy_frames[0].is_some()
+                {
+                    return Err(format!(
+                        "editor state switch {index} retained event was not eligible except for its prior generation"
+                    ));
                 }
-                stale_real_event_rejections += 1;
+                if app.apply_monitor_decode_event(0, retained_event, &mut adaptive_quality_changed) {
+                    return Err(format!("editor state switch {index} accepted a stale prior-generation real monitor frame"));
+                }
+                stale_prior_generation_rejections += 1;
                 if app.editor.monitor_frame_for_layer(0).is_some()
                     || app.editor.media_is_offline(1)
                     || app.runtime_diagnostics().monitor_errors != errors_before_stale_apply
                 {
-                    return Err(format!("editor state switch {index} stale real frame changed active project pixels/error"));
+                    return Err(format!("editor state switch {index} stale prior-generation real frame changed active project pixels/error"));
                 }
+                drop(barrier);
+
+                let mut fresh_preview = preview_request(&app.editor);
+                fresh_preview.output_size = [160, 90];
+                app.submit_monitor_decode_request(fresh_preview);
+                let fresh_request_id = app.monitor_latest_request_ids[0];
+                let fresh_event = phase0_wait_for_monitor_event(&app.monitor_decoders[0], fresh_request_id)?;
+                let fresh_frame = match &fresh_event {
+                    nle_decode::DecodeEvent::Frame(frame) => frame,
+                    nle_decode::DecodeEvent::Error(error) => {
+                        return Err(format!(
+                            "editor state switch {index} fresh post-switch decode failed: {}",
+                            error.message
+                        ));
+                    }
+                };
+                if fresh_frame.project_epoch != app.monitor_generations[0]
+                    || fresh_frame.request_id != fresh_request_id
+                    || fresh_frame.media_id != 1
+                    || fresh_frame.backend.map(|backend| backend.display_name()) != Some("Software")
+                {
+                    return Err(format!(
+                        "editor state switch {index} fresh event did not match the active project identity"
+                    ));
+                }
+                if !app.apply_monitor_decode_event(0, fresh_event, &mut adaptive_quality_changed) {
+                    return Err(format!("editor state switch {index} did not present fresh post-switch monitor pixels"));
+                }
+                let expected_source_tick = app.monitor_last_requests[0]
+                    .ok_or_else(|| format!("editor state switch {index} did not retain fresh monitor request"))?
+                    .source_tick;
+                let presented_identity = app.editor.monitor_frame_for_layer(0).is_some_and(|frame| {
+                    frame.media_id == Some(1)
+                        && frame.source_tick.is_some_and(|tick| {
+                            (expected_source_tick..=expected_source_tick + 33_367).contains(&tick.0)
+                        })
+                });
+                let target_path = app
+                    .editor
+                    .playback_targets()
+                    .next()
+                    .map(|target| target.path);
+                let source_path = app
+                    .monitor_source_identities[0]
+                    .as_ref()
+                    .map(|identity| identity.path.as_path());
+                if !presented_identity
+                    || target_path != Some(media.as_path())
+                    || source_path != Some(media.as_path())
+                    || app.editor.playhead.0 != expected_tick
+                {
+                    return Err(format!("editor state switch {index} fresh presentation lost expected media/path/playhead identity"));
+                }
+                fresh_post_switch_presentations += 1;
             }
             let mut release_preview = preview_request(&app.editor);
             release_preview.sources = [None; MONITOR_LAYER_COUNT];
@@ -21384,7 +21525,7 @@ mod tests {
             Ok((
                 Some("Software".to_owned()),
                 format!(
-                    "switch_count=8 stale_real_event_rejections={stale_real_event_rejections} generation_advances={generation_advances} media_epoch_advances={media_epoch_advances} monitor_errors=0 post_release_sessions={post_release_sessions} post_release_groups={post_release_groups} post_release_live_actors={post_release_live_actors} post_release_retiring_actors={post_release_retiring_actors}"
+                    "switch_count=8 in_flight_cancellation_suppressions={in_flight_cancellation_suppressions} stale_prior_generation_rejections={stale_prior_generation_rejections} fresh_post_switch_presentations={fresh_post_switch_presentations} generation_advances={generation_advances} media_epoch_advances={media_epoch_advances} monitor_errors=0 post_release_sessions={post_release_sessions} post_release_groups={post_release_groups} post_release_live_actors={post_release_live_actors} post_release_retiring_actors={post_release_retiring_actors}"
                 ),
             ))
         },
