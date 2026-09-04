@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Assert-HardwareTransferTiming.ps1')
 
 function Restore-EnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name, $Value)
@@ -412,6 +413,10 @@ try {
                 $failureStage = "decoder.$stageName"
                 Assert-TimingStage -Stage $surface.decoder_stage_timings.$stageName -Context "$adapterClass decoder stage $stageName" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms')
             }
+            $failureStage = 'decoder.hardware_transfer'
+            Assert-HardwareTransferTiming -Stage $surface.decoder_stage_timings.hardware_transfer `
+                -DecoderBackends @($surface.decoder_backends) `
+                -Context "$adapterClass decoder stage hardware_transfer"
             $failureStage = 'decoder.named_decoder_reopen'
             Assert-TimingStage -Stage $surface.decoder_stage_timings.named_decoder_reopen -Context "$adapterClass decoder stage named_decoder_reopen" -Properties @('samples', 'total_ms', 'mean_ms', 'max_ms') -AllowZeroSamples
             $failureComponent = 'viewer'

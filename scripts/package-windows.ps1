@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Assert-HardwareTransferTiming.ps1')
 
 function Test-JsonIntegerValue {
     param($Value)
@@ -494,7 +495,7 @@ try {
             $surfaceSubmission.display_refresh_millihertz -lt 1)) {
         throw 'Surface submission probe returned incomplete performance environment metadata.'
     }
-    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'hardware_transfer', 'scaler', 'rgba_copy_letterbox', 'worker_request', 'named_decoder_reopen')) {
+    foreach ($stageName in @('cache_lookup', 'demux_packet', 'decoder_calls', 'scaler', 'rgba_copy_letterbox', 'worker_request', 'named_decoder_reopen')) {
         $stage = $surfaceSubmission.decoder_stage_timings.$stageName
         if ($null -eq $stage) { throw "Surface submission probe omitted decoder stage $stageName." }
         foreach ($property in @('samples', 'total_ms', 'mean_ms', 'max_ms')) {
@@ -523,6 +524,9 @@ try {
             }
         }
     }
+    Assert-HardwareTransferTiming -Stage $surfaceSubmission.decoder_stage_timings.hardware_transfer `
+        -DecoderBackends @($surfaceSubmission.decoder_backends) `
+        -Context 'Decoder timing stage hardware_transfer'
     foreach ($stageName in @('output_callback_cpu', 'mix_render_cpu')) {
         $stage = $surfaceSubmission.audio_stage_timings.$stageName
         if ($null -eq $stage) { throw "Surface submission probe omitted audio stage $stageName." }

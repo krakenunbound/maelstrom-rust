@@ -5864,6 +5864,12 @@ mod tests {
 
     #[test]
     fn backend_identity_and_cpu_transfer_requirements_are_stable() {
+        assert_eq!(DecodeBackend::Software.display_name(), "Software");
+        assert_eq!(
+            DecodeBackend::IntelQuickSync.display_name(),
+            "Intel Quick Sync"
+        );
+        assert_eq!(DecodeBackend::Nvidia.display_name(), "NVIDIA CUVID");
         assert_eq!(
             DecodeBackend::VideoToolbox.display_name(),
             "Apple VideoToolbox"

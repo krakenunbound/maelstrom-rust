@@ -256,7 +256,11 @@ without launching the editor, FFmpeg, or FFprobe and without changing retained e
 `observation_scope`: submission, present-call CPU, and completed GPU submissions are independently
 reported, while `physical_scanout_observed` remains false until supported instrumentation exists.
 It also requires the additive `named_decoder_reopen` stage, without requiring nonzero samples in an
-ordinary smoke run. The preceding retained cross-adapter evidence is schema 7; schema 8 was never
+ordinary smoke run. Hardware-transfer timing is validated against the exact serialized decoder
+backend identities: Apple VideoToolbox, Windows D3D11VA, and Windows DXVA2 require transfer samples;
+Software, Intel Quick Sync, and NVIDIA CUVID may correctly report zero. Unknown or blank identities
+and malformed timing aggregates are rejected. This is validator-only contract coverage, not new
+runtime or hardware evidence. The preceding retained cross-adapter evidence is schema 7; schema 8 was never
 requalified before schema 9 superseded it. A fresh explicitly authorized editor run is therefore
 required before the current surface contract can be qualified. A pass has `failure: null`. Once the
 report destination has been validated and the exclusive run lock acquired, the runner attempts to

@@ -170,7 +170,11 @@ Build the evidence harness before adding engine complexity.
       encode, optional compositor GPU execution, GPU submit-to-completion, audio mix, and surface
       present-call CPU time. Decoder/audio cumulative aggregates are labeled mean/max; bounded
       viewer/GPU windows are labeled p95/max; every observed row includes its sample count, while
-      unsupported or unobserved stages remain explicitly unavailable. It also reports active video
+      unsupported or unobserved stages remain explicitly unavailable. Hardware-transfer report
+      validation is backend-aware: Apple VideoToolbox, Windows D3D11VA, and Windows DXVA2 require
+      observed transfer timing, while Software, Intel Quick Sync, and NVIDIA CUVID may serialize a
+      zero transfer stage. This validator contract adds no new runtime or hardware qualification
+      evidence. It also reports active video
       layers and selected-to-resolved preview quality. The compositor callback snapshot uses a
       non-blocking lock attempt, so HUD collection cannot wait on rendering.
       Physical scanout remains unobserved, so this item stays open.

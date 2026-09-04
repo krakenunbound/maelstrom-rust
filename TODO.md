@@ -65,6 +65,10 @@ Last updated: 2026-09-04
   overstated scope. The preceding Intel/NVIDIA schema-7 runs remain historical evidence; schema 8
   was not requalified before being superseded. A fresh schema-9 windowed run still requires explicit
   editor-launch permission. See `docs/performance-reports.md`.
+- [x] Make Phase 0 hardware-transfer timing evidence backend-aware. Shared package and
+  cross-adapter validation now accepts zero samples only for observed CPU-readable serialized
+  backends and rejects unknown identities or contradictory/malformed aggregates. The synthetic
+  PowerShell contract adds no runtime or hardware evidence.
 - [x] Close the Phase 2 integrated Auto-preview gate without lowering the user's selected quality.
   A schema-1 headless app test uses two independent real 1920x1080 sources, observes Auto Full
   640x360, applies four disclosed controller-pressure samples through the production completion
