@@ -36,3 +36,23 @@ if ($hashBefore -ne $hashAfter) {
     throw 'Manifest coverage contract mutated fixtures/media/manifest.json.'
 }
 Write-Output 'Manifest coverage contract fixture: PASS (rejected incomplete in-memory view; manifest hash unchanged)'
+
+$imageOutput = @()
+$imageRejected = $false
+try {
+    $imageOutput = @(& $validator -ManifestOnly -ManifestImageContractFixture 2>&1)
+}
+catch {
+    $imageRejected = $true
+    $imageOutput = @($_.Exception.Message)
+}
+if (-not $imageRejected) {
+    throw 'Manifest image contract fixture unexpectedly passed.'
+}
+if (($imageOutput -join [Environment]::NewLine) -notmatch 'Image fixture is missing pixel_format') {
+    throw 'Manifest image contract fixture failed for an unexpected reason.'
+}
+if ($hashBefore -ne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash) {
+    throw 'Manifest image contract fixture mutated fixtures/media/manifest.json.'
+}
+Write-Output 'Manifest image contract fixture: PASS (rejected incomplete in-memory image metadata; manifest hash unchanged)'

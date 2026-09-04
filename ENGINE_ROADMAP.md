@@ -90,6 +90,10 @@ Build the evidence harness before adding engine complexity.
       The six-channel PCM fixture uses distinct 5.1 tones and pins its FFprobe layout, size, and
       hash; manifest-only validation rejects loss of any audio layout class. Mixer and export
       multichannel parity remain separate later-phase gates.
+- [x] Add a deterministic RGBA PNG still-image fixture to the generated corpus. FFprobe pins only
+      PNG codec/container; direct PNG validation pins 160×90 8-bit RGBA IHDR/chunks/alpha coverage,
+      size, and hash. This remains corpus-only evidence, not editor import, alpha compositing, or
+      export parity.
 - [x] Add an opt-in real-media corpus runner for large local files.
 - [x] Record renderer GPU, decoder backend, encoder backend, driver, CPU, RAM, preview scale, cache
       cap, and display refresh in every performance report.

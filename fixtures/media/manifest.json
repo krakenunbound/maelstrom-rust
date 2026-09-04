@@ -214,6 +214,19 @@
       "expected": "success"
     },
     {
+      "id": "alpha-pattern-rgba-png",
+      "path": "alpha-pattern-rgba.png",
+      "source": "generated",
+      "provenance": "Deterministic PowerShell PNG writer in scripts/Generate-MediaFixtures.ps1",
+      "generation_recipe": "160x90 8-bit RGBA gradient; red and alpha vary across X, green across Y, blue across X+Y; no-compression zlib PNG",
+      "sha256": "DF42DD9D20420A0C0AA2E79BCF69FB90791020DC69035F5B1738896AD66FE0BD",
+      "byte_size": 57763,
+      "container": "png_pipe",
+      "image": { "format": "png", "width": 160, "height": 90, "pixel_format": "rgba" },
+      "duration_seconds": 0.0,
+      "expected": "success"
+    },
+    {
       "id": "truncated-header",
       "path": "truncated-header.bin",
       "source": "generated",

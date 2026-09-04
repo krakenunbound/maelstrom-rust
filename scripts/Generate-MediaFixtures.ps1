@@ -42,6 +42,65 @@ function Invoke-FixtureFfmpeg([string[]]$Arguments, [string]$Target) {
     }
 }
 
+function Add-BigEndianUInt32([Collections.Generic.List[byte]]$Bytes, [uint32]$Value) {
+    $Bytes.Add([byte](($Value -shr 24) -band 0xFF))
+    $Bytes.Add([byte](($Value -shr 16) -band 0xFF))
+    $Bytes.Add([byte](($Value -shr 8) -band 0xFF))
+    $Bytes.Add([byte]($Value -band 0xFF))
+}
+
+function Get-Crc32([byte[]]$Bytes) {
+    [uint32]$crc = 4294967295
+    foreach ($value in $Bytes) {
+        $crc = $crc -bxor [uint32]$value
+        for ($bit = 0; $bit -lt 8; $bit++) {
+            if (($crc -band 1) -ne 0) { $crc = ($crc -shr 1) -bxor [uint32]3988292384 }
+            else { $crc = $crc -shr 1 }
+        }
+    }
+    return $crc -bxor [uint32]4294967295
+}
+
+function Add-PngChunk([Collections.Generic.List[byte]]$Png, [string]$Type, [byte[]]$Data) {
+    $typeBytes = [Text.Encoding]::ASCII.GetBytes($Type)
+    $crcBytes = [Collections.Generic.List[byte]]::new()
+    $crcBytes.AddRange($typeBytes)
+    $crcBytes.AddRange($Data)
+    Add-BigEndianUInt32 $Png ([uint32]$Data.Length)
+    $Png.AddRange($typeBytes)
+    $Png.AddRange($Data)
+    Add-BigEndianUInt32 $Png (Get-Crc32 $crcBytes.ToArray())
+}
+
+function New-DeterministicRgbaPng([string]$Target) {
+    $width = 160
+    $height = 90
+    $raw = [Collections.Generic.List[byte]]::new()
+    for ($y = 0; $y -lt $height; $y++) {
+        $raw.Add(0) # PNG filter type: None
+        for ($x = 0; $x -lt $width; $x++) {
+            $raw.Add([byte][Math]::Floor(255 * $x / ($width - 1)))
+            $raw.Add([byte][Math]::Floor(255 * $y / ($height - 1)))
+            $raw.Add([byte][Math]::Floor(255 * ($x + $y) / (($width - 1) + ($height - 1))))
+            $raw.Add([byte][Math]::Floor(255 * $x / ($width - 1)))
+        }
+    }
+    $compressed = [IO.MemoryStream]::new()
+    $zlib = [IO.Compression.ZLibStream]::new($compressed, [IO.Compression.CompressionLevel]::NoCompression, $true)
+    try { $zlib.Write($raw.ToArray(), 0, $raw.Count) }
+    finally { $zlib.Dispose() }
+    $png = [Collections.Generic.List[byte]]::new()
+    $png.AddRange([byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+    $header = [Collections.Generic.List[byte]]::new()
+    Add-BigEndianUInt32 $header $width
+    Add-BigEndianUInt32 $header $height
+    $header.AddRange([byte[]](8, 6, 0, 0, 0)) # 8-bit RGBA, no interlacing
+    Add-PngChunk $png 'IHDR' $header.ToArray()
+    Add-PngChunk $png 'IDAT' $compressed.ToArray()
+    Add-PngChunk $png 'IEND' ([byte[]]::new(0))
+    [IO.File]::WriteAllBytes($Target, $png.ToArray())
+}
+
 # This mirrors the deterministic package acceptance source while keeping the fixture short.
 $avPath = Join-Path $outputPath 'bars-aac-2997.mp4'
 Invoke-FixtureFfmpeg @(
@@ -115,6 +174,10 @@ Invoke-FixtureFfmpeg @(
     '-f', 'lavfi', '-i', 'aevalsrc=sin(2*PI*220*t)|sin(2*PI*330*t)|sin(2*PI*440*t)|sin(2*PI*55*t)|sin(2*PI*550*t)|sin(2*PI*660*t):sample_rate=48000:channel_layout=5.1', '-t', '1',
     '-c:a', 'pcm_s16le', '-ar', '48000'
 ) $surroundWavPath
+
+# A compact still-image fixture with transparent, translucent, and opaque regions.
+$imagePath = Join-Path $outputPath 'alpha-pattern-rgba.png'
+New-DeterministicRgbaPng $imagePath
 
 $corruptPath = Join-Path $outputPath 'truncated-header.bin'
 [IO.File]::WriteAllBytes($corruptPath, [byte[]](0x00, 0x00, 0x00, 0x0C, 0x66, 0x74, 0x79, 0x70, 0x6D, 0x70, 0x34, 0x32))

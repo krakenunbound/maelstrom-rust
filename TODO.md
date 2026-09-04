@@ -62,6 +62,11 @@ Last updated: 2026-09-04
   pins six distinct 5.1 channels, layout, duration, byte size, and hash. Manifest-only validation
   now requires mono, stereo, and multichannel classes and proves missing multichannel coverage is
   rejected without touching files or running FFmpeg. This is corpus evidence, not mixer/export parity.
+- [x] Add a deterministic RGBA PNG still-image fixture to the Phase 0 corpus. FFprobe proves only
+  PNG codec/container on the pinned build; direct PNG validation proves the 160×90 8-bit RGBA
+  IHDR/chunks/alpha coverage, byte size, and hash. The manifest-only negative contract proves
+  required image metadata cannot be omitted. This is corpus evidence only, not still-image import,
+  alpha compositing, preview, or export parity.
 - [x] Make Phase 0 surface-observation limits machine-readable. Surface report schema 9 now
   distinguishes observed surface submission, present-call CPU time, and completed GPU submissions
   from physical scanout, which remains explicitly false, and carries the optional named-decoder

@@ -36,6 +36,12 @@ BL 550 Hz, BR 660 Hz), so future decode, mixer, routing, and export checks can d
 instead of treating a silent layout tag as evidence. The manifest pins its six-channel `5.1`
 FFprobe identity, exact byte size, and SHA-256. This is corpus coverage only; it does not claim that
 the current mixer or exporter preserves every multichannel layout.
+`alpha-pattern-rgba.png` is a generated 160×90 PNG with a deterministic RGBA gradient and varying
+alpha values. The pinned FFmpeg build's FFprobe proves only its PNG codec and `png_pipe` container;
+direct validator parsing proves valid chunk CRCs, 160×90 non-interlaced 8-bit RGBA IHDR metadata,
+safe IDAT/IEND structure, scanline bytes, and transparent/translucent/opaque alpha coverage. This
+is corpus-only still-image evidence: it does not claim that the editor's import, texture upload,
+preview compositing, or export preserves every alpha value.
 `vfr-reordered-shifted-mpeg4.mp4` combines the same eight-frame selection at 320×180/30 fps with
 a three-second presentation origin and MPEG-4 B-frames. Its MP4 contract pins Advanced Simple
 Profile/yuv420p, decoded presentation PTS from 3.000000 to 3.400000 seconds, packet-order PTS,
