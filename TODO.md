@@ -9,6 +9,21 @@ Last updated: 2026-09-04
 
 ## Current stopping point
 
+- [x] Refresh the portable Windows package from clean commit `d6f6271` after the shifted
+  Matroska-duration fix and current Phase 0 fixture work. The recoverable previous 23-file package
+  is hash-verified at
+  `dist\package-backups\Maelstrom-Windows-x64-pre-d6f6271-0FC9345A514A`; only
+  `Maelstrom.exe` and `PACKAGE-STATUS.json` changed. The new executable matches the release build
+  at SHA-256 `37F7EB9AABCE560ACAC3D164C00439710436A8BA004551718A1A42D1F7AA108D`.
+  All 13 pinned FFmpeg runtime copies and authorized supporting files match their sources, all 15
+  PE files are AMD64, and 115 static import edges resolve as 43 adjacent, 60 Windows modules, and
+  12 API-set contracts with none unresolved. Restricted-path FFmpeg/FFprobe loading and the exact
+  full-path launcher's `--verify-runtime` branch pass. No editor was launched; `smoke_status`
+  remains `not_run`, so schema-9 windowed qualification still requires explicit launch permission.
+  Package assembly now completes in a GUID-named sibling staging directory before activation;
+  move-with-rollback preserves the prior live package on an injected activation failure, and
+  incomplete staging is cleaned without deleting an unrestored rollback. Focused activation and
+  existing launcher-contract tests pass, followed by a complete staged `-SkipSmoke` rebuild.
 - [x] Rebuild the portable Windows package from clean commit `c3cfebe` with the schema-9
   surface-report contract, using the supported `-SkipSmoke` path. The packaged executable matches
   `target\release\nle-app.exe` at SHA-256

@@ -11,6 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-HardwareTransferTiming.ps1')
 . (Join-Path $PSScriptRoot 'Assert-Phase0SurfaceTimingReport.ps1')
+. (Join-Path $PSScriptRoot 'Activate-PackageStaging.ps1')
 
 function Test-JsonIntegerValue {
     param($Value)
@@ -138,14 +139,17 @@ function Resolve-VcRedistCrtDirectory {
 $savedProcessPath = $env:PATH
 $savedFfmpegDir = $env:FFMPEG_DIR
 $savedLibClangPath = $env:LIBCLANG_PATH
+$stagingOutput = $null
 try {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$output = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'dist\Maelstrom-Windows-x64'))
+$liveOutput = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'dist\Maelstrom-Windows-x64'))
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'dist'))
 $distPrefix = $distRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-if (-not $output.StartsWith($distPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not $liveOutput.StartsWith($distPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to package outside $distRoot"
 }
+$stagingOutput = Join-Path $distRoot ('.Maelstrom-Windows-x64.staging-{0}' -f [guid]::NewGuid().ToString('N'))
+$output = [System.IO.Path]::GetFullPath($stagingOutput)
 $bundleRoot = [System.IO.Path]::GetFullPath($FfmpegBundleRoot)
 $bundleBin = Join-Path $bundleRoot 'bin'
 $ffmpeg = Join-Path $bundleBin 'ffmpeg.exe'
@@ -222,9 +226,6 @@ try {
     Pop-Location
 }
 
-if (Test-Path -LiteralPath $output) {
-    Remove-Item -LiteralPath $output -Recurse -Force
-}
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\nle-app.exe') -Destination (Join-Path $output 'Maelstrom.exe')
 Copy-Item -LiteralPath $ffmpeg -Destination $output
@@ -304,6 +305,10 @@ $packageStatus = [ordered]@{
     smoke_status = if ($SkipSmoke) { 'not_run' } else { 'not_passed' }
 }
 $packageStatus | ConvertTo-Json | Set-Content -LiteralPath $packageStatusPath -Encoding utf8
+Invoke-PackageStagingActivation -StagingDirectory $output -LiveDirectory $liveOutput | Out-Null
+$output = $liveOutput
+$packageExePath = Join-Path $output 'Maelstrom.exe'
+$packageStatusPath = Join-Path $output 'PACKAGE-STATUS.json'
 if ($SkipSmoke) {
     Write-Warning 'Skipped GUI smoke checks. This new package is unqualified; dist\last-*-smoke.json reports are historical.'
     return (Get-Item -LiteralPath $packageExePath)
@@ -595,6 +600,13 @@ try {
 
 Get-Item -LiteralPath $packageExePath
 } finally {
+    if ($null -ne $stagingOutput -and (Test-Path -LiteralPath $stagingOutput -PathType Container)) {
+        try {
+            Remove-Item -LiteralPath $stagingOutput -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Could not remove incomplete package staging directory ${stagingOutput}: $($_.Exception.Message)"
+        }
+    }
     $env:PATH = $savedProcessPath
     if ($null -eq $savedFfmpegDir) {
         Remove-Item Env:FFMPEG_DIR -ErrorAction SilentlyContinue

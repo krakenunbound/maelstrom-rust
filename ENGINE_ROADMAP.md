@@ -329,6 +329,18 @@ Exit gate:
       `AE41C32043A3CDA34EA3B944EC292D461B5ECABF4F1A86A3E7B408E7E8C0A608`.
       This remains headless CPU/decode evidence rather than GUI, package, GPU, physical
       input/scanout, or cross-hardware completion.
+      The portable package was refreshed without a GUI launch from clean commit `d6f6271` after
+      the shifted Matroska-duration correction. Its executable matches the release build at
+      SHA-256 `37F7EB9AABCE560ACAC3D164C00439710436A8BA004551718A1A42D1F7AA108D`;
+      all 23 files, pinned runtime/source copies, AMD64 PE identities, all 115 static import edges, restricted-path
+      FFmpeg/FFprobe loading, and exact full-path launcher runtime validation pass. Only the
+      executable and package status differ from the verified recoverable prior package. This
+      renews static package readiness only: `smoke_status` remains `not_run`, and windowed schema-9,
+      physical scanout, and cross-hardware qualification remain open.
+      Packaging now assembles and validates a GUID-named sibling staging tree before changing the
+      live package. Activation uses a same-parent move with rollback; focused success, first-install,
+      and injected-failure tests prove replacement or restoration without leaving staging/rollback
+      artifacts. The complete non-launching package path passes through the staged implementation.
 - [x] A failing codec, driver, or stage is identifiable from one report without guessing.
       The full-surface qualification wrapper now uses schema 2 on both pass and operational
       failure and attempts atomic publication once it owns the report lock. Its failure envelope

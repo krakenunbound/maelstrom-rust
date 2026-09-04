@@ -312,6 +312,42 @@ schema-9 windowed run remains permission-gated to the exact full-path launcher. 
 evidence is retained locally at `artifacts/package-schema9-c3cfebe/verification.json`: 3,378 bytes,
 SHA-256 `1F4F33952A321722788D728C7804C3E85C242E8A87F3EC7203528ACBF97249B7`.
 
+### Current non-launching package refresh — 2026-09-04
+
+The portable package was rebuilt through `scripts/package-windows.ps1 -SkipSmoke` from the clean
+tracked tree at commit `d6f6271ee20582e29e00924eecc26095ca3928f1`, after the shifted
+Matroska-duration correction and current Phase 0 fixture work. The packaged `Maelstrom.exe`
+exactly matches `target\release\nle-app.exe` at SHA-256
+`37F7EB9AABCE560ACAC3D164C00439710436A8BA004551718A1A42D1F7AA108D`.
+
+Before replacement, the prior 23-file package was copied to
+`H:\Maelstrom Rust\dist\package-backups\Maelstrom-Windows-x64-pre-d6f6271-0FC9345A514A`.
+Every relative file hash was compared after the copy; the retained prior executable has SHA-256
+`0FC9345A514A25963A7E2C1FADB54813889853516D348CD472C527E7BB3266C8`. Only
+`Maelstrom.exe` and `PACKAGE-STATUS.json` differ between the two package trees.
+
+Post-build verification found 23 files, all 13 expected pinned FFmpeg command/runtime copies
+matching the approved bundle, exact notice/license/build-manifest/model-manifest copies, and the
+authorized Visual Studio AMD64 CRT. All 15 PE files are AMD64. A read-only static dependency walk
+classified 115 import edges as 43 package-adjacent, 60 present Windows modules, and 12 API-set
+contracts, with no unresolved non-contract dependency. Packaged FFmpeg and FFprobe load with a
+restricted package-plus-Windows `PATH`; the exact
+`H:\Maelstrom Rust\Launch-Maelstrom-Editor.bat --verify-runtime` branch passes and returns before
+the launch branch.
+
+The packaging path no longer deletes the live package before assembling its replacement.
+`scripts/package-windows.ps1` now copies and validates the candidate in a GUID-named sibling
+staging directory, moves the prior live directory to a temporary same-parent rollback, and then
+activates the complete candidate. An activation failure restores the prior live directory; an
+unrestored rollback is never deleted. Focused tests cover replacement, first installation, and an
+injected activation failure, and the complete `-SkipSmoke` package path subsequently passed with
+no staging or rollback directory left behind.
+
+This is static package readiness only. `PACKAGE-STATUS.json` records `smoke_status: "not_run"`.
+No editor, native window, media/export smoke, schema-9 runtime report, DWM path, or physical scanout
+was exercised. Fresh integrated/discrete windowed qualification remains permission-gated to the
+exact full-path launcher.
+
 The focused failure-contract check uses a validation-only, fixed-path synthetic runtime-closure
 seam (it cannot supply a package path or launch the editor) and verifies the schema-2 `package` /
 `runtime_closure` diagnosis:
